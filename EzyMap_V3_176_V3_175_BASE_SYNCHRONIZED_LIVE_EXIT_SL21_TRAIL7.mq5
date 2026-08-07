@@ -956,6 +956,9 @@ ExitExecutionState g_exitExecutionStates[];
 DirectZeroConfState g_directZeroConf;
 bool   g_directZeroConfHasPreviousCMP=false;
 double g_directZeroConfPreviousCMP=0.0;
+// Distinct id space so direct zero-conf trades cannot collide with the
+// TimeCurrent()*10+direction ids QueuePersistentSetup() assigns.
+long   g_directZeroConfSerial=0;
 
 bool   g_deployFailureSet=false;
 bool   g_deployFailureTemporary=false;
@@ -1024,6 +1027,7 @@ bool ResolveDirectZeroConfTrigger(int direction,double observedLo,double observe
                                   int &triggerCode,int &triggerPriority,
                                   datetime &reclaimTime);
 bool DirectZeroConfRetryElapsed();
+string PersistentTag(long id);
 int CountOurLosingPositionsByDirection(int direction);
 bool DirectionalLosingPositionCapacityAvailable(int direction,string context);
 void CancelPendingOrdersAtDirectionalLosingCap(int direction);
@@ -2263,8 +2267,18 @@ bool SubmitDirectZeroConfMarket()
       return false;
    }
 
-   string comment=PREFIX+"DIRECT_ZC_"+string(direction==1?"BUY_":"SELL_")+
-                  IntegerToString(g_directZeroConf.attempts);
+   // Tagged as an "EZR..." setup (single layer) instead of the old
+   // PREFIX+"DIRECT_ZC_..." comment. The old tag never matched
+   // ParsePersistentComment()'s required "EZR" prefix, so every direct
+   // zero-conf trade was silently excluded from WriteEzyMapBacktestReport()'s
+   // CSV/summary and from RegisterDealAnalytics() - it still traded and still
+   // affected the account, it just never showed up in that report, which is
+   // why its totals (trade count and net P/L) never reconciled with the
+   // account's real balance change or with ReportJournalPerformance().
+   g_directZeroConfSerial++;
+   long directZcId=5000000000000+g_directZeroConfSerial;
+   string comment=PersistentTag(directZcId)+" L1/1 DZC-"+
+                  string(direction==1?"BUY":"SELL");
 
    bool sent=(direction==1)
              ? trade.Buy(volume,_Symbol,0.0,brokerSL,0.0,comment)
@@ -2298,7 +2312,8 @@ bool SubmitDirectZeroConfMarket()
 
    g_dailyLayerOrders++;
 
-   Log("DIRECT ZERO-CONF MARKET EXECUTED | trigger="+g_directZeroConf.triggerText+
+   Log("DIRECT ZERO-CONF MARKET EXECUTED | signal="+(string)directZcId+
+       " | trigger="+g_directZeroConf.triggerText+
        " | direction="+string(direction==1?"BUY":"SELL")+
        " | volume="+DoubleToString(volume,VolumeDigits())+
        " | attempts="+IntegerToString(g_directZeroConf.attempts)+
