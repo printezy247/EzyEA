@@ -1,0 +1,302 @@
+; EzyMap Scalp Mastery V2.2 BTC - EzyMap_V2_2_BTCUSD_RECOMMENDED.set
+;
+; ############################################################################
+; #  NOT VALIDATED. NOT BACKTESTED. DO NOT TRADE THIS LIVE AS SHIPPED.       #
+; #                                                                          #
+; #  Every number below is a STRUCTURALLY REASONED starting point, not a     #
+; #  tuned one. The build environment that produced this file had no MQL5    #
+; #  toolchain and no BTC price history, so nothing here has been run        #
+; #  through a single bar of data. Treat it as "the shape of a BTC config",  #
+; #  and re-derive the magnitudes from your own broker's symbol before you   #
+; #  risk money. V2_2_BTCUSD_CHANGES.md has a per-number retune checklist.   #
+; ############################################################################
+;
+; Load this ON TOP of your V2.1b working set, on a BTCUSD or BTCUSD.sc chart.
+; Every input not listed keeps its current value.
+;
+; ---------------------------------------------------------------------------
+; THE ONE ASSUMPTION EVERYTHING ELSE HANGS OFF
+; ---------------------------------------------------------------------------
+; StrategyPipSize() returns MathMax(1.0,_Point) for BTC, so ONE STRATEGY PIP
+; ON BTC IS ONE US DOLLAR. On gold it is ten cents. Every "...Pips" input in
+; this EA is therefore a DOLLAR AMOUNT on BTC and a DIME AMOUNT on gold.
+;
+; Gold M5 ATR(14) typically runs about $0.80-$1.50, i.e. 8-15 strategy pips.
+; BTC M5 ATR(14) typically runs about $50-$150, i.e. 50-150 strategy pips.
+; That is roughly an ORDER OF MAGNITUDE more pips for the same shape of move.
+;
+; So the working rule used throughout this file is: MULTIPLY GOLD'S FLAT PIP
+; COUNTS BY 10. That preserves the RISK SHAPE (stop-to-ATR ratio, tolerance-
+; to-ATR ratio, arm-to-stop ratio) rather than the absolute numbers, which is
+; the only thing that can transfer between two instruments this different.
+;
+; ***  THE x10 IS THE ASSUMPTION MOST LIKELY TO BE WRONG.  ***
+; BTC's volatility regime moves by a factor of 3-5 over a year in a way
+; gold's does not. Read the actual figure off the OnInit log line
+;   V2.2 BTC INSTRUMENT PROFILE ...
+; and off RefreshGeometryATR()'s cached value, then rescale. If your BTC M5
+; ATR is 30 pips rather than 100, everything below is roughly 3x too wide.
+;
+; ---------------------------------------------------------------------------
+; 1. ATR GEOMETRY - ON. This is the important one.
+; ---------------------------------------------------------------------------
+; V3.190 S03 is the correct lever for BTC precisely because it is SELF-
+; RELATIVE: the stop is a multiple of the instrument's own current ATR, so it
+; tracks a volatility regime shift automatically. The three MULTIPLIERS are
+; dimensionless ratios and are deliberately LEFT AT GOLD'S TUNED VALUES -
+; they encode the strategy's shape, not the instrument's scale.
+;
+; Only the FLOOR and CEILING are rescaled, because those three are the only
+; ATR-geometry inputs denominated in pips (= dollars on BTC).
+;   floor   12 -> 120   ceiling 35 -> 350   trail floor 5 -> 50
+InpUseATRGeometry=true
+InpATRPeriod=14
+InpATRTimeframe=5
+InpATRStopMultiplier=1.60
+InpATRTrailMultiplier=0.55
+InpATRArmMultiplier=0.35
+InpATRStopFloorPips=120.0
+InpATRStopCeilingPips=350.0
+InpATRTrailFloorPips=50.0
+;
+; SANITY CHECK YOU MUST DO BEFORE RUNNING THIS:
+; with M5 ATR = 100 pips, the resolved stop is 1.60*100 = 160, comfortably
+; inside [120,350], which is what you want - the clamp should be a guard rail,
+; not the operative value. If your ATR is 30, the stop wants to be 48 and the
+; FLOOR of 120 overrides it, so every trade silently gets a 2.5x-too-wide
+; stop and the sizing shrinks to match. If the floor or the ceiling is doing
+; the work on most trades, the numbers are wrong. Check the log.
+;
+; ---------------------------------------------------------------------------
+; 2. STOP / TRAIL / BREAKEVEN PIP INPUTS
+; ---------------------------------------------------------------------------
+; WITH InpUseATRGeometry=true, SOME OF THESE ARE OVERWRITTEN AT RUNTIME AND
+; SOME ARE NOT. The exact trace is in V2_2_BTCUSD_CHANGES.md; the summary is:
+;
+;   FULLY SUPERSEDED (value replaced in ResolveATRGeometryPips):
+;     InpPresetStopLossPips, InpTrailArmPips, InpTrailInitialDistancePips
+;   PARTIALLY LIVE (rescaled by the ratio atrInitial/InpTrailInitialDistance-
+;   Pips, so their RATIO to InpTrailInitialDistancePips still matters):
+;     InpTrailTightDistancePips, InpTrailTightenAtPips
+;   NEVER TOUCHED BY ATR GEOMETRY - these need real BTC tuning:
+;     InpBreakevenLockAtPips, InpBreakevenLockOffsetPips,
+;     InpTrailingActivationPips, InpPartialTPPips, all Grade*PartialTPPips,
+;     all Distal* inputs, and every tolerance input in section 4
+;
+; The superseded ones are still set here because they are the LIVE VALUES
+; whenever the ATR is unavailable (the first bars after attach, or a failed
+; CopyBuffer), and because InpTrailInitialDistancePips is the shapeReference
+; that produces the ratio applied to the two partially-live inputs.
+InpPresetStopLossPips=210.0
+InpTrailArmPips=70.0
+InpTrailInitialDistancePips=70.0
+InpTrailTightenAtPips=999.0
+InpTrailTightDistancePips=70.0
+InpTrailingActivationPips=0.0
+InpTrailingDistancePips=70.0
+InpTrailingStepPips=10.0
+InpBreakevenLockAtPips=90.0
+InpBreakevenLockOffsetPips=10.0
+;
+; ---------------------------------------------------------------------------
+; 3. PARTIAL TP
+; ---------------------------------------------------------------------------
+InpPartialTPPips=110.0
+InpGradeAPartialTPPips=160.0
+InpGradeBPartialTPPips=110.0
+InpGradeCPartialTPPips=70.0
+;
+; ---------------------------------------------------------------------------
+; 4. TOLERANCES AND ZONE GEOMETRY - all live regardless of ATR geometry
+; ---------------------------------------------------------------------------
+InpEntryTouchTolerancePips=50.0
+InpZeroConfTouchTolerancePips=90.0
+InpZeroConfClusterTolerancePips=90.0
+InpConfluenceTolerancePips=700.0
+InpZoneIdentityTolerancePips=80.0
+InpM1ZoneTolerancePips=80.0
+InpSnrFrontRunPips=100.0
+InpLimitZoneDuplicateTolerancePips=10.0
+InpLiveLimitGeometryExtensionPips=200.0
+InpTouchStallMaxExtendPips=20.0
+;
+; Mode stop/target scaffolding. These do NOT set the submitted SL (that comes
+; from ResolvedPresetStopPips) - they feed the READY snapshot's RR planning
+; and PersistentFallbackSL(), so they still have to be on the right scale.
+InpScalpStopPips=200.0
+InpIntradayStopPips=350.0
+InpSwingStopPips=700.0
+InpScalpTargetMinPoints=150.0
+InpScalpTargetMaxPoints=800.0
+InpIntradayTargetMinPoints=600.0
+InpIntradayTargetMaxPoints=2500.0
+InpSwingTargetMinPoints=1800.0
+InpSwingTargetMaxPoints=8000.0
+;
+; Distal stops - only consumed when InpUseZoneDistalStops is true, which is
+; NOT enabled here (leaving V2.0 S05 off is the V2.1b default). Set anyway so
+; that turning it on later does not inherit gold's scale by accident.
+InpDistalStopBufferPips=30.0
+InpDistalStopMinPips=100.0
+InpDistalStopMaxPips=300.0
+;
+; ---------------------------------------------------------------------------
+; 5. ROUND-NUMBER GRADING (V2.0 S04, fixed by V2.2 BTC S01)
+; ---------------------------------------------------------------------------
+; V2.2 BTC S01 changed the checked levels on BTC from $5/$10 to $500/$1000.
+; The tolerance has to move with them or the test flips from ALWAYS TRUE to
+; almost never true. Gold: +/-$0.50 against a $5 grid = 20% of prices qualify.
+; BTC: +/-$50 against a $500 grid = the same 20%. Shape preserved.
+;
+; Only consumed when InpUseZoneGrading is true; it is false by default and is
+; NOT enabled here. Set so that enabling it later is not a trap.
+InpRoundNumberTolerancePips=50.0
+;
+; ---------------------------------------------------------------------------
+; 6. HIGHER-TIMEFRAME LEVEL SEPARATION FLOORS (new in V2.2 BTC S03)
+; ---------------------------------------------------------------------------
+; The reason S03 exists. At gold's 70/120/200 these are $70/$120/$200 on BTC,
+; which is inside a single M5 candle, so H4, D1 and W1 would all resolve onto
+; effectively the same levels and the zero-conf ladder's whole W1 > D1 > H4
+; priority ordering would be meaningless. x10 puts them at $700/$1200/$2000,
+; i.e. roughly 0.7% / 1.2% / 2.0% of a $100k BTC - the same fraction-of-price
+; those numbers represent on gold.
+;
+; JUDGMENT CALL: this is the input group I am least confident about, because
+; the right answer depends on BTC's swing structure rather than on its ATR,
+; and it interacts with the V2.1b S02 decision to trade only the OUTER W1/D1
+; level. If the zero-conf ladder produces almost no W1 or D1 triggers, these
+; are too wide. If W1/D1/H4 keep resolving to the same price, too narrow.
+InpH4LevelMinDistancePips=700.0
+InpD1LevelMinDistancePips=1200.0
+InpW1LevelMinDistancePips=2000.0
+InpH1LevelMinDistancePips=700.0
+;
+; ---------------------------------------------------------------------------
+; 7. EXECUTION - SPREAD AND SLIPPAGE.  PLACEHOLDERS. VERIFY BEFORE USE.
+; ---------------------------------------------------------------------------
+; These two CANNOT be reasoned out from first principles, because the broker's
+; point convention for BTCUSD is unknown at authoring time - BTC is variously
+; quoted with 1, 2 or 3 digits, so "one point" can be $1, $0.01 or $0.001 and
+; a spread of "1200 points" can mean $1200 or $1.20. Widened 10x from gold's
+; 120/20 purely so a first attach does not reject every tick, WHICH IS NOT THE
+; SAME AS BEING CORRECT.
+;
+; DO THIS FIRST: attach the EA and read the OnInit line
+;   V2.2 BTC SPREAD CHECK | observed spread=... points (... price) | ...
+; Watch it across a few minutes and across a session boundary, then set
+; InpMaxSpreadPoints to roughly 2-3x the calm-market reading. BTC spreads
+; widen far more violently than gold's around the CME open and at weekends.
+InpMaxSpreadPoints=1200
+InpDeviationPoints=200
+;
+; ---------------------------------------------------------------------------
+; 8. MAGIC NUMBER - hygiene, not a bugfix
+; ---------------------------------------------------------------------------
+; Distinct from the XAUUSD default 2475176 so a BTC chart and a gold chart can
+; run on the same account without ambiguity in the journal. Every position and
+; order loop in this EA already double-filters on _Symbol AND InpMagicNumber,
+; so the two would not actually interfere at the same magic - this is about
+; being able to read the journal, not about correctness.
+InpMagicNumber=2475222
+;
+; ---------------------------------------------------------------------------
+; 9. SIZING - read the reasoning, the number is less obvious than it looks
+; ---------------------------------------------------------------------------
+; The intuition "BTC has a much bigger notional per lot, so size down hard" is
+; usually WRONG for MT5 BTCUSD. A typical BTCUSD contract size is 1 BTC, so
+; 1.00 lot at $100k is $100k notional. Gold's contract is 100 oz, so 1.00 lot
+; at $3,300 is $330k notional - LARGER, not smaller.
+;
+; And because section 2 already scaled the stop by the same 10x as the pip,
+; the DOLLAR RISK PER 0.01 LOT comes out almost identical:
+;   gold : 21 pips  = $2.10 move, 0.01 lot = 1 oz    -> $2.10 risk
+;   BTC  : 210 pips = $210 move,  0.01 lot = 0.01 BTC -> $2.10 risk
+; So on RISK grounds the gold lot-per-100 ladder transfers unchanged.
+;
+; The real BTC constraint is MARGIN, not risk. Brokers commonly cap crypto
+; leverage at 1:5-1:20 against 1:100-1:500 for gold, so the same 0.01 lot can
+; tie up several times more margin. That is why the ladder is HALVED here
+; rather than kept: it buys headroom so InpCentMaxMarginUsePct and
+; CapVolumeForStandardRiskGuard are not clamping on every single deployment.
+;
+; IMPORTANT SCOPE NOTE: this ladder is only the TARGET. The final size is
+; decided downstream by CapSetupVolumeForCentSafety() and
+; CapVolumeForStandardRiskGuard(), which are broker-native - they call
+; OrderCalcProfit and OrderCalcMargin against the real symbol - and will
+; correct an over-sized target regardless of what is set here. So getting this
+; wrong does NOT blow up the account's downside; it mostly determines how
+; often the EA is pinned to the broker minimum lot (in which case the whole
+; confidence/grade size ladder collapses into one flat size and every V2.0 S04
+; grading result becomes untestable).
+;
+; VERIFY: if the log shows STANDARD RISK GUARD CAP or LIVE CENT MINIMUM-LOT
+; CANDIDATE on most deployments, the ladder is mis-scaled for your account.
+InpBaseEquity=100.0
+InpBaseLayerLot=0.01
+InpStandardSetupLotPer100=0.005
+InpGoodSetupLotPer100=0.010
+InpQualitySetupLotPer100=0.015
+;
+; ---------------------------------------------------------------------------
+; 10. CONFLUENCE SCORING (V2.1a) - session OFF, volatility ON
+; ---------------------------------------------------------------------------
+; JUDGMENT CALL, NOT A RULE.
+;
+; InpScoreSession is turned OFF for BTC. The V2.1a session model classifies
+; the broker hour into OVERLAP / LONDON / NY / ASIA / DEAD, which encodes the
+; FX-and-metals liquidity calendar. BTC trades 24/7/365 and has no London fix,
+; no NY close and no weekend gap, so the DEAD bucket in particular would be
+; penalising hours that are perfectly ordinary for crypto.
+;
+; This is NOT the claim that BTC has no hour-of-day structure - it demonstrably
+; does, clustered around the CME open, the US cash session and the daily/weekly
+; futures settlements. The claim is only that GOLD'S session map is the wrong
+; map. The right move for a later iteration is to RE-TUNE the same mechanism
+; against BTC's own observed hourly distribution (the four hour inputs and the
+; four score inputs are all exposed, so this needs no code change at all) -
+; not to conclude the mechanism does not apply. Disabling it here is the
+; honest position while that data does not exist, not a finding.
+;
+; InpScoreVolatilityRegime STAYS AVAILABLE and is turned on: it percentile-
+; ranks the current ATR against the instrument's OWN trailing distribution, so
+; it is fully self-relative and transfers to BTC unchanged. On an instrument
+; whose regime shifts as hard as BTC's, it is arguably worth more here than on
+; gold.
+;
+; With session off, the aggregate score is just the volatility score, so
+; InpMinConfluenceScore=0.45 admits normal (1.00) and rejects extreme (0.15).
+; InpHardBlockExtremeVol is the separate outright veto and is left on.
+;
+; InpVolTimeframe=5 and InpVolATRPeriod=14 match InpATRTimeframe/InpATRPeriod
+; above, so the V3.190 S03 geometry ATR handle is REUSED rather than a second
+; one created. The init log states which handle was taken - check it.
+InpUseConfluenceScoring=true
+InpMinConfluenceScore=0.45
+InpScoreSession=false
+InpScoreVolatilityRegime=true
+InpVolATRPeriod=14
+InpVolTimeframe=5
+InpVolPercentileLookback=500
+InpVolLowPercentile=20.0
+InpVolHighPercentile=90.0
+InpVolatilityWeight=1.0
+InpVolNormalScore=1.0
+InpVolExtremeScore=0.15
+InpHardBlockExtremeVol=true
+;
+; ---------------------------------------------------------------------------
+; 11. WHAT IS DELIBERATELY NOT IN THIS FILE
+; ---------------------------------------------------------------------------
+; InpUseZoneGrading, InpUseZoneDistalStops, InpUseV2RoutingChain,
+; InpUseH1BiasFilter, InpZeroConfAllowCurrentMapTier, InpZeroConfIncludeLevel1
+; and the whole V3.190 S01/S02/S04/S05 switch set are NOT set here. They are
+; STRATEGY decisions that have to be A/B'd on BTC the same way they were on
+; gold, one stage at a time, using the existing per-stage .set files. Bundling
+; them into a "BTC config" would mean changing the instrument and six strategy
+; switches in one step and learning nothing from the result.
+;
+; InpTreatSCSuffixAsCentOnLive is NOT set here either. Its default of true is
+; already correct for BTCUSD.sc - ResolveAccountUnitDivisor()'s suffix test was
+; never gold-gated - and V2.2 BTC S02 is what makes the PROTECTION side of
+; that recognition finally engage on a BTC cent chart.

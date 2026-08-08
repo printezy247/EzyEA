@@ -1,0 +1,531 @@
+# EzyMap V2.2 BTC — BTCUSD / BTCUSD.sc Portability and Bugfix Pass
+
+**Base:** `EzyMap_V2_1b_TRIGGER_REFINED.mq5` · **Output:** `EzyMap_V2_2_BTCUSD_ADAPTATION.mq5`
+Incremental build on V2.1b. `#property version` bumped `2.102` → `2.200`. Five stages, of
+which **two are code fixes, one promotes four hardcoded literals to inputs, one changes
+printed text, and one is a `.set` file with no code at all.** Four new inputs, one new
+function, **zero changed function signatures.**
+
+---
+
+## ⚠️ Five things to know before testing
+
+**1. This is a portability pass, not a strategy change.** Nothing in V2.1a's confluence
+gate, V2.1b's trigger ladder, the V3.190 S01 exit-geometry phase machine, or the sizing
+choke point was touched. The largest behavioural change on a **gold** chart is that four
+numbers that used to be unreachable literals are now reachable inputs — at the same values.
+
+**2. The default polarity is back to normal.** V2.1b was the exception in this lineage: both
+of its inputs defaulted to the *new* behaviour, so its `STAGE0_BASELINE.set` was the
+all-`true` rollback file. **V2.2 BTC returns to the original rule** — every new input
+defaults to reproducing V2.1b exactly. `EzyMap_V2_2_BTCUSD_STAGE0_BASELINE.set` is
+byte-identical to the compiled-in defaults and rolls nothing back; it exists so the control
+arm is explicit in the tester.
+
+**3. S01 and S02 have no rollback switch, deliberately.** They are unconditional fixes.
+Both are provably no-ops on gold *by construction* rather than by configuration, so an input
+to disable them would only be an input to re-enable a bug. The proofs are below and are the
+main thing to check in review.
+
+**4. `EzyMap_V2_2_BTCUSD_RECOMMENDED.set` is not validated.** There is no MQL5 toolchain and
+no BTC price history in the environment that produced it. Not one number in it has been run
+against a single bar of data. See **NOT VALIDATED — RETUNE BEFORE LIVE** at the end of this
+document, which lists every numeric choice and how to check it.
+
+**5. Not compiled.** Balance, hunk inventory, signature stability and grep counts were
+verified mechanically (see the verification table). **Expect MetaEditor errors on the first
+pass.**
+
+---
+
+## Why BTC broke: one root cause, three symptoms
+
+`StrategyPipSize()` (new file line 2134) already had a BTC branch:
+
+```
+if(IsGold()) return MathMax(0.10,_Point);
+if(IsBTC())  return MathMax(1.0,_Point);
+```
+
+**One strategy pip is $1 on BTC and $0.10 on gold.** That single line is what makes every
+`...Pips` input a *dollar* amount on BTC and a *dime* amount on gold, and it is where all
+three of the problems below come from — not from any one broken function.
+
+| Symptom | Where | Class |
+|---|---|---|
+| Round-number grading test always true | `NearGoldRoundNumber()` | **Real bug** — silent, unconditional |
+| Live cent protection parity never engages on `BTCUSD.sc` | `IsLiveXAUUSDscProtectionChart()` | **Real bug** — silent, live-account-only |
+| H4/D1/W1/H1 level floors 10× too small in dollar terms | two function bodies | **Not tunable** — hardcoded literals |
+
+A fourth, cosmetic issue — log lines that print `"XAU"` while running on BTC — is S04.
+
+### Things I checked that turned out to be *already correct*
+
+Worth recording so nobody re-investigates them:
+
+- **`IsBTC()`** (line 2128) substring-matches `BTC`/`XBT` on the uppercased symbol, so
+  **`BTCUSD` and `BTCUSD.sc` both match with no suffix stripping needed.** Untouched.
+- **`ResolveAccountUnitDivisor()`** (line 2058 onward) does its `.SC` / `_SC` / `CENT`
+  test **without any gold gate**, so a live `BTCUSD.sc` was *already* correctly detected as
+  a cent account for lot sizing. This is exactly what made the S02 bug so easy to miss:
+  half the cent handling worked and half silently did not.
+- **`g_brnStep` / `g_microStep`** (lines 7705–7712) are already BTC-aware
+  (`gold 100/50, BTC 1000/500, else price-relative`) and reasonable. **Untouched.**
+  `ConfluenceCount()`'s `NearRound(mid,g_brnStep,tol)` consumes these — it is a completely
+  different mechanism from `NearGoldRoundNumber()` and was never broken. Do not confuse the
+  two.
+- **The `$100 equity → lot` ladder** (`InpStandardSetupLotPer100`, `InpGoodSetupLotPer100`,
+  `InpQualitySetupLotPer100`, `InpBaseEquity`, `InpBaseLayerLot`) are plain inputs — a BTC
+  `.set` retunes them with no code change. Confirmed at lines 492–502.
+- **The V3.190 S03 ATR geometry inputs** are all plain inputs (lines 920–934). Same.
+- **`InpUseConfluenceScoring` / `InpScoreSession` / `InpScoreVolatilityRegime`** are plain
+  inputs (lines 1141, 1149, 1199). Same.
+- **`ProtectionPriceDistance()`** (line 2183) carries a redundant gold floor,
+  `if(IsGold()) pipSize=MathMax(0.10,pipSize);`, which duplicates the `StrategyPipSize()`
+  gold branch it just called. It is a no-op, not a bug, and it is *not* touched — but it is
+  a live tripwire: **if the gold pip size is ever changed, it must be changed in both
+  places.** Flagged rather than fixed, because fixing it is a behaviour-neutral edit to a
+  function on every order-send path, which is not worth the risk in a portability pass.
+
+---
+
+## S01 — `NearGoldRoundNumber()` made symbol-aware
+**Stage:** `V2.2 BTC S1` · **No input** · **New file lines 5225–5277** (declaration 1914,
+call site in `ComputeZoneGrade()` 5318)
+
+### What was wrong
+
+V2.0 S04 upgrades a zone one grade (`C→B` or `B→A`) when its proximal edge sits within
+`InpRoundNumberTolerancePips` of a `$5` or `$10` level. Those two levels were **hardcoded
+constants with no symbol guard at all**:
+
+```
+double ten =MathRound(price/10.0)*10.0;   // V2.1b line 5092-ish
+double five=MathRound(price/5.0)*5.0;
+```
+
+The tolerance is `InpRoundNumberTolerancePips * MathMax(StrategyPipSize(),_Point)`. On BTC
+that is `5.0 × $1 = $5`.
+
+**$5 is exactly the maximum possible distance from any price to the nearest multiple of
+10.** The first test therefore returned `true` for *every price ever passed in*. So on BTC,
+`ComputeZoneGrade()` upgraded **every single zone, unconditionally**, and the upgrade
+carried zero information — it was a constant `+1 grade`, which then flowed straight into
+`GradeSizeMultiplier()`, `GradeTrailMultiplier()` and `GradePartialTPPips()`.
+
+This is the one change in V2.2 that would have altered live BTC results silently and
+materially, and it was invisible in the log.
+
+### What changed
+
+The two checked levels are now scaled per symbol, using the **same ladder the map already
+uses** for its big-round-number logic (`g_brnStep`/`g_microStep`, new file lines 7705–7712),
+shifted one decade down because this test is about a zone edge resting on a round number,
+not about the map's structural magnets:
+
+```
+double majorStep=IsGold()?10.0:
+                 (IsBTC()?1000.0:MathMax(price*0.01,10.0));
+
+double minorStep=IsGold()?5.0:
+                 (IsBTC()?500.0:majorStep*0.5);
+```
+
+Everything else in the function — the `price<=0.0` guard, the tolerance expression, the
+major-before-minor ordering, the `levelOut` semantics, the return contract — is byte-for-byte
+unchanged.
+
+### Proof it is behaviour-preserving for XAUUSD
+
+`IsGold()` is `true` for any symbol containing `XAU` or `GOLD`, so `majorStep` resolves to
+the literal `10.0` and `minorStep` to the literal `5.0` — **the exact constants the old code
+had written in**. The two `MathRound` expressions then reduce character-for-character to the
+originals:
+
+| Old | New, with gold substituted |
+|---|---|
+| `MathRound(price/10.0)*10.0` | `MathRound(price/10.0)*10.0` |
+| `MathRound(price/5.0)*5.0` | `MathRound(price/5.0)*5.0` |
+
+Same arithmetic, same order, same tolerance, same early return. **Verified by inspection;
+no floating-point difference is possible because the operands are identical.**
+
+### Bonus: it is also behaviour-preserving for every symbol quoted under ~$1000
+
+The fallback branch is `MathMax(price*0.01,10.0)`. For any price below `1000.0`,
+`price*0.01 < 10.0`, so `majorStep` clamps to `10.0` and `minorStep` to `5.0` — again the
+old constants. **So EURUSD, GBPUSD, silver, oil and every FX pair keep their previous
+behaviour too.** Only instruments priced above ~$1000 — which are precisely the instruments
+where the old code was broken — see a different result.
+
+### Deliberate deviation from strict `g_brnStep` symmetry
+
+The brief suggested keeping the fallback branch consistent with `g_brnStep`'s, which is
+`MathMax(livePrice*0.01,_Point*100.0)`. **I used a floor of `10.0` instead of `_Point*100.0`,
+on purpose.** On a 5-digit FX pair `_Point*100.0` is `0.001`, which would make `majorStep`
+for EURUSD `MathMax(0.0108, 0.001) = 0.0108` — a completely different grid, and a
+**behaviour change for every FX symbol**, in a stage whose whole premise is that nothing
+except BTC changes. The `10.0` floor buys the much stronger safety property in the section
+above. The `price*0.01` term and the `majorStep*0.5` minor step are kept identical to
+`g_brnStep`/`g_microStep`, so the *shape* of the fallback still matches.
+
+---
+
+## S02 — live cent protection parity gate widened to BTC
+**Stage:** `V2.2 BTC S2` · **No input** · **New file line 2164** (one condition)
+
+### What was wrong
+
+```
+// V2.1b, line 2030
+if((bool)MQLInfoInteger(MQL_TESTER) || !IsGold())
+   return false;
+```
+
+The `IsGold()` test ran **before** the `.SC` / `_SC` / `CENT` suffix test, so
+`IsLiveXAUUSDscProtectionChart()` returned `false` for `BTCUSD.sc` even though the suffix
+matched. That silently disabled the whole V3.164 live-cent protection-parity feature —
+all six inputs — on a live BTC cent account:
+
+| Input | What was silently inert on `BTCUSD.sc` |
+|---|---|
+| `InpLiveXAUProtectionParity` | master switch — never engaged |
+| `InpLiveXAUDisableHistoricalPeakRebuild` | trail rebuilt its peak from historical M1 immediately on attach |
+| `InpLiveXAURequireFullTrailBeforeArm` | (clamps the arm input; unaffected by the gate) |
+| `InpLiveXAUIncludeSpreadInTrailArm` | live spread never added to the arm distance |
+| `InpLiveXAUTrailWarmupSeconds` | no warmup — trail could arm on the first tick after attach |
+| `InpLiveXAUExtraProtectionCushionPoints` | cushion never added |
+
+This is worse on BTC than it would be on gold, because BTC's spread widens far harder, and
+arming a trail off a rebuilt historical peak with no spread cushion is exactly the failure
+V3.164 was written to stop.
+
+### What changed
+
+```
+if((bool)MQLInfoInteger(MQL_TESTER) || !(IsGold() || IsBTC()))
+   return false;
+```
+
+**The function name and all six input names are deliberately unchanged.** They are
+referenced by name at four call sites, in the `.set` files, in the V3.176 log lines and
+throughout the header comments. Renaming buys no behaviour and costs a large diff.
+
+### Proof it is behaviour-preserving for XAUUSD.sc
+
+Widening `!A` to `!(A || B)` can only make the guard *less* likely to return early. Formally:
+if `IsGold()` was `true` before, `IsGold() || IsBTC()` is still `true`, so **no symbol that
+previously reached the suffix test can now be rejected**, and no symbol that previously
+returned `true` can now return `false`. The change is purely additive: it adds `BTCUSD`,
+`BTCUSD.sc`, `XBTUSD.sc` and similar. `XAUUSD.sc` is untouched. The `MQL_TESTER` short-circuit
+is unchanged, so **every backtest on every symbol still returns `false` exactly as before.**
+
+### All four call sites audited
+
+| New file line | Context | Assumes gold beyond the gate? |
+|---|---|---|
+| 2232 | `LiveTrailActivationDistance()` — adds spread + cushion to the arm distance | **No.** Reads only `tick.ask-tick.bid` and `_Point`. |
+| 3874 | `ReconstructTrailPeak()` — suppresses the historical M1 peak rebuild | **No.** Returns `RoundPrice(peak)` from the live tick. |
+| 5013 | `ManageHybridTrailingPositions()` — `liveProtectionChart` / warmup gate | **No.** Compares `TimeCurrent()` against `initializedClock`. |
+| 15766, 15950 | OnInit log lines | **No** — they only *print* it, and S04 fixes the text. |
+
+No call site contains gold-specific arithmetic, a gold price constant, or a `0.10` pip
+assumption. The gate is the only thing that was gold-specific.
+
+---
+
+## S03 — H4 / D1 / W1 / H1 level minimum-distance floors promoted to inputs
+**Stage:** `V2.2 BTC S3` · **Inputs:** four, all defaulting to the old literal
+
+### What was wrong
+
+Four numeric literals inside two function bodies, none reachable from a `.set` file:
+
+| V2.1b line | Function | Literal | On gold | On BTC |
+|---|---|---|---|---|
+| 2641 | `RefreshZeroConfHigherTimeframeLevels()` — H4 | `70.0` | $7 | **$70** |
+| 2655 | `RefreshZeroConfHigherTimeframeLevels()` — D1 | `120.0` | $12 | **$120** |
+| 2663 | `RefreshZeroConfHigherTimeframeLevels()` — W1 | `200.0` | $20 | **$200** |
+| 7573 | `CalculateMapAndMaybeReady()` — H1 | `70.0` | $7 | **$70** |
+
+These are not tolerances. They are the `minimumDistance` argument to
+`PickDirectionLevels()` — how far apart two chosen levels must be to count as two levels.
+On BTC, $70–$200 is inside a single M5 candle, so **H4, D1 and W1 collapse onto
+near-identical levels** and the zero-conf ladder's whole `W1 > D1 > H4` priority ordering
+stops meaning anything.
+
+### What changed
+
+| New file line | Input | Default |
+|---|---|---|
+| 565 | `InpH4LevelMinDistancePips` | `70.0` |
+| 566 | `InpD1LevelMinDistancePips` | `120.0` |
+| 567 | `InpW1LevelMinDistancePips` | `200.0` |
+| 572 | `InpH1LevelMinDistancePips` | `70.0` |
+
+Declared in the zero-conf tolerance input block, immediately after
+`InpZeroConfMaxDeployAttempts`, well before both use sites. Substituted at:
+
+| New file line | Site |
+|---|---|
+| 2776 | H4 `baseDistance` |
+| 2791 | D1 |
+| 2800 | W1 |
+| 7749 | H1 `minimumLevelDistance` |
+
+Each substitution is wrapped as `MathMax(0.0,Inp...)`, matching the codebase's existing
+defensive style, so a negative input degrades to `0.0` rather than inverting the `MathMax`.
+The outer `MathMax(..., _Point*5.0)` / `MathMax(..., baseDistance)` floors are unchanged, so
+**a zero input still cannot produce a zero minimum distance and there is no division by any
+of these values anywhere.**
+
+Defaults reproduce the literals exactly, so **XAUUSD behaviour is byte-identical.**
+
+### ⚠️ Deviation from the brief: four inputs, not three
+
+The brief specified three inputs and said to use `InpH4LevelMinDistancePips` at *both*
+`70.0` sites, on the premise that the second one was "another copy of the H4 literal."
+**It is not.** Line 7573 is inside `CalculateMapAndMaybeReady()` and sets the separation
+floor for the **H1 map** (`g_S1`/`g_S2`/`g_R1`/`g_R2`) consumed by the **STANDARD** entry
+path — a different timeframe feeding a different consumer from the zero-conf H4 levels. It
+coincidentally shared the value `70.0`.
+
+Aliasing it onto an input named `...H4...` would have been a permanent maintenance trap: a
+user retuning H4 for the zero-conf ladder would silently move the H1 standard-path map too.
+I added `InpH1LevelMinDistancePips` (default `70.0`) instead. **The default preserves
+behaviour identically, so this deviation costs nothing and is reversible** — set both to the
+same value and you have the brief's version.
+
+---
+
+## S04 — misleading `"XAU"` text in runtime strings
+**Stage:** `V2.2 BTC S4` · **New helper:** `InstrumentLabel()` (declaration 1899, definition
+2145)
+
+```
+string InstrumentLabel()
+{
+   if(IsGold()) return "XAU";
+   if(IsBTC())  return "BTC";
+   return _Symbol;
+}
+```
+
+Used in printed strings only. It is never compared, never a threshold, never a branch
+condition that affects trading.
+
+### Complete inventory of every `XAU` / `gold` occurrence and its disposition
+
+Produced by `grep -in "xau"` and `grep -in "gold"` over the whole V2.1b file (41 and 35 hits
+respectively). Grouped by what they actually are:
+
+**A. Runtime string literals that made a FALSE claim on a non-gold chart — all four FIXED:**
+
+| V2.1b line | Old text | New file line | New text | Gold output |
+|---|---|---|---|---|
+| 15407 | `"V3.176 REAL XAUUSD.sc ACCOUNT PROFILE"` | 15685 | `"V3.176 REAL "+_Symbol+" ACCOUNT PROFILE"` | **byte-identical** on a real `XAUUSD.sc` chart |
+| 15441 | `"V3.176 XAU PROTECTION SCALE"` | 15722 | `"V3.176 "+InstrumentLabel()+" PROTECTION SCALE"` | **byte-identical** (`InstrumentLabel()`→`"XAU"`) |
+| 15476 | `"V3.176 LIVE XAUUSD.sc PROTECTION PARITY"` | 15763 | `"V3.176 LIVE "+_Symbol+" PROTECTION PARITY"` | **byte-identical** on a real `XAUUSD.sc` chart |
+| 15478 | `" \| live XAUUSD.sc chart="` | 15765 | `" \| live cent-suffix chart="` | **changed text** — see note |
+| 15670 | `" \| XAU pip size="` | 15959 | `" \| "+InstrumentLabel()+" pip size="` | **byte-identical** |
+
+`_Symbol` is used rather than `InstrumentLabel()` on the two lines that are specifically
+*about the broker symbol including its suffix*, which is what makes them byte-identical on
+gold. **The one line whose gold text genuinely changes is `live XAUUSD.sc chart=` →
+`live cent-suffix chart=`**, and it changes because after S02 the flag can be true on a BTC
+chart, so the old wording would be a false statement in the exact log line an operator uses
+to confirm the feature engaged. Anyone grepping logs for the old string needs to know.
+
+**B. Comments — all LEFT ALONE (historical record, per the brief).** V2.1b lines 16, 21,
+327, 330, 554, 559, 733, 744, 1170, 1173, 2083, and the header block. Also line 6827, which
+is a comment *showing an example* of the dashboard line — the dashboard itself already
+builds from `_Symbol` (`string compact=_Symbol+" • "+...`, new file line 7002) and needed no
+change.
+
+**C. Identifiers — all LEFT ALONE:**
+
+| Identifier | Why untouched |
+|---|---|
+| `IsGold()` | correct name for what it does |
+| `InpLiveXAU*` (six inputs) | referenced by name across the file, in `.set` files and in logs; renaming is pure diff noise |
+| `IsLiveXAUUSDscProtectionChart()` | same; four call sites plus a forward declaration |
+| `NearGoldRoundNumber()` | same; declaration + one call site. A `// V2.2 BTC S1` note above it records that the name is now legacy |
+| `DrawActualTradeLevelsGold()` | **read in full and confirmed already symbol-generic** — it filters on `_Symbol` and `InpMagicNumber` and reads nothing instrument-specific. The `Gold` is the **drawing colour**, not the instrument. Six call sites. A comment at new file line 6811 records this so nobody re-investigates |
+| `InpTradeLevelGold` | a **display colour** `C'255,215,0'`, unrelated to the symbol. Users may reference it in existing configs. **Completely untouched**, per the brief |
+
+**D. `"GOLD"` inside `IsGold()`'s own `StringFind`** — that is the detector, not a claim.
+Untouched.
+
+### Also observed but deliberately NOT changed — stale hardcoded numbers in log text
+
+Found while doing S04. These are **pre-existing and out of scope** (they contain no
+`XAU`/`gold` substring), but they are wrong *today, on gold*, so they are recorded here
+rather than left to be rediscovered:
+
+| New file line | Text | Problem |
+|---|---|---|
+| 15746 | `" \| expected SL=2.30"` / `" \| expected trail=0.90"` | `InpPresetStopLossPips` is `21.0` and the gold pip is `0.10`, so the expected values are **2.10 and 0.70**. The literals are stale from an earlier default |
+| 15722, 15763 | `"SL21="`, `"trail7="` | labels hardcode the pip counts; misleading once ATR geometry or a `.set` changes them |
+| 15948 | `"a preset 21-pip SL"` | same |
+| 15949 | `"7-PIP TRAIL: enabled="` | same |
+| 15961 | `"FIXED 21-PIP LIVE-PARITY SL"` | same |
+
+Fixing these means editing log lines that a gold operator greps for, for zero behavioural
+gain, in a stage that is supposed to be narrowly scoped. **Left as-is on purpose.**
+
+### New log lines added (S01–S04 announcement block)
+**New file lines 15446–15540**, in `OnInit()`, immediately after the V2.1b announcement
+block. Log-only; wrapped in its own `{ }` scope so its locals cannot collide with the rest
+of `OnInit`.
+
+Five lines, printed unconditionally on every symbol (the last only on BTC):
+
+- `V2.2 BTC INSTRUMENT PROFILE` — symbol, label, `IsGold`/`IsBTC`, strategy pip, `_Point`,
+  digits, **contract size, tick value, min lot, lot step**
+- `V2.2 BTC SPREAD CHECK` — **observed spread in points and in price**, next to
+  `InpMaxSpreadPoints` and `InpDeviationPoints`
+- `V2.2 BTC S1 ROUND-NUMBER GRADING LADDER` — the resolved major/minor steps and tolerance
+- `V2.2 BTC S2 LIVE CENT PROTECTION PARITY GATE` — whether the widened gate resolved true
+- `V2.2 BTC S3 LEVEL MIN-DISTANCE FLOORS` — all four, in pips *and* in price
+- `V2.2 BTC CALIBRATION WARNING` — BTC charts only
+
+This follows V2.1a S01's precedent that **a stage which cannot be verified from the log is
+not really verifiable**. There is no V2.2 master switch to report; what has to be visible is
+*which symbol branch resolved*, because that is exactly what silently differed before.
+
+---
+
+## Stage 5 — the ATR-geometry supersession trace
+
+The brief asked which flat pip inputs are overridden at runtime when
+`InpUseATRGeometry=true`, so that retuning them for BTC is moot, versus which stay live.
+**Traced through the actual code path, not guessed.**
+
+### The path
+
+`FreezeTrailGeometry()` (new file line 4081) seeds seven locals from inputs, then calls
+`ResolveATRGeometryPips()` (line 3950), which returns immediately with no effect if
+`CurrentGeometryATR()` is `0.0` — i.e. if `InpUseATRGeometry` is false *or* the cached ATR
+is not yet populated. That early return is what makes S03 behaviour-identical when off.
+
+When it does run:
+
+```
+double atrPips = atr / MathMax(StrategyPipSize(),_Point);
+double atrInitial = MathMax(MathMax(0.1,InpATRTrailFloorPips),
+                            atrPips*MathMax(0.01,InpATRTrailMultiplier));
+double ratio = atrInitial / MathMax(0.1, initPips);      // initPips = InpTrailInitialDistancePips
+
+presetPips    = Clamp(atrPips*InpATRStopMultiplier, floorPips, ceilingPips);
+armPips       = atrPips * InpATRArmMultiplier;
+tightPips     = MathMax(InpATRTrailFloorPips, tightPips*ratio);
+tightenAtPips = tightenAtPips * ratio;
+initPips      = atrInitial;
+```
+
+### The answer
+
+| Input | With ATR geometry ON | Needs BTC retuning? |
+|---|---|---|
+| `InpPresetStopLossPips` | **Fully superseded** — overwritten by `atrPips × InpATRStopMultiplier`, clamped | Only as the **no-ATR fallback** (first bars after attach, failed `CopyBuffer`). Still set it |
+| `InpTrailArmPips` | **Fully superseded** — overwritten by `atrPips × InpATRArmMultiplier` | Fallback only |
+| `InpTrailInitialDistancePips` | **Value fully superseded** — overwritten by `atrInitial` — **but it is also the `shapeReference` denominator of `ratio`**, so it still controls how `tightPips` and `tightenAtPips` are scaled. **Not inert.** | **Yes** — indirectly, via `ratio` |
+| `InpTrailTightDistancePips` | **Partially live** — multiplied by `ratio`, floored at `InpATRTrailFloorPips`. Its *ratio* to `InpTrailInitialDistancePips` is what survives | Yes |
+| `InpTrailTightenAtPips` | **Partially live** — multiplied by `ratio` (the `999.0` sentinel stays unreachable, which is the documented intent) | Yes |
+| `InpATRStopFloorPips` / `CeilingPips` / `InpATRTrailFloorPips` | **These ARE the ATR geometry** — the only pip-denominated inputs in S03 | **Yes — the primary BTC retune** |
+| `InpBreakevenLockAtPips` / `InpBreakevenLockOffsetPips` | **Never touched by `ResolveATRGeometryPips()`** — they are read in `FreezeTrailGeometry()` *after* the call and only scaled by the separate V2.0 S05 distal `stopRatio` | **Yes — fully live** |
+| `InpTrailingActivationPips` | **Never touched.** Read in `LiveTrailActivationDistance()` as `MathMax(activation, armDistance)` — a **floor on the arm distance that outranks the ATR-derived arm** | **Yes — fully live, and easy to miss** |
+| `InpTrailingDistancePips` | **Never touched — and effectively DEAD.** Its only non-log consumer is `FixedTrailCandidateSL()` (line 3842), which **has no callers** in this lineage. It appears in four log lines and nowhere else | No (set for log consistency only) |
+| `InpPartialTPPips`, `InpGradeA/B/CPartialTPPips` | **Never touched** — resolved in `GradePartialTPPips()`, a separate path | **Yes — fully live** |
+| `InpDistalStopBufferPips` / `MinPips` / `MaxPips` | **Never touched** — and `ResolveDistalStopPips()` **outranks ATR entirely** in `ResolvedPresetStopPips()`: a valid distal stop is returned *before* ATR is consulted | Yes, when `InpUseZoneDistalStops` is on |
+| `InpZeroConfTouchTolerancePips`, `InpZeroConfClusterTolerancePips`, `InpConfluenceTolerancePips`, `InpEntryTouchTolerancePips`, `InpZoneIdentityTolerancePips`, `InpRoundNumberTolerancePips`, `InpSnrFrontRunPips`, `InpM1ZoneTolerancePips`, `InpLiveLimitGeometryExtensionPips`, `InpTouchStallMaxExtendPips` | **Never touched** — different subsystem entirely | **Yes — all fully live** |
+| `InpScalpStopPips` / `InpIntradayStopPips` / `InpSwingStopPips` | **Never touched.** They do **not** set the submitted SL — that comes from `ResolvedPresetStopPips()`. They feed the READY snapshot's `volatilityStopDistance` (line 8225), the RR fallback (line 8572) and `PersistentFallbackSL()` (line 11725) | **Yes — fully live** |
+| `InpH4/D1/W1/H1LevelMinDistancePips` | **Never touched** — map construction, upstream of geometry | **Yes** |
+
+**Headline:** turning ATR geometry on supersedes **three** inputs' values and partially
+rescales **two**. Every other pip input in the EA — including breakeven lock, partial TP,
+the trailing-activation floor, all the tolerances and all three mode stops — **remains fully
+live and must be retuned for BTC independently.** ATR geometry is not a blanket solution to
+BTC's scale problem; it solves the *stop and trail* part of it and nothing else.
+
+---
+
+## Verification table
+
+No MQL5 toolchain in this environment. Everything below is mechanical.
+
+| Check | Result |
+|---|---|
+| Brace balance (comments and string literals stripped) | `929` / `929` — was `927`/`927`; **+2 = new `InstrumentLabel()` body and the scoped log block in `OnInit`** |
+| Paren balance | `6308` / `6308` — was `6219`/`6219` |
+| Bracket balance | `1178` / `1178` — **unchanged** |
+| New functions forward-declared before first use | `InstrumentLabel()` declared line **1899**, defined **2145**, first *use* **15465** ✓ |
+| Changed function signatures | **zero** — S01/S02 are body edits, S03 substitutes expressions, S04 edits string concatenation |
+| New inputs declared before use | four inputs at **565–572**; earliest use **2776** ✓ |
+| `grep -c MQL_TESTER` | `13` → `13` — **unchanged** |
+| `grep -n GetTickCount64` | one hit, line **2518**, inside `NowMs()` — **still the only call site** |
+| Order-send path can produce `SL=0.0`? | **No.** `ResolvedPresetStopPips()` always returns ≥`0.1` (distal path is floored at `InpDistalStopMinPips`≥0.1; ATR path is `Clamp`ed to `floorPips=MathMax(0.1,...)`; fallback is `MathMax(0.1,InpPresetStopLossPips)`). `ProtectionPriceDistance()` returns ≥ one tick. `BrokerSafeExecutionSL()` reassigns to `marketPrice ∓ minDist` whenever `safeSL<=0`. **No V2.2 edit touches any of these four functions.** |
+| New S03 inputs can cause division by zero? | **No** — none of the four is ever a divisor; each is only a `MathMax` operand |
+| S01 can cause division by zero? | **No** — `majorStep ≥ 10.0` and `minorStep ≥ 5.0` on every branch |
+| `.set` convention: load-on-top, only the stage's own inputs | `STAGE0_BASELINE` lists exactly the four S03 inputs ✓. `RECOMMENDED` is a **symbol profile**, not a stage file, so it necessarily spans inputs from several stages — stated in its header, grouped by section, with `§11` listing what is deliberately excluded |
+| Every input name in both `.set` files exists in the `.mq5` | verified by script against `^input ...` declarations — **zero mismatches** |
+| Comment tag convention `// V2.2 BTC Sx:` | 19 occurrences |
+| Log tag convention `Log("V2.2 BTC ...")` | 6 occurrences |
+| Header block style matches prior stages | `V2.2 BTC STAGE SUMMARY (S01-S05)` at line **226**, same box-drawing and column width |
+| `#property version` | `"2.102"` → `"2.200"` at line **312** |
+| File size | 16,073 → 16,363 lines |
+
+---
+
+## ⚠️ NOT VALIDATED — RETUNE BEFORE LIVE
+
+**Everything in this section applies only to `EzyMap_V2_2_BTCUSD_RECOMMENDED.set`.** The
+code changes (S01–S04) are structural and reviewable by inspection. The `.set` numbers are
+not: **there is no MQL5 toolchain and no BTC price history in this environment, so not one
+of them has been tested against a single bar of data.** This ships as a structurally sound
+starting point, not as a tuned strategy.
+
+### The single assumption everything rests on
+
+Every BTC number is gold's value **× 10**, justified as: gold M5 ATR(14) ≈ 8–15 strategy
+pips; BTC M5 ATR(14) ≈ 50–150 strategy pips, because the BTC pip is $1 and the gold pip is
+$0.10. **If your broker's BTC M5 ATR is 30 pips rather than 100, every distance in the file
+is roughly 3× too wide.** BTC's volatility regime moves by a factor of 3–5 over a year in a
+way gold's does not, so this needs rechecking periodically, not once.
+
+### Per-number checklist
+
+| Input(s) | Value | How to check it |
+|---|---|---|
+| `InpATRStopFloorPips` `120` / `InpATRStopCeilingPips` `350` / `InpATRTrailFloorPips` `50` | ×10 | Read the actual M5 ATR from `RefreshGeometryATR()`'s cached value. With ATR≈100 the resolved stop is 160, well inside the clamp. **If the floor or ceiling is doing the work on most trades, they are wrong** — the clamp should be a guard rail, not the operative value |
+| `InpATRStopMultiplier` `1.60` / `InpATRTrailMultiplier` `0.55` / `InpATRArmMultiplier` `0.35` | **unchanged from gold** | These are dimensionless ratios relative to ATR, so they should transfer. **Least likely of all Stage-5 numbers to be wrong**, but still untested on BTC |
+| `InpMaxSpreadPoints` `1200` / `InpDeviationPoints` `200` | **pure placeholder** | **The weakest numbers in the file.** BTC is variously quoted with 1, 2 or 3 digits, so "one point" may be $1, $0.01 or $0.001 and the same integer means wildly different things. Attach the EA, read `V2.2 BTC SPREAD CHECK` for several minutes and across a session boundary, then set the cap to ~2–3× the calm reading |
+| `InpStandardSetupLotPer100` `0.005` / `Good` `0.010` / `Quality` `0.015` | gold ÷ 2 | **Not the obvious reasoning.** A typical BTCUSD contract is 1 BTC (~$100k/lot) versus gold's 100 oz (~$330k/lot), so BTC notional is *smaller*, and with the ×10 stop the risk per 0.01 lot works out at ~$2.10 for both. The halving is for **margin**, not risk — crypto leverage is often 1:5–1:20 against gold's 1:100–1:500. **Verify your broker's actual contract size and margin rate.** Downside is capped regardless by the broker-native `OrderCalcProfit`/`OrderCalcMargin` caps; the symptom of getting this wrong is the EA constantly pinned to the minimum lot, which collapses the whole grade/confidence size ladder into one flat size. Watch for `STANDARD RISK GUARD CAP` and `LIVE CENT MINIMUM-LOT CANDIDATE` in the log |
+| `InpH4/D1/W1/H1LevelMinDistancePips` `700/1200/2000/700` | ×10 | **The group I am least confident about**, because the right answer depends on BTC's swing structure rather than its ATR, and it interacts with V2.1b S02's outer-level-only rule. Too wide → almost no W1/D1 zero-conf triggers. Too narrow → W1/D1/H4 keep resolving to the same price |
+| `InpRoundNumberTolerancePips` `50` | ×10 | Preserves the *fraction of prices that qualify*: gold ±$0.50 in a $5 grid = 20%; BTC ±$50 in a $500 grid = 20%. Only consumed when `InpUseZoneGrading=true`, which is **off** by default and not enabled by the file |
+| All tolerance inputs (§4 of the `.set`) | ×10 | Fully live regardless of ATR geometry — see the supersession table |
+| `InpScalpStopPips` `200` / `Intraday` `350` / `Swing` `700` and the six target inputs | ×10 | Do **not** set the submitted SL; they drive RR planning and `PersistentFallbackSL()` |
+| `InpBreakevenLockAtPips` `90` / `Offset` `10`, `InpPartialTPPips` `110`, `InpGradeA/B/C` `160/110/70` | ×10 | **Never superseded by ATR geometry.** These are the ones most likely to be forgotten |
+| `InpDistalStop*` `30/100/300` | ×10 | Inert unless `InpUseZoneDistalStops` is turned on; set so enabling it later is not a trap |
+| `InpScoreSession=false` | **judgment call** | Not a finding. BTC has real hour-of-day structure (CME open, US cash session, futures settlement) — the claim is only that *gold's* session map is the wrong map, and its DEAD bucket would penalise perfectly ordinary crypto hours. The correct follow-up is to **re-tune the same mechanism** against BTC's own hourly distribution (all eight session inputs are exposed, no code change needed), not to conclude it does not apply |
+| `InpScoreVolatilityRegime=true` | transfers unchanged | Percentile-ranks ATR against the instrument's **own** trailing distribution, so it is fully self-relative. Arguably worth more on BTC than on gold |
+| `InpMagicNumber=2475222` | hygiene | Journal readability only. Every position and order loop already double-filters on `_Symbol` **and** `InpMagicNumber`, so gold and BTC would not interfere even at the same magic |
+
+### Suggested order of work
+
+1. Attach on BTCUSD **with the default binary** (not the `RECOMMENDED.set`) and read the
+   `V2.2 BTC INSTRUMENT PROFILE` and `V2.2 BTC SPREAD CHECK` lines. Record the real pip size,
+   digits, contract size, min lot and spread.
+2. Fix `InpMaxSpreadPoints` and `InpDeviationPoints` from that reading before anything else.
+3. Get the real M5 ATR figure, then rescale §1 and §2 of the `.set` from it rather than from
+   the ×10 assumption.
+4. Only then load the rest of `RECOMMENDED.set`, and A/B the strategy switches
+   (`InpUseZoneGrading`, `InpUseZoneDistalStops`, the V2.1b ladder inputs) on BTC **one at a
+   time**, using the existing per-stage `.set` files — exactly as they were A/B'd on gold.
+
+### And on XAUUSD
+
+Run `EzyMap_V2_2_BTCUSD_STAGE0_BASELINE.set` against a V2.1b binary on gold. The two should
+be indistinguishable. **If they are not, the regression is in S03's four substitutions or in
+S01's gold branch** — those are the only two places a gold-visible difference could come
+from, and both are argued above to be arithmetically identical.

@@ -1,0 +1,41 @@
+; EzyMap Scalp Mastery V2.2 BTC - EzyMap_V2_2_BTCUSD_STAGE0_BASELINE.set
+; STAGE 0 - CONTROL. Every input V2.2 BTC introduces, pinned to the value
+; that reproduces V2.1b EXACTLY. This is the A/B control arm: run it on
+; XAUUSD against a V2.1b binary and the two must be indistinguishable.
+;
+; POLARITY: back to the pre-V2.1b convention. V2.1b was the odd stage out -
+; both of ITS inputs defaulted to the NEW behaviour, so its baseline file was
+; the all-TRUE rollback. V2.2 BTC returns to the normal rule: every new input
+; DEFAULTS to reproducing the base, so this file is byte-identical to the
+; compiled-in defaults and exists only so the control arm is explicit in the
+; tester rather than implied. It does NOT roll anything back.
+;
+; ONLY FOUR INPUTS ARE LISTED because V2.2 BTC only added four. S01
+; (NearGoldRoundNumber symbol awareness) and S02 (live cent protection parity
+; gate widened to BTC) are UNCONDITIONAL CODE FIXES with no input and no
+; rollback switch. They are safe to ship without one because both are no-ops
+; on gold BY CONSTRUCTION, not by configuration:
+;
+;   S01 - for any gold symbol the new majorStep/minorStep resolve to the
+;         literals 10.0 and 5.0 that the old code had hardcoded. Same
+;         arithmetic, same result. (They also resolve to 10.0/5.0 for ANY
+;         symbol quoted below ~1000, because the fallback branch is
+;         MathMax(price*0.01,10.0).)
+;   S02 - the gate widened from IsGold() to IsGold()||IsBTC(). Widening a
+;         disjunction cannot make a previously-true case false, so no symbol
+;         that engaged the feature before can stop engaging it now.
+;
+; S04 changes printed TEXT only, never a value, a threshold or a branch.
+;
+; Load this ON TOP of your V2.1b working set - every other input keeps its
+; current value.
+;
+; Confirm from the OnInit log that you loaded it. This file must produce:
+;   V2.2 BTC S3 LEVEL MIN-DISTANCE FLOORS | H4=70.0 pips ... | D1=120.0 pips
+;   ... | W1=200.0 pips ... | H1=70.0 pips ...
+;   ... | defaults 70/120/200/70 reproduce V2.1b exactly
+;
+InpH4LevelMinDistancePips=70.0
+InpD1LevelMinDistancePips=120.0
+InpW1LevelMinDistancePips=200.0
+InpH1LevelMinDistancePips=70.0
