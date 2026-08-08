@@ -675,6 +675,32 @@ input double InpATRStopFloorPips               = 12.0;
 input double InpATRStopCeilingPips             = 35.0;
 input double InpATRTrailFloorPips              = 5.0;
 
+//------------------------- V3.190 STAGE 4 ---------------------------
+// V3.190 S4: touch confirmation before fill.
+// OLD BEHAVIOUR: the CMP logic deployed on the FIRST touch of the zone. On a
+// 21-pip stop, entering 2-5 pips better is a material change in
+// distance-to-stop. NEW: record the touch, then wait for either an M1 close
+// back inside the zone or for price to stall beyond the touch extreme.
+// Frequency is deliberately preserved - on timeout the setup deploys at
+// market anyway rather than being skipped, and every fallback is logged so
+// the confirmation miss rate is measurable.
+// Default false = V3.176 fill-on-first-touch.
+
+// V3.190 S4: master switch. RECOMMENDED true.
+input bool   InpRequireTouchConfirmation       = false;
+// V3.190 S4: 0 = either signal confirms, 1 = M1 close inside only,
+// 2 = stall only.
+input int    InpTouchConfirmMode               = 0;
+// V3.190 S4: how long price must fail to extend before the stall path
+// confirms.
+input int    InpTouchStallSeconds              = 3;
+// V3.190 S4: a move further than this beyond the running touch extreme counts
+// as still extending, and restarts the stall clock.
+input double InpTouchStallMaxExtendPips        = 2.0;
+// V3.190 S4: give up waiting after this long and deploy at market anyway,
+// which is exactly the V3.176 behaviour. Logged as a fallback.
+input int    InpTouchConfirmTimeoutSec         = 45;
+
 // V3.164 live XAUUSD.sc protection parity.
 // Account denomination affects money and lot sizing, never price distance.
 // Historical M1 highs/lows cannot arm a trail immediately after attaching
@@ -934,6 +960,17 @@ struct PersistentReadySetup
    datetime lastDeployAttemptClock;
    ulong lastDeployAttemptTickMs;
    datetime deploymentBlockedM5;
+
+   // V3.190 S4: touch-confirmation state. Lives here rather than in a
+   // parallel structure so it is cleared by the same latch-reset and
+   // setup-expiry paths as every other touch field, and cannot leak.
+   bool     confirmPending;
+   bool     confirmSatisfied;
+   ulong    confirmStartMs;
+   ulong    confirmStallSinceMs;
+   double   confirmExtreme;
+   double   confirmTouchPrice;
+   datetime confirmTouchM1Bar;
 };
 
 struct DirectZeroConfState
@@ -1250,6 +1287,9 @@ double CurrentGeometryATR();
 void ResolveATRGeometryPips(double &presetPips,double &armPips,double &initPips,
                             double &tightPips,double &tightenAtPips,double &atrPrice);
 double ResolvedPresetStopPips();
+bool TouchConfirmationSatisfied(PersistentReadySetup &setup,int direction,
+                                double zoneLo,double zoneHi,double cmp,
+                                string &outcome);
 double BrokerSafeExecutionSL(int direction,double marketPrice,double requestedSL);
 double BrokerSafeExecutionTP(int direction,
                              double entryPrice,
@@ -1795,6 +1835,17 @@ void ClearPersistentTouchLatch(PersistentReadySetup &setup)
    setup.zeroConfTriggerHi=0.0;
    setup.zeroConfReclaimTime=0;
    setup.touchClock=0;
+
+   // V3.190 S4: confirmation state is part of the touch latch and must die
+   // with it, otherwise a stale pending confirmation survives into the next
+   // touch of the same setup.
+   setup.confirmPending=false;
+   setup.confirmSatisfied=false;
+   setup.confirmStartMs=0;
+   setup.confirmStallSinceMs=0;
+   setup.confirmExtreme=0.0;
+   setup.confirmTouchPrice=0.0;
+   setup.confirmTouchM1Bar=0;
 }
 
 
@@ -10135,6 +10186,162 @@ bool M1QualitySignals(int direction,
    return true;
 }
 
+
+// V3.190 S4: evaluate touch confirmation for one latched setup.
+// Returns true when the setup may deploy. Sets outcome to a short reason so
+// the caller can log why, and in particular so timeout fallbacks are
+// countable in the journal.
+//
+// zoneLo/zoneHi are the zone the touch happened against (the READY rectangle,
+// or the resolved zero-confluence trigger band).
+bool TouchConfirmationSatisfied(PersistentReadySetup &setup,
+                                int direction,
+                                double zoneLo,
+                                double zoneHi,
+                                double cmp,
+                                string &outcome)
+{
+   outcome="";
+
+   if(!InpRequireTouchConfirmation)
+   {
+      outcome="confirmation disabled";
+      return true;
+   }
+
+   if(setup.confirmSatisfied)
+   {
+      outcome="already confirmed";
+      return true;
+   }
+
+   ulong now=NowMs();
+   double pip=MathMax(StrategyPipSize(),_Point);
+
+   // First pass after the touch latched: seed the state.
+   if(!setup.confirmPending)
+   {
+      setup.confirmPending=true;
+      setup.confirmStartMs=now;
+      setup.confirmStallSinceMs=now;
+      setup.confirmExtreme=cmp;
+      setup.confirmTouchPrice=cmp;
+      setup.confirmTouchM1Bar=iTime(_Symbol,PERIOD_M1,0);
+
+      Log("V3.190 S4 CONFIRMATION PENDING | signal="+(string)setup.id+
+          " | direction="+string(direction==1?"BUY":"SELL")+
+          " | touch="+DoubleToString(cmp,_Digits)+
+          " | zone="+DoubleToString(zoneLo,_Digits)+".."+
+          DoubleToString(zoneHi,_Digits)+
+          " | mode="+IntegerToString(InpTouchConfirmMode)+
+          " | timeout="+IntegerToString(InpTouchConfirmTimeoutSec)+"s");
+   }
+
+   // Track the adverse extreme since the touch. For a BUY at support the
+   // adverse direction is down, for a SELL at resistance it is up.
+   bool extended=false;
+   double extendTolerance=MathMax(0.0,InpTouchStallMaxExtendPips)*pip;
+
+   if(direction==1)
+   {
+      if(cmp<setup.confirmExtreme-extendTolerance)
+      {
+         setup.confirmExtreme=cmp;
+         extended=true;
+      }
+      else if(cmp<setup.confirmExtreme)
+         setup.confirmExtreme=cmp;
+   }
+   else
+   {
+      if(cmp>setup.confirmExtreme+extendTolerance)
+      {
+         setup.confirmExtreme=cmp;
+         extended=true;
+      }
+      else if(cmp>setup.confirmExtreme)
+         setup.confirmExtreme=cmp;
+   }
+
+   if(extended)
+      setup.confirmStallSinceMs=now;
+
+   bool allowM1   =(InpTouchConfirmMode==0 || InpTouchConfirmMode==1);
+   bool allowStall=(InpTouchConfirmMode==0 || InpTouchConfirmMode==2);
+
+   // (a) an M1 bar has CLOSED back inside the zone since the touch.
+   if(allowM1)
+   {
+      datetime currentM1=iTime(_Symbol,PERIOD_M1,0);
+
+      if(currentM1>0 && currentM1>setup.confirmTouchM1Bar)
+      {
+         double closedM1=iClose(_Symbol,PERIOD_M1,1);
+         double lo=MathMin(zoneLo,zoneHi);
+         double hi=MathMax(zoneLo,zoneHi);
+
+         if(closedM1>0.0 && closedM1>=lo && closedM1<=hi)
+         {
+            setup.confirmSatisfied=true;
+            outcome="M1 close back inside zone @"+DoubleToString(closedM1,_Digits);
+
+            Log("V3.190 S4 CONFIRMED | signal="+(string)setup.id+
+                " | via=M1 CLOSE INSIDE"+
+                " | close="+DoubleToString(closedM1,_Digits)+
+                " | waited="+IntegerToString((int)((now-setup.confirmStartMs)/1000))+"s");
+            return true;
+         }
+      }
+   }
+
+   // (b) price has stopped extending beyond the touch extreme.
+   if(allowStall)
+   {
+      ulong stallMs=(ulong)MathMax(0,InpTouchStallSeconds)*1000;
+
+      if(now>=setup.confirmStallSinceMs &&
+         now-setup.confirmStallSinceMs>=stallMs)
+      {
+         setup.confirmSatisfied=true;
+         outcome="stalled "+IntegerToString((int)(stallMs/1000))+"s beyond extreme";
+
+         Log("V3.190 S4 CONFIRMED | signal="+(string)setup.id+
+             " | via=STALL"+
+             " | extreme="+DoubleToString(setup.confirmExtreme,_Digits)+
+             " | extension from touch="+
+             DoubleToString(MathAbs(setup.confirmExtreme-setup.confirmTouchPrice)/pip,1)+" pips"+
+             " | waited="+IntegerToString((int)((now-setup.confirmStartMs)/1000))+"s");
+         return true;
+      }
+   }
+
+   // Timeout: deploy anyway. Frequency must not drop, so a confirmation that
+   // never arrives falls back to V3.176 fill-at-market rather than skipping
+   // the setup. Logged so the miss rate can be measured.
+   ulong timeoutMs=(ulong)MathMax(0,InpTouchConfirmTimeoutSec)*1000;
+
+   if(timeoutMs>0 && now>=setup.confirmStartMs &&
+      now-setup.confirmStartMs>=timeoutMs)
+   {
+      setup.confirmSatisfied=true;
+      outcome="TIMEOUT FALLBACK";
+
+      Log("V3.190 S4 TIMEOUT FALLBACK | signal="+(string)setup.id+
+          " | direction="+string(direction==1?"BUY":"SELL")+
+          " | no confirmation in "+IntegerToString(InpTouchConfirmTimeoutSec)+"s"+
+          " | deploying at market (V3.176 behaviour)"+
+          " | touch="+DoubleToString(setup.confirmTouchPrice,_Digits)+
+          " | extreme="+DoubleToString(setup.confirmExtreme,_Digits)+
+          " | adverse excursion="+
+          DoubleToString(MathAbs(setup.confirmExtreme-setup.confirmTouchPrice)/pip,1)+" pips");
+      return true;
+   }
+
+   outcome="waiting";
+   return false;
+}
+
+
 bool PersistentQualityPass(PersistentReadySetup &setup,string &reason)
 {
    reason="";
@@ -11678,6 +11885,34 @@ void ProcessPersistentSetups()
                currentM5>0 &&
                g_persistentSetups[i].deploymentBlockedM5==currentM5)
                continue;
+
+            // V3.190 S4: gate the deploy on touch confirmation. The latch is
+            // deliberately left standing while we wait, so the existing
+            // retry/expiry machinery keeps the setup alive and frequency is
+            // unchanged - TouchConfirmationSatisfied() self-releases on
+            // timeout rather than letting the setup be dropped.
+            string confirmOutcome="";
+
+            double confirmZoneLo=
+               zeroConf && g_persistentSetups[i].zeroConfTriggerLo>0.0
+               ? g_persistentSetups[i].zeroConfTriggerLo
+               : g_persistentSetups[i].entryLo;
+
+            double confirmZoneHi=
+               zeroConf && g_persistentSetups[i].zeroConfTriggerHi>0.0
+               ? g_persistentSetups[i].zeroConfTriggerHi
+               : g_persistentSetups[i].entryHi;
+
+            if(!TouchConfirmationSatisfied(
+                  g_persistentSetups[i],
+                  direction,
+                  confirmZoneLo,
+                  confirmZoneHi,
+                  cmp,
+                  confirmOutcome))
+            {
+               continue;
+            }
 
             string reason="";
 
