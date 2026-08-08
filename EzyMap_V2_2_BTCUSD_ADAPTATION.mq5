@@ -223,7 +223,7 @@
 //  rule lives in ProcessDirectZeroConfluenceTriggers(). See           |
 //  V2_1b_CHANGES.md.                                                  |
 //                                                                    |
-//  V2.2 BTC STAGE SUMMARY (S01-S09)                                   |
+//  V2.2 BTC STAGE SUMMARY (S01-S10)                                   |
 //                                                                    |
 //  Incremental build on V2.1b. This is a PORTABILITY AND BUGFIX pass, |
 //  not a strategy change. Scope: make the EA behave correctly on      |
@@ -434,6 +434,37 @@
 //      still has to clear the normal quality gate changed.            |
 //      Inputs: InpZeroConfFallbackMinConfluences (default 2)          |
 //                                                                    |
+//  S10 LOT MULTIPLICATION REMOVED - CONFIDENCE NOW MEANS LAYER COUNT   |
+//      The user watched the live BTC chart double a lot on a single    |
+//      order and asked for the tier system to express confidence as   |
+//      NUMBER OF LAYERS, not per-layer SIZE: Standard = one instant    |
+//      (MARKET), Good = one instant plus one limit, Quality = one     |
+//      instant plus two limits - every layer the SAME flat lot.       |
+//      ROOT CAUSE: ConfidenceSetupLot() picked a bigger lotPer100 for  |
+//      Good/Quality (2x/3x Standard), producing a bigger TOTAL, and    |
+//      DesiredLayersForSetup() ALSO gave that setup more layers to     |
+//      split the bigger total across - two systems compounding. Worse,|
+//      BuildAggressiveArmPlans's route-shrink logic could drop a      |
+//      LIMIT route that failed to attach WITHOUT shrinking the total, |
+//      dumping the whole un-split total onto the surviving route(s) - |
+//      exactly the single doubled MARKET order observed live.         |
+//      FIX: ConfidenceSetupLot() always returns the flat Standard lot |
+//      now, regardless of confluence count (InpGoodSetupLotPer100/    |
+//      InpQualitySetupLotPer100 are no longer read - kept as inputs   |
+//      only so old .set files still load). Confidence is expressed    |
+//      SOLELY through DesiredLayersForSetup()'s layer count, which     |
+//      was already correct (1/2/3) and untouched. Every layer-builder |
+//      (BuildConfidenceLayerPlans, BuildAggressiveArmPlans's route     |
+//      loop, CreateMarketFallbackLayerSet) now assigns this SAME flat  |
+//      lot to every layer instead of dividing one total across        |
+//      however many layers/routes end up valid - a route that cannot  |
+//      open now simply does not open, at no cost to the routes that   |
+//      do, which also removes the doubling bug at its source.         |
+//      Ported identically to EzyMap_V2_1b_TRIGGER_REFINED.mq5 (same   |
+//      three functions, same reasoning) since the user asked for both.|
+//      Inputs: none new. InpGoodSetupLotPer100/InpQualitySetupLotPer100|
+//      remain declared but are no longer read by ConfidenceSetupLot().|
+//                                                                    |
 //  BASE NOTE: this file descends from the V3.176 line, NOT from the   |
 //  separate V3.180 PARITY_HARDENED branch. It does not contain the    |
 //  V3.180 P01-P13 parity fixes. NowMs() and TradeRetcodePartial()     |
@@ -441,7 +472,7 @@
 //  were never present in this lineage; they were not removed.         |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "2.204"
+#property version   "2.205"
 
 #include <Trade/Trade.mqh>
 
@@ -12603,6 +12634,10 @@ string ConfidenceClassText(int conf)
    return "STANDARD";
 }
 
+// S10: conf is intentionally unused now - see the comment below on why lot
+// size no longer scales by confidence tier. Signature kept unchanged so
+// every existing call site (which all pass a real confluence count) needs
+// no edits.
 double ConfidenceSetupLot(int conf)
 {
    double effectiveEquity=EffectiveAccountEquity();
@@ -12611,12 +12646,21 @@ double ConfidenceSetupLot(int conf)
    if(effectiveEquity<MinimumTradingEquity())
       return 0.0;
 
+   // S10 (both files): per-tier LOT scaling removed at the user's explicit
+   // request - this used to select InpGoodSetupLotPer100/InpQualitySetupLot-
+   // Per100 (2x/3x InpStandardSetupLotPer100) here, making a "Good" or
+   // "Quality" setup's TOTAL lot bigger while DesiredLayersForSetup() ALSO
+   // gave it more layers to split that bigger total across - the two systems
+   // were stacking (more layers of a bigger pie), and if a limit layer
+   // failed to place, BuildAggressiveArmPlans's route-shrink logic dumped
+   // the entire un-split total onto whatever routes remained, which is what
+   // produced an observed live BTC trade at 2x the normal single-layer lot.
+   // Every layer now requests this SAME flat, untiered lot - confidence is
+   // expressed ONLY through DesiredLayersForSetup()'s layer COUNT (1 for
+   // Standard, 2 for Good, 3 for Quality), never through a bigger per-layer
+   // size. InpGoodSetupLotPer100/InpQualitySetupLotPer100 are kept as inputs
+   // only for .set-file compatibility; neither is read here anymore.
    double lotPer100=InpStandardSetupLotPer100;
-
-   if(conf>=InpQualityConfidenceMin)
-      lotPer100=InpQualitySetupLotPer100;
-   else if(conf>=InpGoodConfidenceMin)
-      lotPer100=InpGoodSetupLotPer100;
 
    // REAL-CENT BROKER-NATIVE RULE:
    // Calculate the proportional target first. On a live cent account only,
@@ -13292,7 +13336,6 @@ bool BuildConfidenceLayerPlans(int direction,
    if(minVol<=0)
       return false;
 
-   double remainingLot=targetSetupLot;
    double plannedRisk=0.0;
 
    for(int i=0;i<requestedLayers;i++)
@@ -13331,22 +13374,20 @@ bool BuildConfidenceLayerPlans(int direction,
       if(lossPerLot<=0)
          return false;
 
-      int layersLeft=requestedLayers-i;
-
-      // Split the requested TOTAL setup lot as evenly as possible.
-      double desiredShare=
-         NormalizeVolumeDown(remainingLot/(double)layersLeft);
-
-      if(desiredShare<minVol-1e-12)
-         return false;
-
-      // Each layer receives an equal share of the remaining hard risk budget.
+      // S10: every layer requests the SAME flat targetSetupLot - no more
+      // dividing one total across requestedLayers, which is what let a
+      // "Good"/"Quality" setup's already-larger tiered total get sliced
+      // into layers instead of adding real, separate, standard-sized
+      // layers. riskBudget remains a genuine AGGREGATE ceiling across all
+      // layers placed so far (not divided up-front either), so a layer is
+      // still shrunk or refused once the setup's cumulative risk would
+      // exceed it - it just no longer pre-shrinks every layer to fit a
+      // fixed total that no longer exists.
       double riskRemaining=MathMax(0.0,riskBudget-plannedRisk);
-      double riskShare=riskRemaining/(double)layersLeft;
-      double maxByRisk=NormalizeVolumeDown(riskShare/lossPerLot);
+      double maxByRisk=NormalizeVolumeDown(riskRemaining/lossPerLot);
 
       double vol=
-         NormalizeVolumeDown(MathMin(desiredShare,maxByRisk));
+         NormalizeVolumeDown(MathMin(targetSetupLot,maxByRisk));
 
       if(vol<minVol-1e-12)
          return false;
@@ -13358,7 +13399,6 @@ bool BuildConfidenceLayerPlans(int direction,
       plans[i].volume=vol;
 
       plannedRisk+=vol*lossPerLot;
-      remainingLot=MathMax(0.0,remainingLot-vol);
 
       if(plannedRisk>riskBudget+0.01)
          return false;
@@ -13695,50 +13735,27 @@ bool BuildAggressiveArmPlans(PersistentReadySetup &setup,
          setup,tick,minDist,secondDepth,plans);
    }
 
-   // Use only valid routes, but preserve the full original confidence lot.
+   // S10: every route - the MARKET route and each LIMIT route - now
+   // requests the SAME flat targetSetupLot instead of splitting one total
+   // across however many routes ended up valid. This is precisely the fix
+   // for the bug this stage exists to remove: previously, if a LIMIT route
+   // failed to attach (a common outcome - price too close, a duplicate zone,
+   // a broker distance rule), the shrink-loop below reduced "available"
+   // WITHOUT reducing targetSetupLot, so the entire un-split total (already
+   // 2x/3x the standard lot from the old confidence-tiered ConfidenceSetupLot())
+   // fell onto whatever routes remained - observed live as a single MARKET
+   // order at double the normal size. targetSetupLot is already the flat,
+   // untiered per-layer lot (see ConfidenceSetupLot()) and was already
+   // verified above to be >= the broker minimum, so no shrink-loop or
+   // remainder split is needed at all: a route that cannot open still just
+   // does not open, at no cost to the routes that do.
    int available=ArraySize(plans);
-
-   while(available>1)
-   {
-      double share=
-         NormalizeVolumeDown(
-            targetSetupLot/(double)available);
-
-      if(share>=minVol-1e-12)
-         break;
-
-      ArrayResize(plans,available-1);
-      available=ArraySize(plans);
-   }
 
    if(available<=0)
       return false;
 
-   double remaining=targetSetupLot;
-
-   // LIMIT routes receive equal broker-valid shares.
-   // MARKET receives the final rounding remainder, preserving total volume.
-   for(int i=available-1;i>=0;i--)
-   {
-      int routesLeft=i+1;
-
-      double volume=
-         (i==0)
-         ? NormalizeVolumeDown(remaining)
-         : NormalizeVolumeDown(
-              remaining/(double)routesLeft);
-
-      if(volume<minVol-1e-12)
-      {
-         SetDeploymentFailure(
-            "confidence volume split produced a layer below broker minimum",
-            0,"","",false);
-         return false;
-      }
-
-      plans[i].volume=volume;
-      remaining=MathMax(0.0,remaining-volume);
-   }
+   for(int i=0;i<available;i++)
+      plans[i].volume=targetSetupLot;
 
    double assigned=0.0;
 
@@ -13835,46 +13852,24 @@ bool CreateMarketFallbackLayerSet(int direction,
 
    int layers=MathMax(1,MathMin(requestedLayers,InpMaxLayers));
 
-   // Reduce layer count only when broker minimum volume makes the preferred
-   // split impossible. Total setup lot remains the same.
-   while(layers>1)
-   {
-      double share=
-         NormalizeVolumeDown(targetSetupLot/(double)layers);
-
-      if(share>=minVol-1e-12)
-         break;
-
-      layers--;
-   }
-
+   // S10: every fallback layer requests the SAME flat targetSetupLot, same
+   // reasoning as BuildAggressiveArmPlans - targetSetupLot is already the
+   // flat, untiered per-layer lot and already verified >= broker minimum
+   // above, so no split-to-fit-a-total logic is needed here at all.
    ArrayResize(plans,layers);
 
-   double remaining=targetSetupLot;
    double marketPrice=(direction==1)?tick.ask:tick.bid;
 
    for(int i=0;i<layers;i++)
    {
-      int left=layers-i;
-
-      double vol=
-         (left==1)
-         ? NormalizeVolumeDown(remaining)
-         : NormalizeVolumeDown(remaining/(double)left);
-
-      if(vol<minVol-1e-12)
-         return false;
-
       plans[i].rawPrice=marketPrice;
       plans[i].execPrice=marketPrice;
-      plans[i].volume=vol;
+      plans[i].volume=targetSetupLot;
       plans[i].kind=LAYER_MARKET;
       plans[i].lossPerLot=OneLotLoss(direction,marketPrice,sl);
 
       if(plans[i].lossPerLot<=0)
          return false;
-
-      remaining=MathMax(0.0,remaining-vol);
    }
 
    return true;

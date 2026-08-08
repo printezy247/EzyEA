@@ -1268,3 +1268,83 @@ tester runs (most low-exposure setups should now be filtered by the normal quali
 instead of force-passed) and check whether the win rate improves. If trade count drops but
 win rate is still poor, the remaining problem is in the entry/direction signal quality
 itself, not in how permissively it gets applied.
+
+---
+
+## S10 — lot multiplication removed; confidence now means layer count, not size
+
+While S09 was running live, the user watched the BTC chart place a single order at **double**
+the normal lot size and asked directly: does the confidence-tier system still multiply lot
+size, and can it be changed to multiply the *number of layers* instead - Standard = one
+instant (MARKET) order, Good = one instant plus one limit, Quality = one instant plus two
+limits, every layer the same flat size?
+
+### Root cause
+
+Two systems were already scaling the same thing in the same direction, compounding each
+other:
+
+1. `ConfidenceSetupLot(conf)` picked a bigger `lotPer100` for Good/Quality
+   (`InpGoodSetupLotPer100`/`InpQualitySetupLotPer100`, 2x/3x
+   `InpStandardSetupLotPer100`), producing a bigger **total** lot for the whole setup.
+2. `DesiredLayersForSetup(conf,...)` **also** gave that same setup more layers (2 for Good, 3
+   for Quality) to split that already-bigger total across.
+
+That alone would have produced "more, smaller layers" rather than a doubled single order. The
+actual doubling came from a third place: `BuildAggressiveArmPlans`'s route-shrink loop could
+drop a LIMIT route that failed to attach (a very ordinary outcome — price moved, a duplicate
+zone, a broker minimum-distance rule) **without** shrinking `targetSetupLot` to match, so the
+whole un-split, already-tier-inflated total fell onto whichever route(s) survived — exactly a
+single MARKET order at 2x (or 3x) the intended size, which is what the user saw live.
+
+### Fix
+
+- `ConfidenceSetupLot()` no longer reads `InpGoodSetupLotPer100`/`InpQualitySetupLotPer100` at
+  all — it always returns the flat `InpStandardSetupLotPer100`-derived lot, regardless of
+  confluence count. Confidence is now expressed **solely** through
+  `DesiredLayersForSetup()`'s layer count, which was already correct (1/2/3) and is untouched.
+- `BuildConfidenceLayerPlans()`, `BuildAggressiveArmPlans()`'s route-assignment loop, and
+  `CreateMarketFallbackLayerSet()` — the three places that used to divide one total lot across
+  N layers — now assign this same flat lot to **every** layer directly. A layer/route that
+  cannot open (limit fails to attach, broker rejects it) simply does not open, at no cost to
+  the layers that do. This removes the doubling bug at its source rather than patching the
+  route-shrink loop that exposed it.
+- `InpGoodSetupLotPer100`/`InpQualitySetupLotPer100` remain declared (so old `.set` files
+  still load without error) but are no longer read anywhere.
+
+Applied identically to `EzyMap_V2_1b_TRIGGER_REFINED.mq5` (S05 there) — the user asked for
+both files, and the three functions touched are shared, unmodified code between the two
+lineages, so the fix is byte-identical apart from the stage tag in comments.
+
+### What did NOT change
+
+- Which setups can arm, and how many layers a Standard/Good/Quality setup gets, is untouched —
+  only how big each of those layers is.
+- The aggregate risk-budget ceiling (`riskBudget` in `BuildConfidenceLayerPlans`) is still
+  respected: it now caps cumulative risk across layers already planned rather than
+  pre-dividing itself across all of them up front, so it still shrinks or refuses a layer if
+  the running total would exceed it - it just no longer shrinks every layer pre-emptively to
+  fit inside a fixed total that no longer exists.
+- S08 (ATR-adaptive stops) and S09 (zero-conf confluence floor) are both untouched, per the
+  user's request to leave exit/profit-locking logic alone.
+
+**Understood consequence, not a bug:** a Good or Quality setup will now genuinely commit more
+total capital than before in the case where every layer fills (2x or 3x a single Standard
+layer, by simple arithmetic of "more layers, same size each") — this is the direct, intended
+result of "more layers" replacing "bigger layers," not an oversight.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Brace / paren / bracket balance | ✅ V2.2: `{}` 933/933 · `()` 6372/6372 · `[]` 1187/1187, residual 0. V2.1b: `{}` 930/930 · `()` 6265/6265 · `[]` 1187/1187, residual 0 |
+| No dangling references to removed variables (`remainingLot`, `desiredShare`, `riskShare`) | ✅ grep-confirmed zero hits in either file |
+| `ConfidenceSetupLot()` signature unchanged | ✅ still `double ConfidenceSetupLot(int conf)`; every call site (4 in each file) needed no edits |
+| Patch identical between V2.2 and V2.1b | ✅ script-diffed the non-comment lines of `ConfidenceSetupLot()`, `BuildConfidenceLayerPlans()`, and `CreateMarketFallbackLayerSet()` between both files — zero differences. The `BuildAggressiveArmPlans` route-loop edit diffed identically as well |
+| **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
+| **Fix validated by a real run** | ❌ **no — reasoned from the exact live trade the user reported (a single order at 2x lot) and the three-function trace above, not yet re-tested** |
+
+**Next test:** watch the live BTC chart for a Good/Quality setup and confirm each individual
+order (not the setup total) is now the same size as a Standard order's single layer — e.g. if
+Standard places one 0.09-lot order, a Good setup should place two 0.09-lot orders (one
+instant, one limit), not one 0.18-lot order.
