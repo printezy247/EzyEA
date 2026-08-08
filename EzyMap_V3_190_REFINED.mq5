@@ -626,6 +626,29 @@ input double InpBreakevenLockAtPips            = 9.0;
 // loss.
 input double InpBreakevenLockOffsetPips        = 1.0;
 
+//------------------------- V3.190 STAGE 2 ---------------------------
+// V3.190 S2: partial take profit.
+// OLD BEHAVIOUR: no TP of any kind was submitted (InpUseTakeProfit was off
+// and the fixed-TP inputs were all zero), so a position ran purely on the
+// trail. Any trade that spiked and reversed handed the whole excursion back.
+// NEW: bank a share of the volume at a fixed pip target and let the rest ride
+// from breakeven+offset. Default false = V3.176 behaviour.
+
+// V3.190 S2: master switch. Default false = V3.176 (no TP at all).
+// RECOMMENDED true.
+input bool   InpUsePartialTakeProfit           = false;
+// V3.190 S2: favourable excursion at which the partial is taken.
+input double InpPartialTPPips                  = 11.0;
+// V3.190 S2: percentage of the position closed at the target. The remainder
+// keeps running on the S01 trail. If the remainder would land below the
+// broker volume minimum the FULL position is closed instead, so no
+// unclosable stub is ever left behind.
+input double InpPartialTPPercent               = 55.0;
+// V3.190 S2: move the surviving remainder's stop to breakeven +
+// InpBreakevenLockOffsetPips as soon as the partial fills, so the runner
+// cannot turn a booked win into a loss.
+input bool   InpBreakevenAfterPartial          = true;
+
 // V3.164 live XAUUSD.sc protection parity.
 // Account denomination affects money and lot sizing, never price distance.
 // Historical M1 highs/lows cannot arm a trail immediately after attaching
@@ -1002,6 +1025,11 @@ struct ExitExecutionState
    ulong  modifyCooldownUntilMs;
    double lastRequestedSL;
    uint   lastModifyRetcode;
+
+   // V3.190 S2: volume requested on the in-flight close. 0.0 means the
+   // request was a full close; a positive value marks it as a partial so the
+   // deal handler can tell the two apart when the fill arrives.
+   double partialCloseVolume;
 };
 
 
@@ -1215,7 +1243,8 @@ bool RequestSynchronizedPositionClose(ulong ticket,
                                       string context,
                                       double stop,
                                       double peak,
-                                      ulong deviation);
+                                      ulong deviation,
+                                      double closeVolume=0.0);
 void HandleExitExecutionTransaction(const MqlTradeTransaction &trans);
 void PruneExitExecutionStates();
 bool ClosePositionAtVirtualTrail(ulong ticket,string context,double current,double stop,double peak);
@@ -3262,11 +3291,18 @@ bool RequestSynchronizedPositionModify(ulong ticket,
 }
 
 
+// V3.190 S2: gained a trailing closeVolume parameter. It defaults to 0.0,
+// which means "close the whole position" - the exact V3.176 behaviour - so
+// every pre-existing call site is unchanged. A positive value below the
+// position's volume routes through PositionClosePartial instead, which lets
+// the S02 partial take profit inherit this function's close-lock and
+// rejection handling rather than bypassing it.
 bool RequestSynchronizedPositionClose(ulong ticket,
                                       string context,
                                       double stop,
                                       double peak,
-                                      ulong deviation)
+                                      ulong deviation,
+                                      double closeVolume=0.0)
 {
    if(!PositionSelectByTicket(ticket))
       return false;
@@ -3309,14 +3345,43 @@ bool RequestSynchronizedPositionClose(ulong ticket,
    g_exitExecutionStates[stateIndex].peakPrice=peak;
    g_exitExecutionStates[stateIndex].closeReason=context;
 
+   // V3.190 S2: decide full vs partial. A requested volume that meets or
+   // exceeds the live position volume degrades to a full close, and so does a
+   // request that would strand a remainder under the broker minimum - never
+   // leave an unclosable stub behind.
+   double positionVolume=PositionGetDouble(POSITION_VOLUME);
+   double minVolume=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   double partialVolume=0.0;
+
+   if(closeVolume>0.0 && positionVolume>0.0)
+   {
+      double requestVolume=NormalizeVolumeDown(MathMin(closeVolume,positionVolume));
+      double remainder=positionVolume-requestVolume;
+
+      if(requestVolume>=minVolume-1e-12 &&
+         requestVolume<positionVolume-1e-12 &&
+         remainder>=minVolume-1e-12)
+         partialVolume=requestVolume;
+   }
+
+   g_exitExecutionStates[stateIndex].partialCloseVolume=partialVolume;
+
    trade.SetDeviationInPoints(deviation);
-   bool sent=trade.PositionClose(ticket,deviation);
+   bool sent=(partialVolume>0.0)
+             ? trade.PositionClosePartial(ticket,partialVolume,deviation)
+             : trade.PositionClose(ticket,deviation);
    uint code=trade.ResultRetcode();
    trade.SetDeviationInPoints(
       (ulong)MathMax(0,InpDeviationPoints));
 
    bool accepted=
       sent && TradeRetcodeAccepted(code);
+
+   // V3.190 S2: the close request itself can come back partially filled. That
+   // is an accepted outcome, but the caller must not assume the volume it
+   // asked for actually left the book - surface it so a short fill is visible
+   // in the journal instead of being read as a clean close.
+   bool partiallyFilled=TradeRetcodePartial(code);
 
    bool alreadyClosing=
       code==TRADE_RETCODE_CLOSE_ORDER_EXIST;
@@ -3332,11 +3397,20 @@ bool RequestSynchronizedPositionClose(ulong ticket,
           " | stop="+DoubleToString(stop,_Digits)+
           " | peak="+DoubleToString(peak,_Digits)+
           " | deviation="+(string)deviation+
+          " | volume="+
+          (partialVolume>0.0
+           ? DoubleToString(partialVolume,VolumeDigits())+" of "+
+             DoubleToString(positionVolume,VolumeDigits())+" (PARTIAL)"
+           : DoubleToString(positionVolume,VolumeDigits())+" (FULL)")+
           " | close lock="+
           IntegerToString(
              MathMax(250,InpExitCloseLockTimeoutMs))+
           "ms"+
-          " | retcode="+IntegerToString((int)code));
+          " | retcode="+IntegerToString((int)code)+
+          (partiallyFilled
+           ? " | WARNING partial fill on the close request itself"
+             " - requested volume did not fully execute"
+           : ""));
       return true;
    }
 
@@ -3591,6 +3665,111 @@ void ManageHybridTrailingPositions(string context)
 
       double peak=g_hybridTrailStates[stateIndex].peakPrice;
       double peakFavourable=(direction==1)?peak-entry:entry-peak;
+
+      // ---------------- V3.190 S2 partial take profit ----------------
+      // Evaluated BEFORE the trail so a touched target banks volume on this
+      // pass rather than waiting for the next one. Uses the CURRENT price,
+      // not the peak: we only bank what is actually available right now.
+      if(InpUsePartialTakeProfit &&
+         !g_hybridTrailStates[stateIndex].partialTaken)
+      {
+         double currentFavourable=(direction==1)?current-entry:entry-current;
+         double partialTarget=ProtectionPriceDistance(MathMax(0.1,InpPartialTPPips));
+
+         if(currentFavourable>=partialTarget-_Point*0.25)
+         {
+            double positionVolume=PositionGetDouble(POSITION_VOLUME);
+            double minVolume=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+            double pct=MathMax(0.0,MathMin(100.0,InpPartialTPPercent));
+            double wanted=NormalizeVolumeDown(positionVolume*pct/100.0);
+            double remainder=positionVolume-wanted;
+
+            // Degrade to a full close when a partial is not cleanly possible.
+            bool fullInstead=(wanted<minVolume-1e-12) ||
+                             (remainder<minVolume-1e-12) ||
+                             (wanted>=positionVolume-1e-12);
+
+            double requestVolume=fullInstead?0.0:wanted;
+
+            // Mark BEFORE sending. The close is asynchronous - leaving the
+            // flag until the fill arrives would let the next tick fire a
+            // second partial on the same position.
+            g_hybridTrailStates[stateIndex].partialTaken=true;
+            g_hybridTrailStates[stateIndex].partialRequestedVolume=requestVolume;
+
+            bool partialSent=
+               RequestSynchronizedPositionClose(
+                  ticket,
+                  "V3.190 S2 PARTIAL TP",
+                  g_hybridTrailStates[stateIndex].virtualStop,
+                  peak,
+                  (ulong)MathMax(0,InpVirtualTrailCloseDeviationPts),
+                  requestVolume);
+
+            Log("V3.190 S2 PARTIAL TP "+
+                string(partialSent?"REQUESTED":"REJECTED")+" | "+context+
+                " | ticket="+(string)ticket+
+                " | target="+DoubleToString(InpPartialTPPips,1)+" pips"+
+                " | favourable="+DoubleToString(currentFavourable/strategyPip,1)+" pips"+
+                " | position volume="+DoubleToString(positionVolume,VolumeDigits())+
+                " | requested="+
+                (fullInstead
+                 ? "FULL CLOSE (remainder would be below broker minimum "+
+                   DoubleToString(minVolume,VolumeDigits())+")"
+                 : DoubleToString(requestVolume,VolumeDigits())+" ("+
+                   DoubleToString(pct,1)+"%)")+
+                " | BE after partial="+
+                string(InpBreakevenAfterPartial?"YES":"NO"));
+
+            if(!partialSent)
+            {
+               // Allow a retry on a later pass rather than silently
+               // abandoning the target after one rejection.
+               g_hybridTrailStates[stateIndex].partialTaken=false;
+               g_hybridTrailStates[stateIndex].partialRequestedVolume=0.0;
+            }
+            else if(fullInstead)
+            {
+               continue;
+            }
+         }
+      }
+
+      // V3.190 S2: once a partial has actually reduced the position, put a
+      // breakeven+offset floor under the remainder. Folded into the same
+      // ratchet as every other stop movement, so it can only improve.
+      if(InpUsePartialTakeProfit &&
+         InpBreakevenAfterPartial &&
+         g_hybridTrailStates[stateIndex].partialTaken &&
+         g_hybridTrailStates[stateIndex].partialRequestedVolume>0.0 &&
+         !g_hybridTrailStates[stateIndex].breakevenLocked)
+      {
+         double beOffsetAfterPartial=
+            (MathMax(0.0,InpBreakevenLockOffsetPips)<=0.0)
+            ? 0.0
+            : ProtectionPriceDistance(InpBreakevenLockOffsetPips);
+
+         double beStop=RoundProtectionStop(
+            direction,
+            direction==1 ? entry+beOffsetAfterPartial
+                         : entry-beOffsetAfterPartial);
+
+         if(TrailStopImproves(direction,
+                              beStop,
+                              g_hybridTrailStates[stateIndex].virtualStop,
+                              0.0))
+         {
+            g_hybridTrailStates[stateIndex].virtualStop=beStop;
+         }
+
+         g_hybridTrailStates[stateIndex].breakevenLocked=true;
+
+         Log("V3.190 S2 BREAKEVEN AFTER PARTIAL | "+context+
+             " | ticket="+(string)ticket+
+             " | entry="+DoubleToString(entry,_Digits)+
+             " | floor="+DoubleToString(beStop,_Digits)+
+             " | remainder rides on the S01 trail from here");
+      }
 
       // ---------------- V3.190 S1 phase machine ----------------
       // Geometry was frozen at EnsureHybridTrailState() time and never
