@@ -701,6 +701,29 @@ input double InpTouchStallMaxExtendPips        = 2.0;
 // which is exactly the V3.176 behaviour. Logged as a fallback.
 input int    InpTouchConfirmTimeoutSec         = 45;
 
+//------------------------- V3.190 STAGE 5 ---------------------------
+// V3.190 S5: scale into strength instead of stacking on trigger.
+// OLD BEHAVIOUR: up to InpMaxActiveLayersPerDirection layers could deploy in
+// one direction within a few pips of each other. That is effectively one
+// position at N x size, but it books N separate entries - so a zone that
+// fails records N losses and the win rate reads as a rout.
+// NEW: deploy a small initial layer count, and only add further layers once
+// the directional exposure is actually green by a multiple of ATR.
+// Setup FREQUENCY is unchanged - this only reduces the fill count on losing
+// zones. Default false = V3.176 layering.
+
+// V3.190 S5: master switch. RECOMMENDED true.
+input bool   InpScaleInOnConfirmation          = false;
+// V3.190 S5: layers deployed on the initial trigger.
+input int    InpInitialLayerCount              = 1;
+// V3.190 S5: the directional exposure must be green by this multiple of ATR
+// before any additional layer is allowed. Falls back to the frozen preset
+// stop distance when ATR geometry is unavailable.
+input double InpScaleInTriggerATRMult          = 0.50;
+// V3.190 S5: hard ceiling on how many layers may be ADDED beyond the initial
+// count for one direction.
+input int    InpMaxScaleInLayers               = 2;
+
 // V3.164 live XAUUSD.sc protection parity.
 // Account denomination affects money and lot sizing, never price distance.
 // Historical M1 highs/lows cannot arm a trail immediately after attaching
@@ -1290,6 +1313,8 @@ double ResolvedPresetStopPips();
 bool TouchConfirmationSatisfied(PersistentReadySetup &setup,int direction,
                                 double zoneLo,double zoneHi,double cmp,
                                 string &outcome);
+double DirectionalFavourableExcursion(int direction);
+bool ScaleInAllowed(int direction,string context);
 double BrokerSafeExecutionSL(int direction,double marketPrice,double requestedSL);
 double BrokerSafeExecutionTP(int direction,
                              double entryPrice,
@@ -8072,8 +8097,124 @@ int DirectionalLayerCapacityRemaining(int direction)
    return MathMax(0,InpMaxActiveLayersPerDirection-DirectionalLayerUsage(direction));
 }
 
+// V3.190 S5: favourable excursion of the existing directional exposure, in
+// PRICE, measured from the volume-weighted average entry. Zero when the
+// direction has no open position.
+double DirectionalFavourableExcursion(int direction)
+{
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol,tick))
+      return 0.0;
+
+   double volume=0.0;
+   double weighted=0.0;
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+
+      ENUM_POSITION_TYPE type=
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      bool matches=(direction==1 && type==POSITION_TYPE_BUY) ||
+                   (direction==-1 && type==POSITION_TYPE_SELL);
+
+      if(!matches) continue;
+
+      double v=PositionGetDouble(POSITION_VOLUME);
+      if(v<=0.0) continue;
+
+      volume  += v;
+      weighted+= v*PositionGetDouble(POSITION_PRICE_OPEN);
+   }
+
+   if(volume<=0.0)
+      return 0.0;
+
+   double averageEntry=weighted/volume;
+   double current=(direction==1)?tick.bid:tick.ask;
+
+   return (direction==1)?current-averageEntry:averageEntry-current;
+}
+
+
+// V3.190 S5: may this direction take ANOTHER layer on top of what it already
+// holds? Only reached once the direction has open exposure - the initial
+// layer is never gated by this.
+bool ScaleInAllowed(int direction,string context)
+{
+   if(!InpScaleInOnConfirmation)
+      return true;
+
+   int positions=CountOurPositionsByDirection(direction);
+   int pending  =CountOurPendingOrdersByDirection(direction);
+   int used     =positions+pending;
+   int initial  =MathMax(1,InpInitialLayerCount);
+
+   // Still filling the initial allocation - not a scale-in yet.
+   if(used<initial)
+      return true;
+
+   int added=used-initial;
+
+   if(added>=MathMax(0,InpMaxScaleInLayers))
+   {
+      Log("V3.190 S5 SCALE-IN CAP | "+string(direction==1?"BUY":"SELL")+
+          " | initial="+IntegerToString(initial)+
+          " | added="+IntegerToString(added)+
+          "/"+IntegerToString(MathMax(0,InpMaxScaleInLayers))+
+          " | context="+context);
+      return false;
+   }
+
+   // Require the existing exposure to be genuinely green before adding.
+   double favourable=DirectionalFavourableExcursion(direction);
+
+   double atr=CurrentGeometryATR();
+   double reference=(atr>0.0)
+                    ? atr
+                    : ProtectionPriceDistance(ResolvedPresetStopPips());
+
+   double required=reference*MathMax(0.0,InpScaleInTriggerATRMult);
+   double pip=MathMax(StrategyPipSize(),_Point);
+
+   if(favourable<required-_Point*0.25)
+   {
+      Log("V3.190 S5 SCALE-IN WAIT | "+string(direction==1?"BUY":"SELL")+
+          " | favourable="+DoubleToString(favourable/pip,1)+" pips"+
+          " | required="+DoubleToString(required/pip,1)+" pips"+
+          " ("+DoubleToString(InpScaleInTriggerATRMult,2)+" x "+
+          string(atr>0.0?"ATR":"preset stop")+")"+
+          " | open="+IntegerToString(positions)+
+          " pending="+IntegerToString(pending)+
+          " | context="+context);
+      return false;
+   }
+
+   Log("V3.190 S5 SCALE-IN ALLOWED | "+string(direction==1?"BUY":"SELL")+
+       " | favourable="+DoubleToString(favourable/pip,1)+" pips"+
+       " >= required "+DoubleToString(required/pip,1)+" pips"+
+       " | adding layer "+IntegerToString(added+1)+
+       "/"+IntegerToString(MathMax(0,InpMaxScaleInLayers))+
+       " | context="+context);
+
+   return true;
+}
+
+
 bool DirectionalLayerSlotAvailable(int direction,string context)
 {
+   // V3.190 S5: evaluated before the flat layer cap. Sits here because every
+   // entry path (aggressive arm, persistent layer, direct zero-conf) already
+   // funnels through this function, so one gate covers them all and the
+   // scale-in layers still pass through the normal volume/risk capping on
+   // their way to the broker.
+   if(!ScaleInAllowed(direction,context))
+      return false;
+
    if(!InpEnforceDirectionalLayerCap || InpMaxActiveLayersPerDirection<=0)
       return true;
 
@@ -9804,6 +9945,11 @@ double RiskPctForSetup(int conf,double entryLo,double entryHi,double sl)
 
 int DesiredLayersForSetup(int conf,double entryLo,double entryHi,double sl)
 {
+   // V3.190 S5: the trigger deploys only the initial allocation. Everything
+   // beyond it has to be earned by a green move, gated in ScaleInAllowed().
+   if(InpScaleInOnConfirmation)
+      return MathMax(1,MathMin(InpInitialLayerCount,InpMaxLayers));
+
    // Predictable confidence ladder:
    // STANDARD -> 1 layer
    // GOOD     -> 2 layers
