@@ -584,6 +584,48 @@ input double InpTrailingActivationPips         = 0.0;
 input double InpTrailingDistancePips           = 7.0;
 input double InpTrailingStepPips               = 1.0;
 
+//------------------------- V3.190 STAGE 1 ---------------------------
+// V3.190 S1: arm threshold decoupled from trail distance.
+// OLD BEHAVIOUR: the arm threshold was InpTrailingActivationPips (0), but
+// LiveTrailActivationDistance() then forced it up to the FULL trail distance
+// whenever InpLiveXAURequireFullTrailBeforeArm was true. With trail=7 that
+// made arm=7, so a position had to run +7 (plus spread and commission, call
+// it +9-10 net) before the trail could arm at all. Anything that peaked
+// between +1 and +9 and turned over took the whole -21 preset stop. That
+// bucket is the single largest population of losing trades.
+// NEW: the arm threshold is its own input, and the trail runs a three-phase
+// monotonic ratchet (initial -> breakeven floor -> tight).
+// Defaults below reproduce V3.176 exactly (arm 7 = trail 7, no tighten
+// because 999 is unreachable, no breakeven lock).
+
+// V3.190 S1: favourable excursion required before the trail arms at all.
+// Default 7.0 = V3.176. RECOMMENDED 4.0 - arms early enough that a modest
+// runner can still be salvaged green.
+input double InpTrailArmPips                   = 7.0;
+// V3.190 S1: trail distance used from arming until InpTrailTightenAtPips.
+// Default 7.0 = V3.176. RECOMMENDED 12.0 - a wider initial trail lets the
+// trade breathe through normal retracement instead of scratching out.
+input double InpTrailInitialDistancePips       = 7.0;
+// V3.190 S1: favourable excursion at which the trail switches to the tight
+// distance. Default 999.0 = unreachable, so V3.176 never tightens.
+// RECOMMENDED 16.0.
+input double InpTrailTightenAtPips             = 999.0;
+// V3.190 S1: trail distance once InpTrailTightenAtPips is reached.
+// Default 7.0 = V3.176. RECOMMENDED 7.0 - lock in the move once it is real.
+input double InpTrailTightDistancePips         = 7.0;
+// V3.190 S1: once the peak reaches InpBreakevenLockAtPips the stop may never
+// again sit worse than entry +/- InpBreakevenLockOffsetPips. This is a FLOOR
+// under the trail, not a replacement for it - the trail still ratchets past
+// it. Default false = V3.176 (no breakeven concept at all).
+// RECOMMENDED true.
+input bool   InpUseBreakevenLock               = false;
+// V3.190 S1: favourable excursion that triggers the breakeven floor.
+input double InpBreakevenLockAtPips            = 9.0;
+// V3.190 S1: how far beyond entry the breakeven floor sits, so a "breakeven"
+// exit still covers spread and commission rather than closing at a small net
+// loss.
+input double InpBreakevenLockOffsetPips        = 1.0;
+
 // V3.164 live XAUUSD.sc protection parity.
 // Account denomination affects money and lot sizing, never price distance.
 // Historical M1 highs/lows cannot arm a trail immediately after attaching
@@ -920,6 +962,26 @@ struct HybridTrailState
    double   virtualStop;
    datetime positionTime;
    datetime initializedClock;
+
+   // V3.190 S1/S3: geometry is resolved ONCE when the position is first seen
+   // and then frozen here, in PRICE distance. Freezing matters because S03
+   // can source these from ATR: if they were recomputed live, a falling ATR
+   // would shrink the trail distance and drag an already-advanced stop
+   // backwards, breaking the monotonic ratchet S01 depends on.
+   bool     geometryFrozen;
+   double   presetDistance;
+   double   armDistance;
+   double   trailInitialDistance;
+   double   tightenAtDistance;
+   double   trailTightDistance;
+   double   breakevenAtDistance;
+   double   breakevenOffset;
+   double   frozenATR;          // 0.0 when S03 geometry is disabled
+   bool     breakevenLocked;    // latched once the BE floor has engaged
+
+   // V3.190 S2: a position may only be partial-closed once.
+   bool     partialTaken;
+   double   partialRequestedVolume;
 };
 
 struct ExitExecutionState
@@ -1119,7 +1181,10 @@ double ProtectionTickSize();
 double ProtectionPriceDistance(double strategyPips);
 double RoundProtectionStop(int direction,double price);
 double ExactProtectionStop(int direction,double anchor,double strategyPips);
-double LiveTrailActivationDistance(MqlTick &tick,double trailDistance);
+double LiveTrailActivationDistance(MqlTick &tick,double armDistance);
+bool TrailStopImproves(int direction,double candidate,double existing,double minimumGain);
+double TrailBetterStop(int direction,double a,double b);
+void FreezeTrailGeometry(int index,int direction,double entry);
 double BrokerSafeExecutionSL(int direction,double marketPrice,double requestedSL);
 double BrokerSafeExecutionTP(int direction,
                              double entryPrice,
@@ -1347,23 +1412,57 @@ double ExactProtectionStop(int direction,double anchor,double strategyPips)
 }
 
 
-double LiveTrailActivationDistance(MqlTick &tick,double trailDistance)
+// V3.190 S1: the second parameter is now the ARM distance, not the trail
+// distance. OLD BEHAVIOUR: InpLiveXAURequireFullTrailBeforeArm raised the
+// activation threshold to the full TRAIL distance, which is what welded
+// arm == trail together. It now clamps against the arm distance only, so the
+// two are independent and the caller's InpTrailArmPips is honoured.
+double LiveTrailActivationDistance(MqlTick &tick,double armDistance)
 {
    double strategyPip=StrategyPipSize();
    double activation=MathMax(_Point,
                              MathMax(0.0,InpTrailingActivationPips)*strategyPip);
 
+   // The configured arm distance is the floor everywhere - tester and live
+   // alike. Only the broker-parity padding below is live-chart specific, and
+   // that behaviour is inherited unchanged from V3.176.
+   activation=MathMax(activation,armDistance);
+
    if(!InpLiveXAUProtectionParity || !IsLiveXAUUSDscProtectionChart())
       return activation;
-
-   if(InpLiveXAURequireFullTrailBeforeArm)
-      activation=MathMax(activation,trailDistance);
 
    if(InpLiveXAUIncludeSpreadInTrailArm)
       activation+=MathMax(0.0,tick.ask-tick.bid);
 
    activation+=MathMax(0,InpLiveXAUExtraProtectionCushionPoints)*_Point;
    return activation;
+}
+
+
+// V3.190 S1: "is candidate a strictly better (more protective) stop than
+// existing?" Buy stops improve upward, sell stops improve downward. Every
+// stop movement in the phase machine goes through this, which is what makes
+// the ratchet monotonic regardless of which phase produced the candidate.
+bool TrailStopImproves(int direction,double candidate,double existing,double minimumGain)
+{
+   if(candidate<=0.0)
+      return false;
+
+   if(existing<=0.0)
+      return true;
+
+   if(direction==1)
+      return candidate>existing+minimumGain;
+
+   return candidate<existing-minimumGain;
+}
+
+
+double TrailBetterStop(int direction,double a,double b)
+{
+   if(a<=0.0) return b;
+   if(b<=0.0) return a;
+   return (direction==1) ? MathMax(a,b) : MathMin(a,b);
 }
 
 
@@ -2789,6 +2888,58 @@ double ReconstructTrailPeak(int direction,
    return RoundPrice(peak);
 }
 
+// V3.190 S1: resolve the phase geometry for one position and freeze it.
+// Called exactly once per ticket, from EnsureHybridTrailState(). All values
+// are PRICE distances. When S03 is enabled the pip figures come from ATR
+// instead of the fixed inputs, but they land in the same fields and drive the
+// same phase machine - the logic is never forked.
+void FreezeTrailGeometry(int index,int direction,double entry)
+{
+   double presetPips = MathMax(0.1,InpPresetStopLossPips);
+   double armPips    = MathMax(0.0,InpTrailArmPips);
+   double initPips   = MathMax(0.1,InpTrailInitialDistancePips);
+   double tightPips  = MathMax(0.1,InpTrailTightDistancePips);
+   double tightenAt  = MathMax(0.0,InpTrailTightenAtPips);
+   double bePips     = MathMax(0.0,InpBreakevenLockAtPips);
+   double beOffset   = MathMax(0.0,InpBreakevenLockOffsetPips);
+   double atrValue   = 0.0;
+
+   g_hybridTrailStates[index].presetDistance      =ProtectionPriceDistance(presetPips);
+   g_hybridTrailStates[index].armDistance         =(armPips<=0.0)
+                                                   ? 0.0
+                                                   : ProtectionPriceDistance(armPips);
+   g_hybridTrailStates[index].trailInitialDistance=ProtectionPriceDistance(initPips);
+   g_hybridTrailStates[index].trailTightDistance  =ProtectionPriceDistance(tightPips);
+   g_hybridTrailStates[index].tightenAtDistance   =ProtectionPriceDistance(MathMax(0.1,tightenAt));
+   g_hybridTrailStates[index].breakevenAtDistance =ProtectionPriceDistance(MathMax(0.1,bePips));
+   g_hybridTrailStates[index].breakevenOffset     =(beOffset<=0.0)
+                                                   ? 0.0
+                                                   : ProtectionPriceDistance(beOffset);
+   g_hybridTrailStates[index].frozenATR           =atrValue;
+   g_hybridTrailStates[index].breakevenLocked     =false;
+   g_hybridTrailStates[index].partialTaken        =false;
+   g_hybridTrailStates[index].partialRequestedVolume=0.0;
+   g_hybridTrailStates[index].geometryFrozen      =true;
+
+   double pip=MathMax(StrategyPipSize(),_Point);
+
+   Log("V3.190 S1 GEOMETRY FROZEN"+
+       " | ticket="+(string)g_hybridTrailStates[index].ticket+
+       " | direction="+string(direction==1?"BUY":"SELL")+
+       " | entry="+DoubleToString(entry,_Digits)+
+       " | preset="+DoubleToString(presetPips,1)+"p"+
+       " | arm="+DoubleToString(armPips,1)+"p"+
+       " | trail(initial)="+DoubleToString(initPips,1)+"p"+
+       " | tighten@="+DoubleToString(tightenAt,1)+"p"+
+       " -> trail(tight)="+DoubleToString(tightPips,1)+"p"+
+       " | BE lock="+string(InpUseBreakevenLock?"ON":"OFF")+
+       " @"+DoubleToString(bePips,1)+"p"+
+       " +"+DoubleToString(beOffset,1)+"p"+
+       (atrValue>0.0
+        ?" | frozen ATR="+DoubleToString(atrValue/pip,1)+"p"
+        :""));
+}
+
 int EnsureHybridTrailState(ulong ticket,
                            int direction,
                            double entry,
@@ -2802,6 +2953,7 @@ int EnsureHybridTrailState(ulong ticket,
 
    index=ArraySize(g_hybridTrailStates);
    ArrayResize(g_hybridTrailStates,index+1);
+   ZeroMemory(g_hybridTrailStates[index]);
 
    g_hybridTrailStates[index].ticket=ticket;
    g_hybridTrailStates[index].active=false;
@@ -2810,6 +2962,8 @@ int EnsureHybridTrailState(ulong ticket,
    g_hybridTrailStates[index].virtualStop=0.0;
    g_hybridTrailStates[index].positionTime=positionTime;
    g_hybridTrailStates[index].initializedClock=TimeCurrent();
+
+   FreezeTrailGeometry(index,direction,entry);
 
    g_hybridTrailStates[index].peakPrice=
       ReconstructTrailPeak(direction,entry,positionTime,tick);
@@ -3380,9 +3534,9 @@ void ManageHybridTrailingPositions(string context)
       return;
 
    double strategyPip=StrategyPipSize();
-   double trailDistance=ProtectionPriceDistance(InpTrailingDistancePips);
-   double presetDistance=ProtectionPriceDistance(InpPresetStopLossPips);
-   double activationDistance=LiveTrailActivationDistance(tick,trailDistance);
+   // V3.190 S1: trail/preset/arm distances are no longer function-level
+   // constants. They are frozen per position in HybridTrailState and read
+   // back inside the loop, so a position keeps the geometry it opened with.
    double minimumStep=MathMax(ProtectionTickSize(),
                               ProtectionPriceDistance(InpTrailingStepPips));
 
@@ -3438,43 +3592,34 @@ void ManageHybridTrailingPositions(string context)
       double peak=g_hybridTrailStates[stateIndex].peakPrice;
       double peakFavourable=(direction==1)?peak-entry:entry-peak;
 
-      // Exact preset protection is active from fill, before favourable movement.
+      // ---------------- V3.190 S1 phase machine ----------------
+      // Geometry was frozen at EnsureHybridTrailState() time and never
+      // changes for the life of the position. Every phase contributes a
+      // CANDIDATE stop; the candidates are combined with TrailBetterStop()
+      // and then ratcheted into state.virtualStop, which can only ever
+      // improve. That single ratchet is what guarantees monotonicity across
+      // phase transitions - widening the trail distance, or an ATR change
+      // under S03, can never drag an advanced stop backwards.
+      double gPreset  =g_hybridTrailStates[stateIndex].presetDistance;
+      double gArm     =g_hybridTrailStates[stateIndex].armDistance;
+      double gInitial =g_hybridTrailStates[stateIndex].trailInitialDistance;
+      double gTighten =g_hybridTrailStates[stateIndex].tightenAtDistance;
+      double gTight   =g_hybridTrailStates[stateIndex].trailTightDistance;
+      double gBeAt    =g_hybridTrailStates[stateIndex].breakevenAtDistance;
+      double gBeOffset=g_hybridTrailStates[stateIndex].breakevenOffset;
+
+      // PHASE 0 - preset stop. Active from fill, before any favourable move.
       double initialVirtualStop=RoundProtectionStop(
          direction,
-         direction==1 ? entry-presetDistance : entry+presetDistance);
+         direction==1 ? entry-gPreset : entry+gPreset);
+
       if(g_hybridTrailStates[stateIndex].virtualStop<=0.0)
          g_hybridTrailStates[stateIndex].virtualStop=initialVirtualStop;
 
-      bool initialVirtualHit=(direction==1)
-                             ? current<=initialVirtualStop+_Point*0.25
-                             : current>=initialVirtualStop-_Point*0.25;
-      if(InpUseVirtualTrailFallback && initialVirtualHit)
-      {
-         ClosePositionAtVirtualTrail(ticket,context,current,initialVirtualStop,peak);
-         continue;
-      }
+      double candidateStop=initialVirtualStop;
 
-      double initialBrokerSL=BrokerCompatibleTrailSL(direction,current,initialVirtualStop);
-      bool initialImproves=currentSL<=0.0 ||
-         (direction==1 ? initialBrokerSL>currentSL+_Point*0.25
-                       : initialBrokerSL<currentSL-_Point*0.25);
-      if(initialImproves && initialBrokerSL>0.0 &&
-         FixedTrailSLBrokerValid(direction,current,initialBrokerSL))
-      {
-         double submittedSL=0.0;
-         bool initialSent=
-            RequestSynchronizedPositionModify(
-               ticket,
-               direction,
-               initialVirtualStop,
-               currentTP,
-               context,
-               "PRESET SL",
-               submittedSL);
-
-         if(initialSent)
-            currentSL=submittedSL;
-      }
+      double activationDistance=
+         LiveTrailActivationDistance(tick,gArm);
 
       bool liveProtectionChart=
          InpLiveXAUProtectionParity && IsLiveXAUUSDscProtectionChart();
@@ -3485,69 +3630,129 @@ void ManageHybridTrailingPositions(string context)
          TimeCurrent()>=g_hybridTrailStates[stateIndex].initializedClock+
                         InpLiveXAUTrailWarmupSeconds;
 
+      // PHASE 1 - arm the trail once the peak clears the ARM distance, which
+      // is now independent of the trail distance itself.
       if(InpEnableTrailingAfterEntry &&
          !g_hybridTrailStates[stateIndex].active &&
          liveWarmupComplete &&
          peakFavourable>=activationDistance-_Point*0.25)
       {
          g_hybridTrailStates[stateIndex].active=true;
-         Log("HYBRID 7-PIP TRAIL ARMED | "+context+
+         Log("V3.190 S1 TRAIL ARMED | "+context+
              " | ticket="+(string)ticket+
              " | entry="+DoubleToString(entry,_Digits)+
              " | peak="+DoubleToString(peak,_Digits)+
              " | favourable="+DoubleToString(peakFavourable/strategyPip,1)+" pips"+
-             " | required="+DoubleToString(activationDistance/strategyPip,1)+" pips"+
+             " | arm required="+DoubleToString(activationDistance/strategyPip,1)+" pips"+
+             " | initial trail="+DoubleToString(gInitial/strategyPip,1)+" pips"+
              " | live parity="+string(liveProtectionChart?"YES":"NO"));
       }
 
       if(InpEnableTrailingAfterEntry && g_hybridTrailStates[stateIndex].active)
       {
-         double virtualStop=RoundProtectionStop(
+         // PHASE 3 selection - tight distance once the peak clears the
+         // tighten threshold, otherwise the initial (wider) distance.
+         bool tightened=(peakFavourable>=gTighten-_Point*0.25);
+         double activeTrail=tightened?gTight:gInitial;
+
+         double trailStop=RoundProtectionStop(
             direction,
-            direction==1 ? peak-trailDistance : peak+trailDistance);
-         if(direction==1) virtualStop=MathMax(virtualStop,initialVirtualStop);
-         else             virtualStop=MathMin(virtualStop,initialVirtualStop);
-         g_hybridTrailStates[stateIndex].virtualStop=virtualStop;
+            direction==1 ? peak-activeTrail : peak+activeTrail);
 
-         bool virtualHit=(direction==1)
-                         ? current<=virtualStop+_Point*0.25
-                         : current>=virtualStop-_Point*0.25;
+         candidateStop=TrailBetterStop(direction,candidateStop,trailStop);
+      }
 
-         if(InpUseVirtualTrailFallback && virtualHit)
+      // PHASE 2 - breakeven floor. A FLOOR under the trail, not a
+      // replacement: it is folded in with TrailBetterStop() so whichever of
+      // the two is more protective wins, and the trail keeps ratcheting past
+      // it afterwards.
+      if(InpUseBreakevenLock &&
+         peakFavourable>=gBeAt-_Point*0.25)
+      {
+         double beStop=RoundProtectionStop(
+            direction,
+            direction==1 ? entry+gBeOffset : entry-gBeOffset);
+
+         candidateStop=TrailBetterStop(direction,candidateStop,beStop);
+
+         if(!g_hybridTrailStates[stateIndex].breakevenLocked)
          {
-            ClosePositionAtVirtualTrail(ticket,context,current,virtualStop,peak);
-            continue;
+            g_hybridTrailStates[stateIndex].breakevenLocked=true;
+            Log("V3.190 S1 BREAKEVEN FLOOR ENGAGED | "+context+
+                " | ticket="+(string)ticket+
+                " | entry="+DoubleToString(entry,_Digits)+
+                " | favourable="+DoubleToString(peakFavourable/strategyPip,1)+" pips"+
+                " | floor="+DoubleToString(beStop,_Digits)+
+                " (entry "+string(direction==1?"+":"-")+
+                DoubleToString(gBeOffset/strategyPip,1)+" pips)");
          }
+      }
 
-         double desiredSL=BrokerCompatibleTrailSL(direction,current,virtualStop);
-         bool improves=currentSL<=0.0 ||
-            (direction==1
-             ? desiredSL>currentSL+minimumStep-_Point*0.25
-             : desiredSL<currentSL-minimumStep+_Point*0.25);
+      // RATCHET - the only place virtualStop is allowed to move.
+      if(TrailStopImproves(direction,
+                           candidateStop,
+                           g_hybridTrailStates[stateIndex].virtualStop,
+                           0.0))
+      {
+         g_hybridTrailStates[stateIndex].virtualStop=candidateStop;
+      }
 
-         if(improves && desiredSL>0.0 && FixedTrailSLBrokerValid(direction,current,desiredSL))
+      double virtualStop=g_hybridTrailStates[stateIndex].virtualStop;
+
+      bool virtualHit=(direction==1)
+                      ? current<=virtualStop+_Point*0.25
+                      : current>=virtualStop-_Point*0.25;
+
+      if(InpUseVirtualTrailFallback && virtualHit)
+      {
+         ClosePositionAtVirtualTrail(ticket,context,current,virtualStop,peak);
+         continue;
+      }
+
+      // Push the ratcheted virtual stop out to the broker. The step filter
+      // only throttles how often we talk to the server; it never permits a
+      // backwards move because virtualStop itself is already monotonic.
+      double desiredSL=BrokerCompatibleTrailSL(direction,current,virtualStop);
+
+      bool improves=
+         TrailStopImproves(direction,
+                           desiredSL,
+                           currentSL,
+                           g_hybridTrailStates[stateIndex].active
+                           ? minimumStep-_Point*0.25
+                           : _Point*0.25);
+
+      if(improves && desiredSL>0.0 &&
+         FixedTrailSLBrokerValid(direction,current,desiredSL))
+      {
+         double submittedSL=0.0;
+         bool accepted=
+            RequestSynchronizedPositionModify(
+               ticket,
+               direction,
+               virtualStop,
+               currentTP,
+               context,
+               g_hybridTrailStates[stateIndex].active?"TRAILING SL":"PRESET SL",
+               submittedSL);
+
+         if(accepted)
          {
-            double submittedSL=0.0;
-            bool accepted=
-               RequestSynchronizedPositionModify(
-                  ticket,
-                  direction,
-                  virtualStop,
-                  currentTP,
-                  context,
-                  "TRAILING SL",
-                  submittedSL);
+            currentSL=submittedSL;
 
-            if(accepted)
-            {
-               currentSL=submittedSL;
-
-               Log("HYBRID BROKER SL MOVED | "+context+
-                   " | ticket="+(string)ticket+
-                   " | peak="+DoubleToString(peak,_Digits)+
-                   " | virtualSL="+DoubleToString(virtualStop,_Digits)+
-                   " | brokerSL="+DoubleToString(submittedSL,_Digits));
-            }
+            Log("V3.190 S1 BROKER SL MOVED | "+context+
+                " | ticket="+(string)ticket+
+                " | peak="+DoubleToString(peak,_Digits)+
+                " | favourable="+DoubleToString(peakFavourable/strategyPip,1)+" pips"+
+                " | virtualSL="+DoubleToString(virtualStop,_Digits)+
+                " | brokerSL="+DoubleToString(submittedSL,_Digits)+
+                " | phase="+
+                string(!g_hybridTrailStates[stateIndex].active
+                       ?"PRESET"
+                       :(peakFavourable>=gTighten-_Point*0.25
+                         ?"TIGHT TRAIL"
+                         :"INITIAL TRAIL"))+
+                (g_hybridTrailStates[stateIndex].breakevenLocked?" +BE FLOOR":""));
          }
       }
 
@@ -12085,8 +12290,8 @@ int OnInit()
    double liveTrailArmDistance=
       protectionTickAvailable
       ? LiveTrailActivationDistance(protectionTick,
-           ProtectionPriceDistance(InpTrailingDistancePips))
-      : ProtectionPriceDistance(InpTrailingDistancePips);
+           ProtectionPriceDistance(MathMax(0.1,InpTrailArmPips)))
+      : ProtectionPriceDistance(MathMax(0.1,InpTrailArmPips));
 
    Log("V3.176 LIVE XAUUSD.sc PROTECTION PARITY"+
        " | enabled="+string(InpLiveXAUProtectionParity?"YES":"NO")+
