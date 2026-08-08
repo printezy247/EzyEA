@@ -87,3 +87,14 @@ InpAutoCalibrateSpreadCap=false
 ; have.
 InpUseATRGeometry=false
 InpATRStopCeilingPips=35.0
+;
+; ---------------------------------------------------------------------------
+; S09 (added after S08) - InpZeroConfFallbackMinConfluences
+; ---------------------------------------------------------------------------
+; Same polarity exception again: this file's low-exposure fallback assigns
+; InpZeroConfFallbackMinConfluences (DEFAULT 2 here) instead of a hardcoded
+; 0 to setups admitted while flat/near-flat, which routes them through the
+; normal deployment quality gate instead of the FORCE-PASS bypass. Pin it
+; back to 0 here so this control arm reproduces the exact pre-S09 "any touch
+; while flat" behaviour, unchanged since V3.094/V3.102.
+InpZeroConfFallbackMinConfluences=0

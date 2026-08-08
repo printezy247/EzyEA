@@ -223,7 +223,7 @@
 //  rule lives in ProcessDirectZeroConfluenceTriggers(). See           |
 //  V2_1b_CHANGES.md.                                                  |
 //                                                                    |
-//  V2.2 BTC STAGE SUMMARY (S01-S08)                                   |
+//  V2.2 BTC STAGE SUMMARY (S01-S09)                                   |
 //                                                                    |
 //  Incremental build on V2.1b. This is a PORTABILITY AND BUGFIX pass, |
 //  not a strategy change. Scope: make the EA behave correctly on      |
@@ -408,6 +408,32 @@
 //      Inputs: InpUseATRGeometry (default TRUE here, FALSE            |
 //              elsewhere), InpATRStopCeilingPips (500.0, was 35.0)    |
 //                                                                    |
+//  S09 ZERO-CONFLUENCE FALLBACK NO LONGER MEANS ZERO CONFLUENCES       |
+//      S08's ATR-adaptive stops did not move a second real test run's |
+//      win rate (~12-14% on two different days) and the equity curve  |
+//      was a smooth, steady grind - many small losses, not occasional |
+//      big ones - which points at trade SELECTIVITY, not stop width.  |
+//      ResolveMarketReadySignal() has a documented "V3.094 exception":|
+//      required confluences drop to ZERO whenever this EA has 0 or 1  |
+//      open positions, and a setup admitted that way also has its     |
+//      touch-quality and position-count rechecks explicitly BYPASSED  |
+//      at deployment (V3104_FORCE_ZERO_CONF_MARKET_EXECUTION). On     |
+//      gold this fires rarely. On BTC, positions turn over fast (301  |
+//      completed trades in 24h in the test that exposed this, one     |
+//      every ~5 minutes), so exposure sits at 0-1 almost continuously |
+//      and this "rare exception" is plausibly the DOMINANT path -     |
+//      most entries getting no real quality bar at all.               |
+//      FIX: the required-confluence value that low-exposure setups    |
+//      get assigned is no longer hardcoded 0. Raising it above 0 is   |
+//      sufficient on its own to route them through the NORMAL         |
+//      deployment path instead of the bypass, because                 |
+//      zeroConfluenceFallback=(requiredConfluences==0) downstream -   |
+//      no other call site needed editing. WHICH setups can arm at     |
+//      all is unchanged (buyCandidate/sellCandidate's admission test  |
+//      does not read this value); only whether an admitted setup      |
+//      still has to clear the normal quality gate changed.            |
+//      Inputs: InpZeroConfFallbackMinConfluences (default 2)          |
+//                                                                    |
 //  BASE NOTE: this file descends from the V3.176 line, NOT from the   |
 //  separate V3.180 PARITY_HARDENED branch. It does not contain the    |
 //  V3.180 P01-P13 parity fixes. NowMs() and TradeRetcodePartial()     |
@@ -415,7 +441,7 @@
 //  were never present in this lineage; they were not removed.         |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "2.203"
+#property version   "2.204"
 
 #include <Trade/Trade.mqh>
 
@@ -640,6 +666,25 @@ input double InpGoodSetupLotPer100         = 0.02;
 input double InpQualitySetupLotPer100      = 0.03;
 input int    InpGoodConfidenceMin          = 3;
 input int    InpQualityConfidenceMin       = 5;
+
+// V2.2 BTC S09: the "V3.094 exception" (see ResolveMarketReadySignal()) drops
+// the required confluence count to ZERO whenever this EA has 0 or 1 open
+// positions on the symbol - meant as a rare low-exposure fallback on gold.
+// On BTC, positions turn over fast (a real test run completed 301 trades in
+// 24 hours, roughly one every 5 minutes), so exposure sits at 0-1 almost
+// continuously and this "exception" ends up being the DOMINANT path, not a
+// rare one - every setup admitted through it also gets its touch-quality and
+// position-count rechecks explicitly bypassed (see V3104_FORCE_ZERO_CONF_
+// MARKET_EXECUTION), so effectively no quality bar applied to most entries.
+// That, not stop width, is the leading explanation for a ~12-14% win rate
+// that did not improve after S08's ATR-adaptive stops. This does not remove
+// the low-exposure fallback (BTC still needs to be able to re-enter while
+// flat) - it just requires a real confluence count instead of none. Default
+// 2 matches the existing trend-following bar, so a counter-trend setup can
+// still use the fallback with partial (but non-zero) confirmation, while a
+// trend-following setup below its own 2-confluence bar can no longer use the
+// fallback to skip that bar entirely.
+input int    InpZeroConfFallbackMinConfluences = 2;
 
 // Hard monetary-risk guard. Confidence lots are reduced if the frozen
 // Entry->SL distance would otherwise exceed this percentage of equity.
@@ -8402,11 +8447,21 @@ bool CalculateMapAndMaybeReady(double livePrice)
       zeroConfluenceLowExposure &&
       !sellNormalConfluence;
 
+   // V2.2 BTC S09: was a hardcoded 0 (see InpZeroConfFallbackMinConfluences
+   // for why). g_buyReady.requiredConfluences/g_sellReady.requiredConfluences
+   // carry this value through to zeroConfluenceFallback=(requiredConfluences
+   // ==0) at persistence time, so raising it above 0 here is sufficient on
+   // its own to route these setups through the NORMAL deployment path
+   // instead of the FORCE-PASS bypass - no other call site needs editing.
    int buyEffectiveRequired=
-      buyZeroConfluenceFallback ? 0 : buyRequired;
+      buyZeroConfluenceFallback
+      ? MathMax(0,InpZeroConfFallbackMinConfluences)
+      : buyRequired;
 
    int sellEffectiveRequired=
-      sellZeroConfluenceFallback ? 0 : sellRequired;
+      sellZeroConfluenceFallback
+      ? MathMax(0,InpZeroConfFallbackMinConfluences)
+      : sellRequired;
 
    bool buyCandidate=
       allowBuy &&

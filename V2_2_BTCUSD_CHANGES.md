@@ -1201,3 +1201,70 @@ SPREAD AUTO-CALIBRATION COMPLETE` line for the real measured spread (still open 
 and this time also check the win/loss split and net profit — if the win rate is still very
 low with ATR-adaptive stops active, the geometry scale was not the (whole) story and the
 next place to look is the entry/direction signal logic itself.
+
+---
+
+## S09 — the zero-confluence fallback stopped meaning zero confluences
+
+**S08 did not move the win rate.** A second real test run, on a different day, came back at
+~14.4% (53/315/65) — essentially the same as S07's 12.2% (56/403/69) despite stops now being
+ATR-adaptive instead of a flat $21. The user's own equity-curve screenshot settled the
+question: a smooth, steady grind downward with no drawdown spikes at all — many small
+losses, not occasional big ones. That is a trade-*selectivity* signature, not a stop-width
+one, so S08's fix (real, and kept) was not the whole story.
+
+Reading `ResolveMarketReadySignal()` found a second, independent bug in the same family as
+S07/S08 — a fixed value that made sense for gold's trading cadence but not BTC's. A
+documented "V3.094 exception" drops the required confluence count to **zero** whenever the
+EA has 0 or 1 open positions on the symbol, meant as a rare low-exposure fallback. A setup
+admitted this way also has its touch-quality recheck and position-count recheck explicitly
+**bypassed** at deployment time (`V3104_FORCE_ZERO_CONF_MARKET_EXECUTION`, logged as
+`ZERO-CONFLUENCE FORCE PASS ... recheck=BYPASSED`). On gold this presumably fires rarely.
+On BTC, the same test run that exposed the win-rate problem completed **301 trades in 24
+hours** — about one every 5 minutes — so exposure sits at 0-1 almost continuously. The "rare
+exception" is plausibly the *dominant* entry path on BTC: most trades getting no real
+quality bar at all, which is consistent with a strategy that has some real edge but pays it
+away in noise trades with none.
+
+### Fix
+
+The user was explicit that the fix should be "more confluences," not changes to the
+exit/profit-locking logic (S08 stands untouched). `InpZeroConfFallbackMinConfluences`
+(default `2`, matching the existing trend-following bar) replaces the hardcoded `0` that
+low-exposure setups were assigned. This is sufficient on its own: `zeroConfluenceFallback=
+(requiredConfluences==0)` downstream is what actually triggers the FORCE-PASS bypass at
+deployment, so once the assigned value is non-zero, those setups fall through to the
+**normal** deployment path (touch-quality recheck and position-count recheck both apply)
+instead of skipping it.
+
+**What did NOT change:** `buyCandidate`/`sellCandidate` — the test for whether a setup arms
+at all — reads `(buyNormalConfluence || buyZeroConfluenceFallback)`, and
+`buyZeroConfluenceFallback`'s own definition (exposure ≤ 1 and confluence count below the
+normal bar) is untouched. So exactly the same set of setups can still arm while the EA is
+flat or near-flat; the only change is that most of them now have to clear the standard
+quality gate on the way to a real order, instead of being force-passed through it.
+
+### `.set` file changes
+
+`STAGE0_BASELINE.set` gained the S09 polarity-exception pin
+(`InpZeroConfFallbackMinConfluences=0`), same pattern as S06-S08, reproducing the exact
+pre-S09 "any touch while flat" behaviour that has existed since V3.094/V3.102.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Brace / paren / bracket balance | ✅ `{}` 937/937 · `()` 6402/6402 · `[]` 1187/1187, residual 0 |
+| Admission test (`buyCandidate`/`sellCandidate`) unchanged | ✅ still reads `buyNormalConfluence \|\| buyZeroConfluenceFallback`; neither operand touched |
+| Only the two `effectiveRequired` assignments changed | ✅ `buyEffectiveRequired`/`sellEffectiveRequired` now read the new input instead of a literal `0`; no other call site edited |
+| New input declared before first use | ✅ input at line ~661, first use at ~8432, well after |
+| Every `.set` input name resolves to a real declaration | ✅ script-checked: `RECOMMENDED` 76, `STAGE0_BASELINE` 9, `DIAGNOSTIC_FIRSTPASS` 74 entries, zero missing |
+| **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
+| **Fix validated by a real run** | ❌ **no — reasoned from the file's own documented "V3.094 exception" and the observed 301-trades/24h turnover rate, not yet re-tested** |
+
+**Next test:** the user is running this build live today on a $1000 (USC) real chart rather
+than the Strategy Tester. Watch for a lower trade count than the ~300-450/day seen in S07/S08
+tester runs (most low-exposure setups should now be filtered by the normal quality gate
+instead of force-passed) and check whether the win rate improves. If trade count drops but
+win rate is still poor, the remaining problem is in the entry/direction signal quality
+itself, not in how permissively it gets applied.
