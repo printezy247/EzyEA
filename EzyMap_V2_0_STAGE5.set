@@ -1,0 +1,41 @@
+; EzyMap Scalp Mastery V2.0 - EzyMap_V2_0_STAGE5.set
+; STAGE 5 - adds zone distal-edge stops. Cumulative: S1..S5.
+;
+; Only the V2.0 S01-S05 inputs are listed. Load this ON TOP of your
+; V3.190 working set - every other input keeps its current value.
+;
+InpUseV2RoutingChain=true
+InpUseH1BiasFilter=true
+InpH1BiasEMAPeriod=50
+InpH1BiasMode=1
+InpCounterTrendSizeMult=0.5
+InpTrackZoneFreshness=true
+InpFreshnessMaxTouches=4
+InpTouch1SizeMult=1.0
+InpTouch2SizeMult=0.6
+InpTouch3SizeMult=0.35
+InpTouch4PlusSizeMult=0.2
+InpZoneIdentityTolerancePips=8.0
+InpScoreDepartureStrength=true
+InpDepartureLookbackBars=6
+InpStrongDepartureRatio=3.0
+InpWeakDepartureRatio=1.5
+InpStrongDepartureSizeMult=1.0
+InpModerateDepartureSizeMult=0.7
+InpWeakDepartureSizeMult=0.4
+InpUseZoneGrading=true
+InpGradeASizeMult=1.0
+InpGradeBSizeMult=0.6
+InpGradeCSizeMult=0.3
+InpGradeAPartialTPPips=16.0
+InpGradeBPartialTPPips=11.0
+InpGradeCPartialTPPips=7.0
+InpGradeATrailMult=1.4
+InpGradeBTrailMult=1.0
+InpGradeCTrailMult=0.7
+InpRoundNumberTolerancePips=5.0
+InpUseZoneDistalStops=true
+InpDistalStopBufferPips=3.0
+InpDistalStopMinPips=10.0
+InpDistalStopMaxPips=30.0
+InpFallbackToATRStop=true
