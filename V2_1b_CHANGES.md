@@ -615,3 +615,24 @@ before anything else:
 
 Read it alongside the existing `V2.1a CONFLUENCE FILTER RATE` line — between them the two
 lines now cover every gate standing between a stored READY setup and an order send.
+
+---
+
+## S04 — Auto-calibrating spread cap (opt-in, off by default here)
+
+Ported from the BTCUSD sibling (`EzyMap_V2_2_BTCUSD_ADAPTATION.mq5` S07), where three
+static `InpMaxSpreadPoints` guesses in a row failed to produce a single trade on
+BTCUSD.sc. `SpreadAllowed()` can now measure the symbol's own real spread for
+`InpSpreadCalibrationTicks` ticks (filter inactive / fail-open while collecting) and lock in
+`median(observed) * InpSpreadCalibrationMultiplier` as the enforced cap, clamped to
+`InpMaxSpreadPoints` as an optional ceiling.
+
+**On this (gold) lineage `InpAutoCalibrateSpreadCap` defaults `false`** — the ordinary
+"new input reproduces old behaviour" rule, not the S03 polarity exception — because the
+static value here has a working track record and this stage's whole premise doesn't apply
+to it. With the input off, `SpreadAllowed()` takes the byte-identical pre-S04 branch. Turn
+it on only if you ever see the same symptom (zero trades, spread suspected) on this file.
+
+See the BTCUSD file's `V2_2_BTCUSD_CHANGES.md` S07 section for the full write-up, the
+median-vs-mean reasoning, and the verification table — the code is byte-identical between
+the two files apart from the log tag and this default.

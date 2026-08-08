@@ -156,7 +156,7 @@
 //  DeployPersistentSetup() - which between them cover both paths      |
 //  exactly once each. See V2_1a_CHANGES.md.                           |
 //                                                                    |
-//  V2.1b STAGE SUMMARY (S01-S02)                                      |
+//  V2.1b STAGE SUMMARY (S01-S04)                                      |
 //                                                                    |
 //  Incremental build on V2.1a. Scoped EXCLUSIVELY to the zero-        |
 //  confluence TRIGGER SOURCE LADDER in ResolveZeroConfTriggerMap()    |
@@ -267,6 +267,22 @@
 //                                                                    |
 //      Inputs: InpForceMinimumBaseSizing                              |
 //                                                                    |
+//  S04 AUTO-CALIBRATING SPREAD CAP (opt-in, OFF by default here)      |
+//      Built for the BTCUSD sibling of this file, where three         |
+//      straight zero-trade test runs pointed at a mis-scaled static   |
+//      InpMaxSpreadPoints as the likely blocker. SpreadAllowed() can   |
+//      now measure the symbol's own real spread for                   |
+//      InpSpreadCalibrationTicks ticks (filter INACTIVE / fail-open   |
+//      while collecting), then enforce median(observed) *             |
+//      InpSpreadCalibrationMultiplier, clamped to InpMaxSpreadPoints  |
+//      as an optional ceiling. On THIS (gold) lineage the static      |
+//      value already has a working track record, so                  |
+//      InpAutoCalibrateSpreadCap DEFAULTS FALSE - the ordinary rule,   |
+//      not a polarity exception - and SpreadAllowed() is byte-        |
+//      identical to before when left off.                             |
+//      Inputs: InpAutoCalibrateSpreadCap, InpSpreadCalibrationTicks,   |
+//              InpSpreadCalibrationMultiplier                          |
+//                                                                    |
 //      See V2_1b_CHANGES.md.                                          |
 //                                                                    |
 //  BASE NOTE: this file descends from the V3.176 line, NOT from the   |
@@ -276,7 +292,7 @@
 //  were never present in this lineage; they were not removed.         |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "2.103"
+#property version   "2.104"
 
 #include <Trade/Trade.mqh>
 
@@ -638,6 +654,12 @@ input double InpLiveLimitGeometryExtensionPips = 20.0;
 // still allowing normal quoted spread through. Tune to your broker's typical
 // spread plus headroom; set back to 0 to disable.
 input int    InpMaxSpreadPoints          = 120;
+// V2.1b S04: opt-in auto-calibration, OFF by default on this (gold) lineage -
+// see SpreadAllowed() and the S04 header block above. When false, SpreadAllowed()
+// is byte-identical to the pre-S04 static-cap behaviour.
+input bool   InpAutoCalibrateSpreadCap      = false;
+input int    InpSpreadCalibrationTicks      = 100;
+input double InpSpreadCalibrationMultiplier = 3.0;
 input int    InpDeviationPoints          = 20;
 input bool   InpUseAsyncMode             = false;
 input bool   InpUseLimitStopLayers       = true;
@@ -2488,6 +2510,26 @@ long     g_capacityRejectOther=0;
 long     g_orderSendStd=0;
 long     g_orderSendZc=0;
 long     g_orderSendOther=0;
+
+// V2.1b S04: spread auto-calibration state (see the S04 header block and
+// SpreadAllowed()). g_spreadCalEffectiveCap<0.0 means "still collecting
+// samples, filter inactive (fail open)". Array sized once in OnInit.
+double   g_spreadCalSamples[];
+int      g_spreadCalCount=0;
+double   g_spreadCalEffectiveCap=-1.0;
+
+double MedianOfSpreadSamples(double &values[],int count)
+{
+   if(count<=0) return 0.0;
+
+   double copy[];
+   ArrayResize(copy,count);
+   for(int i=0;i<count;i++) copy[i]=values[i];
+   ArraySort(copy);
+
+   if(count%2==1) return copy[count/2];
+   return 0.5*(copy[count/2-1]+copy[count/2]);
+}
 
 
 // V3.190 S00: single monotonic millisecond clock for every timing decision in
@@ -9456,14 +9498,52 @@ bool TradingEnvironmentReady(string &reason)
 
 bool SpreadAllowed()
 {
-   if(InpMaxSpreadPoints<=0) return true;
-
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol,tick))
       return false;
 
    double spread=(tick.ask-tick.bid)/_Point;
-   return (spread<=InpMaxSpreadPoints);
+
+   // V2.1b S04: legacy static-cap path, byte-identical behaviour when
+   // auto-calibration is off (the default on this lineage).
+   if(!InpAutoCalibrateSpreadCap)
+   {
+      if(InpMaxSpreadPoints<=0) return true;
+      return (spread<=InpMaxSpreadPoints);
+   }
+
+   if(g_spreadCalEffectiveCap>=0.0)
+      return (spread<=g_spreadCalEffectiveCap);
+
+   int required=MathMax(20,InpSpreadCalibrationTicks);
+
+   if(g_spreadCalCount<ArraySize(g_spreadCalSamples))
+   {
+      g_spreadCalSamples[g_spreadCalCount]=spread;
+      g_spreadCalCount++;
+   }
+
+   if(g_spreadCalCount>=required)
+   {
+      double median=MedianOfSpreadSamples(g_spreadCalSamples,g_spreadCalCount);
+      double mult=MathMax(1.0,InpSpreadCalibrationMultiplier);
+      double effective=median*mult;
+
+      if(InpMaxSpreadPoints>0)
+         effective=MathMin(effective,(double)InpMaxSpreadPoints);
+
+      g_spreadCalEffectiveCap=MathMax(1.0,effective);
+
+      Log("V2.1b S04 SPREAD AUTO-CALIBRATION COMPLETE"+
+          " | samples="+IntegerToString(g_spreadCalCount)+
+          " | median observed="+DoubleToString(median,1)+" points"+
+          " | multiplier="+DoubleToString(mult,2)+
+          " | ceiling(InpMaxSpreadPoints)="+IntegerToString(InpMaxSpreadPoints)+
+          " | EFFECTIVE CAP NOW ENFORCED="+
+          DoubleToString(g_spreadCalEffectiveCap,1)+" points");
+   }
+
+   return true;
 }
 
 //====================== V2.1a CONFLUENCE ENGINE =====================
@@ -15409,6 +15489,20 @@ int OnInit()
    g_orderSendStd=0;
    g_orderSendZc=0;
    g_orderSendOther=0;
+
+   // V2.1b S04: (re)arm spread auto-calibration for this run.
+   g_spreadCalCount=0;
+   g_spreadCalEffectiveCap=-1.0;
+   ArrayResize(g_spreadCalSamples,MathMax(20,InpSpreadCalibrationTicks));
+
+   Log("V2.1b S04 SPREAD GUARD MODE"+
+       " | InpAutoCalibrateSpreadCap="+string(InpAutoCalibrateSpreadCap?"ON":"OFF")+
+       (InpAutoCalibrateSpreadCap
+        ? (" | calibrating over first "+IntegerToString(MathMax(20,InpSpreadCalibrationTicks))+
+           " ticks, multiplier="+DoubleToString(MathMax(1.0,InpSpreadCalibrationMultiplier),2)+
+           " | filter INACTIVE (fail-open) until calibration completes")
+        : (" | static InpMaxSpreadPoints="+IntegerToString(InpMaxSpreadPoints)+
+           (InpMaxSpreadPoints<=0?" (filter DISABLED)":""))));
 
    g_v21aSessionCode=V21A_SESSION_UNSET;
    g_v21aSessionHour=-1;

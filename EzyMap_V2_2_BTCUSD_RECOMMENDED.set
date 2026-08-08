@@ -182,12 +182,27 @@ InpH1LevelMinDistancePips=700.0
 ; 120/20 purely so a first attach does not reject every tick, WHICH IS NOT THE
 ; SAME AS BEING CORRECT.
 ;
-; DO THIS FIRST: attach the EA and read the OnInit line
-;   V2.2 BTC SPREAD CHECK | observed spread=... points (... price) | ...
-; Watch it across a few minutes and across a session boundary, then set
-; InpMaxSpreadPoints to roughly 2-3x the calm-market reading. BTC spreads
-; widen far more violently than gold's around the CME open and at weekends.
-InpMaxSpreadPoints=1200
+; UPDATE (S07): three straight zero-trade test runs on BTCUSD.sc pointed at
+; this static 1200 as the strongest remaining suspect (see V2_2_BTCUSD_
+; CHANGES.md S07 section for the full elimination trace). Rather than guess a
+; sixth number, InpAutoCalibrateSpreadCap now measures the symbol's own real
+; spread for InpSpreadCalibrationTicks ticks after attach (filter INACTIVE /
+; fail-open while collecting) and sets the ENFORCED cap to
+; median(observed) * InpSpreadCalibrationMultiplier. InpMaxSpreadPoints below
+; is now only a safety CEILING on that measured value, not the enforced
+; number itself - left generous on purpose so the ceiling should never bind
+; in normal conditions; if it does, that is itself informative (means the
+; measured spread * multiplier wants to exceed 5000 points, i.e. the calm-
+; market spread itself is enormous).
+;
+; DO THIS: attach/run and read the OnInit line "V2.2 BTC SPREAD GUARD MODE",
+; then watch for "V2.2 BTC SPREAD AUTO-CALIBRATION COMPLETE" a few dozen ticks
+; later - it states the measured median and the cap it locked in. That is now
+; the number to sanity-check, not something to author by hand.
+InpAutoCalibrateSpreadCap=true
+InpSpreadCalibrationTicks=100
+InpSpreadCalibrationMultiplier=3.0
+InpMaxSpreadPoints=5000
 InpDeviationPoints=200
 ;
 ; ---------------------------------------------------------------------------

@@ -978,3 +978,102 @@ regardless of any test. Everything else needs the run described in *Retest proce
 **Please run `DIAGNOSTIC_FIRSTPASS.set` and report back what the `DEPLOYMENT GATE BREAKDOWN`
 line actually says.** That single line will settle in one run what three previous runs could
 not.
+
+---
+
+## S07 — Auto-calibrating spread cap
+
+**A fourth run, on a real cent-account BTCUSD.sc chart, also produced zero trades.** At
+that point re-guessing `InpMaxSpreadPoints` a fifth time stops being a reasonable strategy —
+every static number offered so far (compiled default 120, `RECOMMENDED.set`'s 1200) has
+turned out to be a guess about a broker point convention that cannot be known from this
+environment. S07 removes the guess entirely.
+
+### What changed
+
+`SpreadAllowed()` gained an auto-calibration mode, opt-in via `InpAutoCalibrateSpreadCap`
+(default **TRUE** in this file — a deliberate polarity exception, same precedent as S06's
+`InpForceMinimumBaseSizing`, because three static guesses have now failed):
+
+- **While calibrating** (the first `InpSpreadCalibrationTicks` real ticks after attach,
+  default 100): the filter is **inactive** — every tick passes regardless of its spread.
+  Each observed spread is recorded into a fixed-size buffer sized once in `OnInit`.
+  A slow or incomplete calibration must never itself reproduce the zero-trade bug, so this
+  branch fails **open**, not closed.
+- **Once calibrated**: the enforced cap becomes `median(observed) *
+  InpSpreadCalibrationMultiplier` (default multiplier 3.0), clamped down to
+  `InpMaxSpreadPoints` as an optional safety ceiling when that input is `> 0`. Logged once,
+  verbatim, as `V2.2 BTC SPREAD AUTO-CALIBRATION COMPLETE`.
+- **When `InpAutoCalibrateSpreadCap` is false**: `SpreadAllowed()` is byte-identical to the
+  pre-S07 function — same two lines, same `InpMaxSpreadPoints<=0` no-op path. This is the
+  branch the XAUUSD lineage (`EzyMap_V2_1b_TRIGGER_REFINED.mq5`) uses by default; the same
+  feature was ported there as S04, with the input defaulting **false** since gold's static
+  cap has a working track record and this stage's whole premise (three failed guesses) does
+  not apply to it.
+
+An `OnInit` line (`V2.2 BTC SPREAD GUARD MODE`) states which branch is active and, if
+calibrating, the sample count and multiplier — printed unconditionally so a run that never
+reaches calibration completion (because it ends before 100 ticks arrive, unlikely but
+possible on a very short backtest window) is still distinguishable from one where
+calibration silently never started.
+
+### Why median, not mean, and why a multiplier
+
+A mean is dragged by the rare huge print (a news-driven spread blowout during the
+calibration window would inflate every subsequent comparison); a median describes the
+*typical* tick. The multiplier (default 3x) is the actual safety margin — it is what turns
+"the typical spread right now" into "a cap wide enough to survive ordinary widening without
+being wide enough to let every wild print through."
+
+### Functions/inputs touched
+
+New: `MedianOfSpreadSamples()`, inputs `InpAutoCalibrateSpreadCap`,
+`InpSpreadCalibrationTicks`, `InpSpreadCalibrationMultiplier`, globals
+`g_spreadCalSamples[]`, `g_spreadCalCount`, `g_spreadCalEffectiveCap`. Changed:
+`SpreadAllowed()` body only (signature unchanged — still `bool SpreadAllowed()`, still called
+identically from all three existing call sites, which needed **no edits at all** since the
+function's external contract didn't change). `OnInit()` gained the array sizing, the state
+reset, and the mode-announcement log line.
+
+### `.set` file changes
+
+- `RECOMMENDED.set` section 7 rewritten: `InpAutoCalibrateSpreadCap=true`,
+  `InpSpreadCalibrationTicks=100`, `InpSpreadCalibrationMultiplier=3.0`,
+  `InpMaxSpreadPoints=5000` (now a generous safety **ceiling**, not the enforced value).
+- `STAGE0_BASELINE.set` gained `InpAutoCalibrateSpreadCap=false`, so the control arm still
+  enforces the plain static cap exactly as V2.1b/gold always have.
+- `DIAGNOSTIC_FIRSTPASS.set` now explicitly sets `InpAutoCalibrateSpreadCap=false` alongside
+  its existing `InpMaxSpreadPoints=0` — for THIS profile the goal is to prove the EA can
+  deploy with the spread gate fully out of the picture, not to exercise the new calibration
+  logic, so it deliberately stays on the old, unambiguous "completely disabled" path.
+
+### What to look for
+
+Read `V2.2 BTC SPREAD GUARD MODE` at attach, then `V2.2 BTC SPREAD AUTO-CALIBRATION
+COMPLETE` a few dozen ticks later. **The median it reports is now the number to
+sanity-check** — if it looks absurd (e.g. thousands of points on a first read), that is a
+broker/`_Digits` question to resolve with your broker, not something this EA can infer.
+Compare the `DEPLOYMENT GATE BREAKDOWN` spread-reject count on a run with calibration ON
+against the same run with it OFF at the old static value — the difference between those two
+counts is the actual size of the bug this stage fixes.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Brace / paren / bracket balance | ✅ V2.2: `{}` 936/936 · `()` 6384/6384 · `[]` 1187/1187, residual 0. V2.1b: `{}` 934/934 · `()` 6295/6295 · `[]` 1187/1187, residual 0 |
+| `SpreadAllowed()` signature unchanged | ✅ still `bool SpreadAllowed()`, zero call-site edits needed in either file |
+| `MedianOfSpreadSamples()` declared before first use | ✅ defined well above `SpreadAllowed()` in both files (no separate forward declaration needed — MQL5 only requires the definition to precede use, and it does) |
+| No new `MQL_TESTER` branches | ✅ unchanged in both files |
+| `GetTickCount64` still confined to `NowMs()` | ✅ unchanged in both files |
+| Does not touch stop-loss computation | ✅ this stage only gates whether an attempt proceeds, never the stop distance |
+| V2.1b default preserves exact prior behaviour | ✅ `InpAutoCalibrateSpreadCap=false` by default → `SpreadAllowed()` takes the byte-identical legacy branch |
+| **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
+| **Calibration behavior validated by a real run** | ❌ **no — this is a mechanism, not a tuned number; the median/multiplier it lands on has not been observed against real BTCUSD.sc ticks** |
+
+**This is a mechanism fix, not a guaranteed fix.** It removes the need to guess the spread
+cap by hand, but it cannot conjure a trade out of a market/history problem (e.g. no tester
+history downloaded for BTCUSD.sc, algo trading disabled, wrong symbol selected). If a run
+with `InpAutoCalibrateSpreadCap=true` still shows `DEPLOYMENT GATE BREAKDOWN` at all zeros —
+including zero order-send attempts — the spread gate was never the issue and the next place
+to look is outside this EA's inputs entirely.

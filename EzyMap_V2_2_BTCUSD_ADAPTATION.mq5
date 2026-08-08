@@ -223,7 +223,7 @@
 //  rule lives in ProcessDirectZeroConfluenceTriggers(). See           |
 //  V2_1b_CHANGES.md.                                                  |
 //                                                                    |
-//  V2.2 BTC STAGE SUMMARY (S01-S06)                                   |
+//  V2.2 BTC STAGE SUMMARY (S01-S07)                                   |
 //                                                                    |
 //  Incremental build on V2.1b. This is a PORTABILITY AND BUGFIX pass, |
 //  not a strategy change. Scope: make the EA behave correctly on      |
@@ -354,6 +354,23 @@
 //      over-permissive profile for proving the EA can deploy at       |
 //      all before re-enabling filters one at a time.                  |
 //                                                                    |
+//  S07 AUTO-CALIBRATING SPREAD CAP                                    |
+//      InpMaxSpreadPoints is a flat "points" guess and three           |
+//      straight zero-trade BTCUSD.sc runs survived ruling out          |
+//      sizing, the environment gate (tester-safe) and daily risk       |
+//      capacity - a mis-scaled static spread cap is the strongest      |
+//      remaining suspect, since BTC's broker point convention          |
+//      cannot be known ahead of time. SpreadAllowed() now measures     |
+//      the symbol's own real spread for InpSpreadCalibrationTicks      |
+//      ticks (filter INACTIVE / fail-open while collecting), then      |
+//      sets the enforced cap to median(observed) *                     |
+//      InpSpreadCalibrationMultiplier, clamped to InpMaxSpreadPoints   |
+//      as an optional ceiling. Logs "SPREAD AUTO-CALIBRATION           |
+//      COMPLETE" once locked in.                                       |
+//      Inputs: InpAutoCalibrateSpreadCap (default TRUE here, FALSE     |
+//              in the XAUUSD lineage), InpSpreadCalibrationTicks,      |
+//              InpSpreadCalibrationMultiplier                          |
+//                                                                    |
 //  BASE NOTE: this file descends from the V3.176 line, NOT from the   |
 //  separate V3.180 PARITY_HARDENED branch. It does not contain the    |
 //  V3.180 P01-P13 parity fixes. NowMs() and TradeRetcodePartial()     |
@@ -361,7 +378,7 @@
 //  were never present in this lineage; they were not removed.         |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "2.201"
+#property version   "2.202"
 
 #include <Trade/Trade.mqh>
 
@@ -749,6 +766,26 @@ input double InpLiveLimitGeometryExtensionPips = 20.0;
 // still allowing normal quoted spread through. Tune to your broker's typical
 // spread plus headroom; set back to 0 to disable.
 input int    InpMaxSpreadPoints          = 120;
+// V2.2 BTC S07: three straight zero-trade test runs on BTCUSD.sc survived
+// ruling out sizing, the environment gate (tester-safe: TradingEnvironmentReady()
+// returns true unconditionally under MQL_TESTER) and daily risk capacity, which
+// leaves a mis-scaled InpMaxSpreadPoints as the strongest remaining suspect -
+// BTC's broker point convention (1, 2 or 3 digits) cannot be known when this
+// file is written, so 120 (or even the BTC .set's widened 1200) is a guess that
+// keeps turning out wrong. Rather than guess a fifth number, measure the
+// symbol's OWN real spread for InpSpreadCalibrationTicks ticks after attach and
+// derive the enforced cap from what is actually observed:
+//   effective cap = median(observed spread) * InpSpreadCalibrationMultiplier
+// clamped to InpMaxSpreadPoints as an optional ceiling when that input is > 0.
+// WHILE CALIBRATING the filter is INACTIVE (fails open) so a slow calibration
+// cannot itself reproduce the zero-trade bug - see SpreadAllowed(). Once
+// calibration completes it is logged and locked for the rest of the run.
+// Default TRUE here (three static guesses have failed); default FALSE in the
+// XAUUSD lineage this was ported from, where the static value already has a
+// working track record and must not be silently overridden.
+input bool   InpAutoCalibrateSpreadCap      = true;
+input int    InpSpreadCalibrationTicks      = 100;
+input double InpSpreadCalibrationMultiplier = 3.0;
 input int    InpDeviationPoints          = 20;
 input bool   InpUseAsyncMode             = false;
 input bool   InpUseLimitStopLayers       = true;
@@ -1974,6 +2011,7 @@ bool M5ClosedLossCapacityAvailable(string context);
 void CancelAllPendingAtM5ClosedLossCap();
 void EnforceM5ClosedLossCap();
 bool SpreadAllowed();
+string EffectiveSpreadCapText();
 bool SubmitDirectZeroConfMarket();
 void ProcessDirectZeroConfluenceTriggers();
 bool IsLiveXAUUSDscProtectionChart();
@@ -2628,6 +2666,26 @@ long     g_capacityRejectOther=0;
 long     g_orderSendStd=0;
 long     g_orderSendZc=0;
 long     g_orderSendOther=0;
+
+// V2.2 BTC S07: spread auto-calibration state. g_spreadCalEffectiveCap<0.0
+// means "still collecting samples, filter inactive (fail open)". Array is
+// sized once in OnInit to MathMax(20,InpSpreadCalibrationTicks).
+double   g_spreadCalSamples[];
+int      g_spreadCalCount=0;
+double   g_spreadCalEffectiveCap=-1.0;
+
+double MedianOfSpreadSamples(double &values[],int count)
+{
+   if(count<=0) return 0.0;
+
+   double copy[];
+   ArrayResize(copy,count);
+   for(int i=0;i<count;i++) copy[i]=values[i];
+   ArraySort(copy);
+
+   if(count%2==1) return copy[count/2];
+   return 0.5*(copy[count/2-1]+copy[count/2]);
+}
 
 
 // V3.190 S00: single monotonic millisecond clock for every timing decision in
@@ -3474,7 +3532,8 @@ bool SubmitDirectZeroConfMarket()
           string(direction==1?"BUY":"SELL")+
           " | attempt="+
           IntegerToString(g_directZeroConf.attempts)+
-          " | reason=spread filter: current spread exceeds InpMaxSpreadPoints");
+          " | reason=spread filter: current spread exceeds "+
+          EffectiveSpreadCapText());
       return false;
    }
 
@@ -9638,14 +9697,79 @@ bool TradingEnvironmentReady(string &reason)
 
 bool SpreadAllowed()
 {
-   if(InpMaxSpreadPoints<=0) return true;
-
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol,tick))
       return false;
 
    double spread=(tick.ask-tick.bid)/_Point;
-   return (spread<=InpMaxSpreadPoints);
+
+   // V2.2 BTC S07: legacy static-cap path, unchanged behaviour when
+   // auto-calibration is off (this is the ONLY branch the XAUUSD lineage uses).
+   if(!InpAutoCalibrateSpreadCap)
+   {
+      if(InpMaxSpreadPoints<=0) return true;
+      return (spread<=InpMaxSpreadPoints);
+   }
+
+   // Already calibrated: enforce the measured cap.
+   if(g_spreadCalEffectiveCap>=0.0)
+      return (spread<=g_spreadCalEffectiveCap);
+
+   // Still calibrating: collect this sample, fail OPEN regardless of its
+   // value. A slow/incomplete calibration must never itself zero out a run.
+   int required=MathMax(20,InpSpreadCalibrationTicks);
+
+   if(g_spreadCalCount<ArraySize(g_spreadCalSamples))
+   {
+      g_spreadCalSamples[g_spreadCalCount]=spread;
+      g_spreadCalCount++;
+   }
+
+   if(g_spreadCalCount>=required)
+   {
+      double median=MedianOfSpreadSamples(g_spreadCalSamples,g_spreadCalCount);
+      double mult=MathMax(1.0,InpSpreadCalibrationMultiplier);
+      double effective=median*mult;
+
+      if(InpMaxSpreadPoints>0)
+         effective=MathMin(effective,(double)InpMaxSpreadPoints);
+
+      g_spreadCalEffectiveCap=MathMax(1.0,effective);
+
+      Log("V2.2 BTC SPREAD AUTO-CALIBRATION COMPLETE"+
+          " | samples="+IntegerToString(g_spreadCalCount)+
+          " | median observed="+DoubleToString(median,1)+" points"+
+          " | multiplier="+DoubleToString(mult,2)+
+          " | ceiling(InpMaxSpreadPoints)="+IntegerToString(InpMaxSpreadPoints)+
+          " | EFFECTIVE CAP NOW ENFORCED="+
+          DoubleToString(g_spreadCalEffectiveCap,1)+" points");
+   }
+
+   return true;
+}
+
+// V2.2 BTC S07 follow-up: the three SpreadAllowed() call sites below each log
+// a rejection with the literal text "InpMaxSpreadPoints=<raw input>" - which
+// is now misleading when InpAutoCalibrateSpreadCap is on, because a rejection
+// in that mode is compared against g_spreadCalEffectiveCap, not the raw
+// input. That ambiguity is exactly what made a real test run's journal
+// impossible to read: "current spread exceeds InpMaxSpreadPoints=120" looks
+// identical whether auto-calibration never ran (old .ex5) or ran and simply
+// arrived at a calibrated cap that still rejected this tick. This helper
+// reports what is ACTUALLY being enforced right now, so the rejection log
+// itself proves which code path produced it.
+string EffectiveSpreadCapText()
+{
+   if(!InpAutoCalibrateSpreadCap)
+      return "static cap="+IntegerToString(InpMaxSpreadPoints)+
+             (InpMaxSpreadPoints<=0?" (DISABLED, should not reject)":"");
+
+   if(g_spreadCalEffectiveCap<0.0)
+      return "STILL CALIBRATING ("+IntegerToString(g_spreadCalCount)+"/"+
+             IntegerToString(MathMax(20,InpSpreadCalibrationTicks))+
+             " samples, filter inactive, should not reject)";
+
+   return "calibrated cap="+DoubleToString(g_spreadCalEffectiveCap,1);
 }
 
 //====================== V2.1a CONFLUENCE ENGINE =====================
@@ -11965,9 +12089,8 @@ bool PlacePersistentLayer(PersistentReadySetup &setup,
    {
       g_spreadRejectStd++;    // V2.2 BTC S06 instrumentation
       Log("SPREAD FILTER BLOCK | signal="+(string)setup.id+
-          " | current spread exceeds InpMaxSpreadPoints="+
-          IntegerToString(InpMaxSpreadPoints));
-      SetDeploymentFailure("spread filter: current spread exceeds InpMaxSpreadPoints",
+          " | current spread exceeds "+EffectiveSpreadCapText());
+      SetDeploymentFailure("spread filter: current spread exceeds "+EffectiveSpreadCapText(),
                            0,"","",true);
       return false;
    }
@@ -15209,7 +15332,8 @@ bool ArmReadySignal(BridgeSignal &s)
    if(!SpreadAllowed())
    {
       g_spreadRejectOther++;     // V2.2 BTC S06 instrumentation
-      Log("Spread filter blocked READY setup.");
+      Log("Spread filter blocked READY setup. | current spread exceeds "+
+          EffectiveSpreadCapText());
       return false;
    }
 
@@ -15591,6 +15715,24 @@ int OnInit()
    g_orderSendStd=0;
    g_orderSendZc=0;
    g_orderSendOther=0;
+
+   // V2.2 BTC S07: (re)arm spread auto-calibration for this run. Sized once
+   // here rather than per-tick in SpreadAllowed(). -1.0 means "not yet
+   // calibrated" so the very first ticks of every run/optimization pass
+   // recalibrate from scratch rather than inheriting a prior pass's cap.
+   g_spreadCalCount=0;
+   g_spreadCalEffectiveCap=-1.0;
+   ArrayResize(g_spreadCalSamples,MathMax(20,InpSpreadCalibrationTicks));
+
+   Log("V2.2 BTC SPREAD GUARD MODE"+
+       " | InpAutoCalibrateSpreadCap="+string(InpAutoCalibrateSpreadCap?"ON":"OFF")+
+       (InpAutoCalibrateSpreadCap
+        ? (" | calibrating over first "+IntegerToString(MathMax(20,InpSpreadCalibrationTicks))+
+           " ticks, multiplier="+DoubleToString(MathMax(1.0,InpSpreadCalibrationMultiplier),2)+
+           " | filter INACTIVE (fail-open) until calibration completes - watch for"+
+           " V2.2 BTC SPREAD AUTO-CALIBRATION COMPLETE")
+        : (" | static InpMaxSpreadPoints="+IntegerToString(InpMaxSpreadPoints)+
+           (InpMaxSpreadPoints<=0?" (filter DISABLED)":""))));
 
    g_v21aSessionCode=V21A_SESSION_UNSET;
    g_v21aSessionHour=-1;
