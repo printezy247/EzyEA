@@ -1077,3 +1077,55 @@ history downloaded for BTCUSD.sc, algo trading disabled, wrong symbol selected).
 with `InpAutoCalibrateSpreadCap=true` still shows `DEPLOYMENT GATE BREAKDOWN` at all zeros —
 including zero order-send attempts — the spread gate was never the issue and the next place
 to look is outside this EA's inputs entirely.
+
+---
+
+## S07 correction — the ceiling was quietly re-imposing the bug it was built to fix
+
+**The very next test run proved the mechanism above.** It confirmed calibration is running
+(`current spread exceeds calibrated cap=120.0` replaced the old static-cap message) and
+produced 5 deployments instead of 0. But `120.0` is exactly `InpMaxSpreadPoints`'s compiled
+default — not a coincidence. `SpreadAllowed()` clamped the calibrated cap
+(`median * multiplier`) down to `InpMaxSpreadPoints` as a "safety ceiling," and a run with no
+`.set` loaded still has `InpMaxSpreadPoints=120`. The calibration measured the real spread
+correctly, multiplied it by 3, and the ceiling threw that measurement away and substituted
+the exact static number the whole feature exists to replace.
+
+A broker reference for BTCUSD CFDs (Vantage Markets) states typical spread runs
+**~$15-17 per unit**, which on a 2-digit-quoted symbol is on the order of **1500-1700
+points** — roughly 12-14x the ceiling that was silently capping it. That is consistent with
+`SPREAD REJECTED` barely moving between the two runs (229027 → 224599) despite calibration
+being active: almost every real tick's spread still exceeded the clamped-down 120.
+
+### Fix
+
+`InpMaxSpreadPoints` and the calibration ceiling are no longer the same input.
+`InpSpreadCalibrationCeilingPoints` (default `0` = uncapped) is now the only thing that can
+clamp `median * multiplier`. `InpMaxSpreadPoints` keeps its original meaning — the enforced
+value — but only in the static (`InpAutoCalibrateSpreadCap=false`) branch, which never
+touches the new input at all.
+
+`RECOMMENDED.set` was rewritten to set `InpSpreadCalibrationCeilingPoints=0` (trust the
+calibration) and leave `InpMaxSpreadPoints` at its plain compiled default (now inert while
+calibration is on, so its value no longer matters).
+
+### On "what is BTCUSD.sc's usual spread"
+
+The Vantage Markets reference (~$15-17, ~1500-1700 points) is a general figure for their
+BTCUSD CFD product — useful for sanity-checking, but not this exact tester feed. The
+authoritative number is whatever the EA's own `V2.2 BTC SPREAD AUTO-CALIBRATION COMPLETE`
+log line reports as `median observed=`, measured from the same broker/symbol/tick data the
+backtest actually runs on. That line has not yet been read from a run with the ceiling fix
+in place — the next test should report it.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Brace / paren / bracket balance | ✅ `{}` 937/937 · `()` 6400/6400 · `[]` 1187/1187, residual 0 |
+| `InpMaxSpreadPoints` untouched in the static branch | ✅ still the only input read there; ceiling clamp in the calibration branch now reads `InpSpreadCalibrationCeilingPoints` exclusively |
+| New input declared before first use | ✅ input at line ~817, first use in `SpreadAllowed()` at ~9763, well after |
+| Every `.set` input name resolves to a real declaration | ✅ script-checked: `RECOMMENDED` 76, `STAGE0_BASELINE` 6, `DIAGNOSTIC_FIRSTPASS` 74 entries, zero missing |
+| `STAGE0_BASELINE.set` / `DIAGNOSTIC_FIRSTPASS.set` need no new pin | ✅ both already set `InpAutoCalibrateSpreadCap=false`, so the calibration branch (and its ceiling) never executes in either control arm |
+| **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
+| **Fix validated by a real run** | ❌ **no — the ceiling-decoupling is reasoned from the exact number (`120.0`) observed in the user's own journal, not yet re-tested** |
