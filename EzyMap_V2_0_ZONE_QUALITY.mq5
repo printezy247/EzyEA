@@ -785,6 +785,29 @@ input int    InpH1BiasMode                     = 1;
 // V2.0 S1: size multiplier applied to setups fighting the H1 bias in mode 1.
 input double InpCounterTrendSizeMult           = 0.50;
 
+//========================= V2.0 STAGE 2 =============================
+// V2.0 S2: zone freshness tracking.
+// OLD BEHAVIOUR: supply/demand probability decays sharply per touch - the
+// resting orders that formed the zone get filled - yet V3.190 was configured
+// to do the opposite. InpMaxTouchDeployAttempts=7 and InpReadyExpiryBars=333
+// mean the EA re-enters the same zone repeatedly, systematically loading the
+// LOWEST-probability touches at full size.
+// NEW: count touches per zone and scale size down as the zone is worked.
+// Freshness NEVER rejects a setup - frequency is unchanged, only size moves.
+// Default false = V3.190 (every touch at full size).
+
+// V2.0 S2: master switch. RECOMMENDED true.
+input bool   InpTrackZoneFreshness             = false;
+// V2.0 S2: touches beyond this all get the minimum multiplier.
+input int    InpFreshnessMaxTouches            = 4;
+input double InpTouch1SizeMult                 = 1.00;
+input double InpTouch2SizeMult                 = 0.60;
+input double InpTouch3SizeMult                 = 0.35;
+input double InpTouch4PlusSizeMult             = 0.20;
+// V2.0 S2: two zones are the same zone when their midpoints sit within this
+// distance. Gold zones drift a little between refreshes of the H1/M15 map.
+input double InpZoneIdentityTolerancePips      = 8.0;
+
 // V3.164 live XAUUSD.sc protection parity.
 // Account denomination affects money and lot sizing, never price distance.
 // Historical M1 highs/lows cannot arm a trail immediately after attaching
@@ -1044,6 +1067,13 @@ struct PersistentReadySetup
    datetime lastDeployAttemptClock;
    ulong lastDeployAttemptTickMs;
    datetime deploymentBlockedM5;
+
+   // V2.0 S2/S3/S4: zone quality, frozen when the touch latches so the
+   // number reported in logs and the CSV is the one that actually sized the
+   // trade.
+   int      zoneTouchNumber;
+   double   departureScore;
+   int      zoneGrade;          // 0 unset, 1=A, 2=B, 3=C
 
    // V3.190 S4: touch-confirmation state. Lives here rather than in a
    // parallel structure so it is cleared by the same latch-reset and
@@ -1366,6 +1396,15 @@ void FreezeTrailGeometry(int index,int direction,double entry);
 double Clamp(double v,double lo,double hi);
 double NormalizeVolumeDown(double vol);
 int VolumeDigits();
+int ZoneTouchIndex(double lo,double hi);
+int ZoneTouchCount(double lo,double hi);
+int RegisterZoneTouch(double lo,double hi);
+double FreshnessSizeMultiplier(int touchNumber);
+void SaveZoneTouchState();
+void LoadZoneTouchState();
+void SetQualityContext(int direction,int touches,double departure,int grade);
+void ClearQualityContext();
+string StatePrefix();
 void RefreshH1Bias();
 int H1BiasDirection();
 bool IsCounterToH1Bias(int direction);
@@ -1785,6 +1824,35 @@ string PersistentTouchTriggerText(PersistentReadySetup &setup)
 
    return "READY";
 }
+
+// V2.0 S2: one record per distinct price zone the EA has touched. Kept as a
+// bounded ring so a long run cannot grow it without limit, and persisted
+// through the existing SaveState()/LoadState() path so touch history survives
+// a restart or a terminal bounce.
+#define V2_MAX_ZONE_TOUCH_RECORDS 48
+
+struct ZoneTouchRecord
+{
+   bool     used;
+   double   lo;
+   double   hi;
+   int      touches;
+   datetime firstTouch;
+   datetime lastTouch;
+};
+
+ZoneTouchRecord g_zoneTouches[];
+
+// V2.0 S2/S3/S4: quality context for the entry currently being sized.
+// CapSetupVolumeForCentSafety() is the single sizing choke point but it has no
+// setup handle, so the deploying path publishes the setup's quality here just
+// before sizing and clears it afterwards.
+bool   g_qualityContextValid=false;
+int    g_qualityContextTouches=0;
+double g_qualityContextDeparture=-1.0;
+int    g_qualityContextDirection=0;
+int    g_qualityContextGrade=0;      // 0 unset, 1=A, 2=B, 3=C
+
 
 // V2.0 S1: cached H1 bias. iMA() must not be called per tick, so the handle is
 // created once in OnInit and the buffer is read at most once per H1 bar.
@@ -2674,7 +2742,19 @@ bool SubmitDirectZeroConfMarket()
    double brokerSL=BrokerSafeExecutionSL(direction,entry,exactSL);
 
    double requested=ConfidenceSetupLot(0);
+
+   // V2.0 S2: the direct zero-conf path has no PersistentReadySetup, so its
+   // quality context is derived from the resolved trigger band.
+   int directTouchNumber=
+      RegisterZoneTouch(g_directZeroConf.triggerLo,
+                        g_directZeroConf.triggerHi);
+
+   SetQualityContext(direction,directTouchNumber,-1.0,0);
+
    double volume=CapSetupVolumeForCentSafety(direction,entry,brokerSL,requested);
+
+   ClearQualityContext();
+
    double minVolume=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
 
    if(volume<minVolume-1e-12)
@@ -4326,6 +4406,238 @@ void ManageHybridTrailingPositions(string context)
 
 
 
+//------------------------ V2.0 S2 zone freshness ---------------------
+
+// V2.0 S2: locate an existing record for this zone, or -1.
+int ZoneTouchIndex(double lo,double hi)
+{
+   double zlo=MathMin(lo,hi);
+   double zhi=MathMax(lo,hi);
+
+   if(zlo<=0.0 || zhi<=0.0)
+      return -1;
+
+   double mid=(zlo+zhi)*0.5;
+   double tolerance=
+      MathMax(0.0,InpZoneIdentityTolerancePips)*MathMax(StrategyPipSize(),_Point);
+
+   int best=-1;
+   double bestDistance=DBL_MAX;
+
+   for(int i=0;i<ArraySize(g_zoneTouches);i++)
+   {
+      if(!g_zoneTouches[i].used)
+         continue;
+
+      double recordMid=
+         (g_zoneTouches[i].lo+g_zoneTouches[i].hi)*0.5;
+
+      double distance=MathAbs(recordMid-mid);
+
+      if(distance<=tolerance && distance<bestDistance)
+      {
+         best=i;
+         bestDistance=distance;
+      }
+   }
+
+   return best;
+}
+
+
+// V2.0 S2: read-only touch count. 0 means "never touched" - the next touch
+// will be touch number 1.
+int ZoneTouchCount(double lo,double hi)
+{
+   if(!InpTrackZoneFreshness)
+      return 0;
+
+   int index=ZoneTouchIndex(lo,hi);
+
+   if(index<0)
+      return 0;
+
+   return g_zoneTouches[index].touches;
+}
+
+
+// V2.0 S2: record a touch and return the touch NUMBER (1 for a virgin zone).
+// Called on every CMP touch whether or not the setup went on to deploy - a
+// zone is worked by price arriving at it, not by us filling there.
+int RegisterZoneTouch(double lo,double hi)
+{
+   if(!InpTrackZoneFreshness)
+      return 1;
+
+   double zlo=MathMin(lo,hi);
+   double zhi=MathMax(lo,hi);
+
+   if(zlo<=0.0 || zhi<=0.0)
+      return 1;
+
+   int index=ZoneTouchIndex(zlo,zhi);
+
+   if(index<0)
+   {
+      // Find a free slot, else evict the least recently touched record.
+      for(int i=0;i<ArraySize(g_zoneTouches);i++)
+      {
+         if(!g_zoneTouches[i].used)
+         {
+            index=i;
+            break;
+         }
+      }
+
+      if(index<0 && ArraySize(g_zoneTouches)<V2_MAX_ZONE_TOUCH_RECORDS)
+      {
+         index=ArraySize(g_zoneTouches);
+         ArrayResize(g_zoneTouches,index+1);
+         ZeroMemory(g_zoneTouches[index]);
+      }
+
+      if(index<0)
+      {
+         datetime oldest=0;
+         for(int i=0;i<ArraySize(g_zoneTouches);i++)
+         {
+            if(index<0 || g_zoneTouches[i].lastTouch<oldest)
+            {
+               oldest=g_zoneTouches[i].lastTouch;
+               index=i;
+            }
+         }
+
+         if(index<0)
+            return 1;
+
+         ZeroMemory(g_zoneTouches[index]);
+      }
+
+      g_zoneTouches[index].used=true;
+      g_zoneTouches[index].lo=zlo;
+      g_zoneTouches[index].hi=zhi;
+      g_zoneTouches[index].touches=0;
+      g_zoneTouches[index].firstTouch=TimeCurrent();
+   }
+
+   // Keep the stored band tracking the current zone geometry, which drifts
+   // slightly as the H1/M15 map refreshes.
+   g_zoneTouches[index].lo=zlo;
+   g_zoneTouches[index].hi=zhi;
+   g_zoneTouches[index].touches++;
+   g_zoneTouches[index].lastTouch=TimeCurrent();
+
+   return g_zoneTouches[index].touches;
+}
+
+
+// V2.0 S2: size multiplier for a given touch NUMBER (1-based).
+double FreshnessSizeMultiplier(int touchNumber)
+{
+   if(!InpTrackZoneFreshness || touchNumber<=0)
+      return 1.0;
+
+   if(touchNumber>=MathMax(1,InpFreshnessMaxTouches))
+      return MathMax(0.0,InpTouch4PlusSizeMult);
+
+   if(touchNumber==1) return MathMax(0.0,InpTouch1SizeMult);
+   if(touchNumber==2) return MathMax(0.0,InpTouch2SizeMult);
+   if(touchNumber==3) return MathMax(0.0,InpTouch3SizeMult);
+
+   return MathMax(0.0,InpTouch4PlusSizeMult);
+}
+
+
+// V2.0 S2: persist touch history through the existing state path.
+void SaveZoneTouchState()
+{
+   if(!InpTrackZoneFreshness)
+      return;
+
+   string prefix=StatePrefix()+"ZT_";
+   int count=ArraySize(g_zoneTouches);
+
+   GlobalVariableSet(prefix+"COUNT",(double)count);
+
+   for(int i=0;i<count;i++)
+   {
+      string k=prefix+IntegerToString(i)+"_";
+      GlobalVariableSet(k+"USED",g_zoneTouches[i].used?1.0:0.0);
+      GlobalVariableSet(k+"LO",g_zoneTouches[i].lo);
+      GlobalVariableSet(k+"HI",g_zoneTouches[i].hi);
+      GlobalVariableSet(k+"N",(double)g_zoneTouches[i].touches);
+      GlobalVariableSet(k+"FIRST",(double)g_zoneTouches[i].firstTouch);
+      GlobalVariableSet(k+"LAST",(double)g_zoneTouches[i].lastTouch);
+   }
+}
+
+
+void LoadZoneTouchState()
+{
+   if(!InpTrackZoneFreshness)
+      return;
+
+   string prefix=StatePrefix()+"ZT_";
+
+   if(!GlobalVariableCheck(prefix+"COUNT"))
+      return;
+
+   int count=(int)GlobalVariableGet(prefix+"COUNT");
+   count=(int)MathMax(0,MathMin(V2_MAX_ZONE_TOUCH_RECORDS,count));
+
+   ArrayResize(g_zoneTouches,count);
+
+   int restored=0;
+
+   for(int i=0;i<count;i++)
+   {
+      string k=prefix+IntegerToString(i)+"_";
+      ZeroMemory(g_zoneTouches[i]);
+
+      if(!GlobalVariableCheck(k+"LO"))
+         continue;
+
+      g_zoneTouches[i].used      =(GlobalVariableGet(k+"USED")>0.5);
+      g_zoneTouches[i].lo        =GlobalVariableGet(k+"LO");
+      g_zoneTouches[i].hi        =GlobalVariableGet(k+"HI");
+      g_zoneTouches[i].touches   =(int)GlobalVariableGet(k+"N");
+      g_zoneTouches[i].firstTouch=(datetime)GlobalVariableGet(k+"FIRST");
+      g_zoneTouches[i].lastTouch =(datetime)GlobalVariableGet(k+"LAST");
+
+      if(g_zoneTouches[i].used)
+         restored++;
+   }
+
+   Log("V2.0 S2 ZONE FRESHNESS RESTORED"+
+       " | records="+IntegerToString(restored)+
+       " | touch history survives restart");
+}
+
+
+// V2.0 S2/S4: publish the quality of the entry about to be sized, so the
+// sizing choke point can see it.
+void SetQualityContext(int direction,int touches,double departure,int grade)
+{
+   g_qualityContextValid    =true;
+   g_qualityContextDirection=direction;
+   g_qualityContextTouches  =touches;
+   g_qualityContextDeparture=departure;
+   g_qualityContextGrade    =grade;
+}
+
+
+void ClearQualityContext()
+{
+   g_qualityContextValid    =false;
+   g_qualityContextDirection=0;
+   g_qualityContextTouches  =0;
+   g_qualityContextDeparture=-1.0;
+   g_qualityContextGrade    =0;
+}
+
+
+
 // V2.0 S1: refresh the cached H1 bias at most once per H1 bar.
 void RefreshH1Bias()
 {
@@ -4412,25 +4724,48 @@ double V2QualitySizeMultiplier(int direction,string &reason)
 {
    reason="";
 
-   if(!InpUseH1BiasFilter || InpH1BiasMode==0)
-      return 1.0;
+   double multiplier=1.0;
 
-   if(!IsCounterToH1Bias(direction))
+   // ---- H1 bias (S1) ----
+   if(InpUseH1BiasFilter && InpH1BiasMode!=0 && IsCounterToH1Bias(direction))
    {
-      reason="aligned with H1 bias";
-      return 1.0;
+      if(InpH1BiasMode==2)
+      {
+         reason="counter-trend to H1 bias (HARD FILTER)";
+         return 0.0;
+      }
+
+      multiplier=MathMin(multiplier,MathMax(0.0,InpCounterTrendSizeMult));
+      reason="counter-trend H1 x"+
+             DoubleToString(MathMax(0.0,InpCounterTrendSizeMult),2);
    }
 
-   if(InpH1BiasMode==2)
+   // ---- zone freshness (S2) ----
+   if(InpTrackZoneFreshness &&
+      g_qualityContextValid &&
+      g_qualityContextTouches>0)
    {
-      reason="counter-trend to H1 bias (HARD FILTER)";
-      return 0.0;
+      double freshness=FreshnessSizeMultiplier(g_qualityContextTouches);
+
+      // The LEAST favourable factor wins - the factors are never multiplied
+      // together. Compounding 0.50 bias x 0.35 freshness would give 0.175,
+      // which is an unintended de-facto rejection.
+      if(freshness<multiplier)
+      {
+         multiplier=freshness;
+         reason="touch #"+IntegerToString(g_qualityContextTouches)+
+                " freshness x"+DoubleToString(freshness,2);
+      }
+      else if(reason=="")
+      {
+         reason="touch #"+IntegerToString(g_qualityContextTouches)+" (full size)";
+      }
    }
 
-   reason="counter-trend to H1 bias (size-weighted x"+
-          DoubleToString(MathMax(0.0,InpCounterTrendSizeMult),2)+")";
+   if(reason=="")
+      reason="no quality reduction";
 
-   return MathMax(0.0,InpCounterTrendSizeMult);
+   return MathMax(0.0,multiplier);
 }
 
 
@@ -7286,6 +7621,9 @@ void SaveState()
    GlobalVariableSet(p+"RISK",g_riskBudget);
    GlobalVariableSet(p+"START",(double)g_signalStarted);
    GlobalVariableSet(p+"HAD_FILL",g_hadFill?1.0:0.0);
+
+   // V2.0 S2: zone touch history rides the existing state path.
+   SaveZoneTouchState();
 }
 
 void LoadState()
@@ -7298,6 +7636,9 @@ void LoadState()
    if(GlobalVariableCheck(p+"RISK"))      g_riskBudget=GlobalVariableGet(p+"RISK");
    if(GlobalVariableCheck(p+"START"))     g_signalStarted=(datetime)GlobalVariableGet(p+"START");
    if(GlobalVariableCheck(p+"HAD_FILL"))  g_hadFill=(GlobalVariableGet(p+"HAD_FILL")>0.5);
+
+   // V2.0 S2: restore zone touch history.
+   LoadZoneTouchState();
 }
 
 void ClearCurrentState(bool markDone)
@@ -10398,6 +10739,9 @@ bool QueuePersistentSetup(ReadySnapshot &r,int direction)
    g_persistentSetups[slot].touchClock=0;
    g_persistentSetups[slot].touchPrice=0.0;
    g_persistentSetups[slot].deployAttempts=0;
+   g_persistentSetups[slot].zoneTouchNumber=0;
+   g_persistentSetups[slot].departureScore=-1.0;
+   g_persistentSetups[slot].zoneGrade=0;
    g_persistentSetups[slot].lastDeployAttemptClock=0;
    g_persistentSetups[slot].lastDeployAttemptTickMs=0;
    g_persistentSetups[slot].deploymentBlockedM5=0;
@@ -11175,11 +11519,20 @@ bool BuildAggressiveArmPlans(PersistentReadySetup &setup,
       return false;
    }
 
+   // V2.0 S2/S4: publish this setup's quality so the sizing choke point can
+   // see it, then clear so no later unrelated call inherits it.
+   SetQualityContext(direction,
+                     setup.zoneTouchNumber,
+                     setup.departureScore,
+                     setup.zoneGrade);
+
    targetSetupLot=
       CapSetupVolumeForCentSafety(direction,
                                   marketPrice,
                                   setup.structuralSL,
                                   targetSetupLot);
+
+   ClearQualityContext();
 
    if(targetSetupLot<minVol-1e-12)
    {
@@ -11313,8 +11666,16 @@ bool BuildForcedZeroConfluenceMarketPlan(PersistentReadySetup &setup,LayerPlan &
    setup.structuralSL=BrokerSafeExecutionSL(direction,marketPrice,setup.structuralSL);
 
    double requested=ConfidenceSetupLot(0);
+
+   SetQualityContext(direction,
+                     setup.zoneTouchNumber,
+                     setup.departureScore,
+                     setup.zoneGrade);
+
    double volume=CapSetupVolumeForCentSafety(direction,marketPrice,
                                              setup.structuralSL,requested);
+
+   ClearQualityContext();
    double minVolume=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
 
    if(volume<minVolume-1e-12)
@@ -11770,12 +12131,19 @@ bool DeployPersistentSetup(int index)
       ? ConfidenceSetupLot(conf)
       : AutoBaseLayerLot();
 
+   SetQualityContext(g_persistentSetups[index].direction,
+                     g_persistentSetups[index].zoneTouchNumber,
+                     g_persistentSetups[index].departureScore,
+                     g_persistentSetups[index].zoneGrade);
+
    targetSetupLot=
       CapSetupVolumeForCentSafety(
          g_persistentSetups[index].direction,
          marketPrice,
          g_persistentSetups[index].structuralSL,
          targetSetupLot);
+
+   ClearQualityContext();
 
    if(targetSetupLot<=0)
    {
@@ -12225,6 +12593,13 @@ void ProcessPersistentSetups()
             g_persistentSetups[i].touchPrice=cmp;
             g_persistentSetups[i].deployAttempts=0;
 
+            // V2.0 S2: a zone is worked by price ARRIVING at it, so the touch
+            // is counted here - at the latch - regardless of whether this
+            // setup goes on to deploy.
+            g_persistentSetups[i].zoneTouchNumber=
+               RegisterZoneTouch(g_persistentSetups[i].entryLo,
+                                 g_persistentSetups[i].entryHi);
+
             double triggerLo=
                zeroConf
                ? zeroCandidate.lo
@@ -12258,6 +12633,8 @@ void ProcessPersistentSetups()
 
             Log("CMP TOUCH LATCHED | signal="+
                 (string)id+
+                " | V2.0 touch #"+
+                IntegerToString(g_persistentSetups[i].zoneTouchNumber)+
                 " | trigger="+triggerText+
                 " | direction="+
                 string(direction==1?"BUY":"SELL")+
