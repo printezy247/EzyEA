@@ -365,3 +365,253 @@ That interacts with S02, which already cuts the number of eligible W1/D1 levels 
 Two independent frequency reductions stacking is the most likely way this build
 under-trades; if it does, `InpZeroConfIncludeLevel1=true` alone is the natural intermediate
 configuration and is a legitimate third arm even though no `.set` ships for it.
+
+---
+
+# S03 — sizing floor + deployment-gate instrumentation
+
+**Added after S01–S02 as a separate patch.** `#property version` bumped `2.102` → `2.103`
+(line **279**). File 16,073 → **16,276 lines**. One new input, eleven new counter globals,
+one new function, twelve counter increments at existing call sites, **zero changed function
+signatures**, 27 diff hunks.
+
+This stage is not a strategy change and has no A/B hypothesis behind it. It exists because
+the V2.2 BTC descendant of this file produced three consecutive Strategy Tester runs that
+ended `READY=511, stored=54, deployed=0, LIVE=0` and **the journal could not say which gate
+was responsible.** The same blind spot exists here, so the same fix is applied to both
+files identically. The full diagnosis lives in `V2_2_BTCUSD_CHANGES.md` (S06); this section
+documents what landed in V2.1b.
+
+---
+
+## S03(a) — `InpForceMinimumBaseSizing`
+
+New input at line **492**, immediately after `InpBaseLayerLot`:
+
+```
+input bool   InpForceMinimumBaseSizing    = true;
+```
+
+`LotSizingCapitalUnits()` (lines **2062–2079**) previously had two bare returns. It now
+assigns to a local and floors it before returning, so the floor applies to **both** branches
+identically:
+
+```
+   double capital=InpUseBrokerNativeDepositUnitsForLots
+                  ? MathMax(0.0,raw)
+                  : MathMax(0.0,raw/MathMax(1.0,g_accountUnitDivisor));
+
+   if(InpForceMinimumBaseSizing)
+      capital=MathMax(capital,MathMax(1.0,InpBaseEquity));
+
+   return capital;
+```
+
+An account below `InpBaseEquity` deposit units now sizes as if it had exactly
+`InpBaseEquity`, instead of the base-layer target shrinking below `0.01` and rounding to a
+volume the broker rejects.
+
+### ⚠️ Polarity: defaults to `true`
+
+**This is the third input in this file that defaults to the NEW behaviour**, joining
+`InpZeroConfAllowCurrentMapTier` and `InpZeroConfIncludeLevel1`. It was requested that way
+explicitly. `EzyMap_V2_1b_STAGE0_BASELINE.set` therefore pins it `false` to stay a true
+control arm, and `EzyMap_V2_1b_FULL.set` lists it `true`.
+
+At `InpBaseEquity` deposit units **or above, the two arms are arithmetically identical**, so
+an A/B at any normal tester deposit will show no difference from this input alone. That is
+the expected result, not a failed load.
+
+### Proof it cannot weaken a real risk cap
+
+This is the one way this change could be dangerous, so it was verified by grep rather than
+assumed. **`LotSizingCapitalUnits()` has exactly four call sites in this file** (declaration
+at 1986, definition at 2062):
+
+| Line | Call site | What it does with the value | Risk-bearing? |
+|---|---|---|---|
+| **9058** | `AutoBaseLayerLot()` | `rawLot = InpBaseLayerLot * (sizingCapital/baseEquity)` — nominal base-layer target | no |
+| **12174** | `ConfidenceSetupLot()` | `targetLot = lotPer100 * (sizingCapital/baseEquity)` — nominal confidence target | no |
+| **15536** | `OnInit`, `BROKER-NATIVE LOT SIZING` log line | printed, and used to print a display-only `standardRawTarget` | no |
+| **16086** | `OnTimer`, `LIVE PARITY STATUS` log line | printed as `lot targets S/G/Q=` | no |
+
+**Every one is a nominal-lot-target calculation or a log line. None is a `$`-risk or
+margin-percentage calculation.** Confirmed further:
+
+- `CapSetupVolumeForCentSafety()` and `CapVolumeForStandardRiskGuard()` — the two real caps
+  — **do not appear in that list**, i.e. they never call `LotSizingCapitalUnits()`. They read
+  `AccountInfoDouble(ACCOUNT_EQUITY)` and call `OrderCalcProfit` / `OrderCalcMargin` against
+  the actual account, and they still have final authority over every submitted volume.
+- The `effectiveEquity < MinimumTradingEquity()` refusal at the top of **both**
+  `AutoBaseLayerLot()` and `ConfidenceSetupLot()` tests `EffectiveAccountEquity()`, **not**
+  the floored value. A genuinely under-funded account is still refused before the floor is
+  ever consulted.
+- `RiskPctForConfidence()`, `RiskPctForSetup()` and the `riskBudget = equity * pct/100`
+  arithmetic all read `AccountInfoDouble(ACCOUNT_EQUITY)` directly.
+
+The floor therefore moves the **nominal starting target only**. A maintenance note to this
+effect, naming all four call sites, sits in the input's comment block (lines **462–491**) so
+the audit does not have to be redone from scratch next time.
+
+---
+
+## S03(b) — deployment-gate breakdown instrumentation
+
+### The blind spot being closed
+
+`ConfluenceGateAllows()` has reported `g_stdAttempts`/`g_stdPassed`/`g_zcAttempts`/
+`g_zcPassed` since V2.1a S01, and prints them at `OnDeinit` via `LogConfluenceFilterRate()`.
+The three gates that sit **alongside** it on every deployment path had no counters at all:
+
+| Gate | Why it can silently zero a run |
+|---|---|
+| `SpreadAllowed()` | compares `(ask-bid)/_Point` against `InpMaxSpreadPoints`. If the point convention is misjudged for the symbol, **every tick** fails before anything else runs |
+| `TradingEnvironmentReady()` | returns `true` immediately under `MQL_TESTER`, so it cannot be the tester blocker — but it is a live-trading blocker and belongs in the same summary |
+| `DailyRiskCapacityAvailable()` | a day lock latches and then rejects everything for the rest of the day |
+
+There was no way to tell these apart in the journal. Guessing at better numbers without
+that information just produces a fourth zero-trade run carrying no more information than
+the first three, which is why this is the higher-priority half of S03.
+
+### Eleven new counters (lines 2480–2490)
+
+Declared directly beneath the existing V2.1a counters, same `long g_… = 0;` convention:
+
+```
+g_spreadRejectStd    g_spreadRejectZc    g_spreadRejectOther
+g_envRejectStd       g_envRejectZc
+g_capacityRejectStd  g_capacityRejectZc  g_capacityRejectOther
+g_orderSendStd       g_orderSendZc       g_orderSendOther
+```
+
+All eleven are reset in `OnInit` at lines **15401–15411**, immediately after the existing
+`g_stdAttempts=0;` block, so both summaries always describe the same run.
+
+**Path split.** `STANDARD` and `ZERO-CONF` are the same two scored entry paths the
+confluence line uses, so the two log lines can be read side by side. `OTHER` is the legacy
+bridge-signal path (`ArmReadySignal()` → `PlaceOneLayer()`), which belongs to neither scored
+path and so **cannot honestly be attributed to either** — it gets its own column rather than
+an invented split. `TradingEnvironmentReady()` is never called from that path, which is why
+the environment field has no `OTHER` column.
+
+### Twelve increments, all at call sites
+
+**No gate function was modified.** `SpreadAllowed()`, `TradingEnvironmentReady()`,
+`DailyRiskCapacityAvailable()` and `LotSizingCapitalUnits()` keep their exact signatures and
+bodies. Each counter is incremented at the **call site**, on the false branch only,
+alongside whatever logging and `return` that site already performed. No control flow and no
+existing log text was altered.
+
+| Line | Enclosing function | Gate | Counter |
+|---|---|---|---|
+| **3320** | `SubmitDirectZeroConfMarket()` | `DailyRiskCapacityAvailable()` | `g_capacityRejectZc` |
+| **3327** | `SubmitDirectZeroConfMarket()` | `SpreadAllowed()` | `g_spreadRejectZc` |
+| **3377** | `SubmitDirectZeroConfMarket()` | `TradingEnvironmentReady()` | `g_envRejectZc` |
+| **3436** | `SubmitDirectZeroConfMarket()` | *(order send)* | `g_orderSendZc` |
+| **3539** | `ProcessDirectZeroConfluenceTriggers()` | `DailyRiskCapacityAvailable()` | `g_capacityRejectZc` |
+| **11784** | `PlacePersistentLayer()` | `SpreadAllowed()` | `g_spreadRejectStd` |
+| **11818** | `PlacePersistentLayer()` | `DailyRiskCapacityAvailable()` | `g_capacityRejectStd` |
+| **11901** | `PlacePersistentLayer()` | *(order send)* | `g_orderSendStd` |
+| **12811** | `PersistentQualityPass()` | `DailyRiskCapacityAvailable()` | `g_capacityRejectStd` |
+| **13497** | `DeployAggressiveArmSetup()` | `DailyRiskCapacityAvailable()` | `g_capacityRejectStd` |
+| **13533** | `DeployAggressiveArmSetup()` | `TradingEnvironmentReady()` | `g_envRejectStd` |
+| **13802** | `DeployPersistentSetup()` | `TradingEnvironmentReady()` | `g_envRejectStd` |
+| **14740** | `PlaceOneLayer()` *(legacy)* | `DailyRiskCapacityAvailable()` | `g_capacityRejectOther` |
+| **14760** | `PlaceOneLayer()` *(legacy)* | *(order send)* | `g_orderSendOther` |
+| **15029** | `ArmReadySignal()` *(legacy)* | `SpreadAllowed()` | `g_spreadRejectOther` |
+
+Two of these needed braces added around a previously brace-less single-statement `return`
+(lines **3539** and **14740**) — that is the whole of the `{}` +2 delta outside the new
+function, and it changes no behaviour.
+
+**Order-send counters.** No pre-existing global counted send attempts; `g_directZeroConf.attempts`
+is a per-setup struct field, not a run total, so a new counter was added rather than a
+duplicate of something existing. The increment sits **once** per submission, immediately
+before the first `trade.Buy`/`trade.Sell`, so the "retry without SL on reject" second send
+is deliberately **not** double-counted — the number means *deployments that reached the
+broker*, not *packets sent*.
+
+### Two new log lines at `OnDeinit`
+
+New function `LogDeploymentGateBreakdown()` at lines **9901–9936**, placed immediately after
+`LogConfluenceFilterRate()` and forward-declared at line **1919** beside it, matching the
+existing convention. Called from `OnDeinit` at line **15997**, directly after the
+`LogConfluenceFilterRate()` call:
+
+```
+V2.1b S03 DEPLOYMENT GATE BREAKDOWN | SPREAD REJECTED: n | ENVIRONMENT REJECTED: n | DAILY CAPACITY REJECTED: n | ORDER-SEND ATTEMPTS: n
+V2.1b S03 DEPLOYMENT GATE BREAKDOWN BY PATH | SPREAD std/zc/other: n/n/n | ENVIRONMENT std/zc: n/n | DAILY CAPACITY std/zc/other: n/n/n | ORDER-SEND std/zc/other: n/n/n
+```
+
+**Deliberate deviation:** the brief specified one line. A second line carries the per-path
+split, rather than widening the mandated line's fields, so the mandated string stays greppable
+verbatim while the attribution is still available.
+
+**Deliberately not suppressed by any input**, unlike `LogConfluenceFilterRate()`, which
+returns early when `InpUseConfluenceScoring` is false. The reasoning is inverted here: a run
+in which all four totals are zero is the single most informative outcome the line can
+report — it means nothing ever *reached* these gates, so the blocker is upstream (no setups
+armed, no touch registered, or an environment problem outside the EA). Suppressing that
+would hide exactly the case the instrumentation was built for.
+
+---
+
+## `.set` file changes
+
+| File | Change |
+|---|---|
+| `EzyMap_V2_1b_STAGE0_BASELINE.set` | `InpForceMinimumBaseSizing=false` added, with a note that this is the reversed-polarity control and that at ≥100 units it is arithmetically a no-op |
+| `EzyMap_V2_1b_FULL.set` | `InpForceMinimumBaseSizing=true` added, plus the explanatory comment |
+
+**Deviation:** the brief said `FULL.set` needed a comment but no new line, since `true` is
+the compiled default. The line was added anyway because that file's own header states its
+purpose is to make the intended values "explicit in the tester rather than implied", and
+omitting the newest input would break exactly that. It sets the value it already has, so it
+cannot change behaviour.
+
+The gate-breakdown instrumentation has **no input and no rollback switch**. It prints in
+both arms and changes no behaviour, so it does not compromise the control.
+
+---
+
+## S03 verification performed
+
+| Check | Result |
+|---|---|
+| Brace / paren / bracket balance (tokenizer excluding strings, char literals, line and block comments) | ✅ `{}` 930/930 · `()` 6256/6256 · `[]` 1178/1178; residual stack 0, no mismatched pairs |
+| Balance delta accounted for | ✅ `{}` **+3** = `LogDeploymentGateBreakdown()` body (1) + braces added around the two brace-less returns at 3539 and 14740 (2). `()` **+37** = the two `Log(` calls and their 15 `IntegerToString((int)…)` pairs (32) + new function definition, forward declaration and `OnDeinit` call (3) + net +2 from the `LotSizingCapitalUnits()` rewrite. `[]` **+0** |
+| No existing function signature changed | ✅ machine-diffed the set of top-level signature lines old vs new: the **only** difference in either direction is the addition of `void LogDeploymentGateBreakdown()` and its forward declaration. `SpreadAllowed()`, `TradingEnvironmentReady()`, `DailyRiskCapacityAvailable()` and `LotSizingCapitalUnits()` are all unchanged in arity and in return type |
+| `LotSizingCapitalUnits()` call sites re-counted after the edit | ✅ still exactly 4, at 9058 / 12174 / 15536 / 16086 — the change added no new call site. All four audited in the table above |
+| No risk or margin cap consumes `LotSizingCapitalUnits()` | ✅ `CapSetupVolumeForCentSafety()` and `CapVolumeForStandardRiskGuard()` appear at no line in the call-site list. Both read `ACCOUNT_EQUITY` / `OrderCalcProfit` / `OrderCalcMargin` directly |
+| No new `MQL_TESTER` branches | ✅ 13 raw grep hits, **unchanged** (pre-S03: 13, post-S03: 13). No tester-only code added |
+| `GetTickCount64` still confined to `NowMs()` | ✅ 1 occurrence |
+| New identifiers do not collide | ✅ none of the eleven `g_…Reject…`/`g_orderSend…` names, nor `InpForceMinimumBaseSizing`, nor `LogDeploymentGateBreakdown`, existed anywhere in the pre-S03 file |
+| New globals declared before first use | ✅ declared at 2480–2490; earliest use at 3320 |
+| Input declared before first use | ✅ input at 492; earliest use at 2075 |
+| New function declared consistently with file convention | ✅ forward declaration at 1919 immediately beside `LogConfluenceFilterRate();`, definition at 9901 immediately after that function's body |
+| Counters reset in `OnInit` | ✅ lines 15401–15411, in the same block as the V2.1a counters |
+| MQL5 string handling | ✅ no reliance on implicit adjacent string-literal concatenation; every join uses explicit `+` |
+| Diff hunk count matches intent | ✅ 27 hunks, no unintended edit |
+| Every `.set` input name matches a real declaration | ✅ script-checked, not eyeballed: both V2.1b `.set` files parsed and every `Inp…` name resolved against an `input` declaration in the `.mq5`. No missing names, no duplicates, no unparsed lines |
+| Identical patch applied to `EzyMap_V2_2_BTCUSD_ADAPTATION.mq5` | ✅ added lines from both diffs extracted and compared with the stage tag normalised: **byte-identical apart from the tag string, the header block and the version number** |
+| Not committed to git | ✅ files written only |
+| **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
+
+---
+
+## What to do with the new line
+
+Run whatever you were already running. At the end of the run, read the breakdown line
+before anything else:
+
+- **`ORDER-SEND ATTEMPTS` > 0** — the EA can deploy. Any shortfall in trade count is a
+  filter, and the three rejection counts tell you which one to look at.
+- **`ORDER-SEND ATTEMPTS` = 0 and one rejection count is large** — that gate is the blocker.
+  Fix that input; do not touch the others yet.
+- **All four are 0** — nothing ever reached these gates. The problem is upstream of them
+  entirely: no setups armed, no touch registered, or an environment problem outside the EA
+  (missing tester history, symbol not in Market Watch, algo trading off). Read the
+  `SetDeploymentFailure` reasons in the journal rather than changing more inputs.
+
+Read it alongside the existing `V2.1a CONFLUENCE FILTER RATE` line — between them the two
+lines now cover every gate standing between a stored READY setup and an order send.

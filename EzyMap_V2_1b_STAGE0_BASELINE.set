@@ -11,7 +11,7 @@
 ; inputs default to the NEW behaviour, so a default-valued binary is already
 ; the changed EA. Loading this file is what gives you the old EA back.
 ;
-; Only the V2.1b S01-S02 inputs are listed. Load this ON TOP of your V2.1a
+; Only the V2.1b S01-S03 inputs are listed. Load this ON TOP of your V2.1a
 ; working set - every other input keeps its current value.
 ;
 ; Confirm from the OnInit log that you loaded it. This file must produce:
@@ -20,3 +20,24 @@
 ;
 InpZeroConfAllowCurrentMapTier=true
 InpZeroConfIncludeLevel1=true
+;
+; ---------------------------------------------------------------------------
+; S03 (added later than S01/S02) - InpForceMinimumBaseSizing
+; ---------------------------------------------------------------------------
+; S03 added a NOMINAL lot-sizing floor: with it true, LotSizingCapitalUnits()
+; never reports less than InpBaseEquity, so an account below 100 deposit units
+; still sizes as if it had 100. It DEFAULTS TO TRUE, which is the same
+; reversed polarity S01/S02 use, so this control file pins it FALSE to
+; reproduce the pre-S03 unfloored formula exactly.
+;
+; The floor only moves the STARTING TARGET. It reaches no risk or margin
+; calculation, so setting it false here does not make this control arm any
+; safer or any riskier than the S03 arm - it only changes the nominal target
+; on accounts below 100 units. At 100 units or above the two arms are
+; arithmetically identical, so an A/B at a normal tester deposit will show NO
+; difference from this input alone. That is expected, not a failed load.
+;
+; S03 also added the DEPLOYMENT GATE BREAKDOWN log line. That is pure
+; instrumentation with no input and no rollback switch - it prints in both
+; arms and changes no behaviour.
+InpForceMinimumBaseSizing=false

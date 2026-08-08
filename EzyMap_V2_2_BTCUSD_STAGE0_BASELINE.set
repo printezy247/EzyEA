@@ -39,3 +39,28 @@ InpH4LevelMinDistancePips=70.0
 InpD1LevelMinDistancePips=120.0
 InpW1LevelMinDistancePips=200.0
 InpH1LevelMinDistancePips=70.0
+;
+; ---------------------------------------------------------------------------
+; S06 (added after S01-S05) - InpForceMinimumBaseSizing
+; ---------------------------------------------------------------------------
+; S06 breaks the "four inputs" count above: it added a FIFTH, and it is the
+; one V2.2 BTC input that does NOT default to reproducing the base. It
+; DEFAULTS TO TRUE - a deliberate polarity exception, requested explicitly -
+; so this control file must pin it FALSE to keep this arm a true V2.1b
+; reproduction.
+;
+; What it does: floors the NOMINAL lot-sizing target so LotSizingCapitalUnits()
+; never reports less than InpBaseEquity, i.e. an account below 100 deposit
+; units still sizes as if it had 100. It reaches NO risk or margin
+; calculation - CapSetupVolumeForCentSafety() and
+; CapVolumeForStandardRiskGuard() read ACCOUNT_EQUITY and
+; OrderCalcProfit/OrderCalcMargin directly and still have the final word.
+;
+; At 100 deposit units or above the floored and unfloored formulas are
+; arithmetically IDENTICAL, so at any normal tester deposit this arm and the
+; default arm produce the same lots. Seeing no difference is expected.
+;
+; S06's other half - the DEPLOYMENT GATE BREAKDOWN log line - is pure
+; instrumentation with no input and no rollback switch. It prints in both
+; arms and changes no behaviour, so it does not compromise this control.
+InpForceMinimumBaseSizing=false

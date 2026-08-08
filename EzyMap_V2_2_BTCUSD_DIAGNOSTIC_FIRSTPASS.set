@@ -1,0 +1,269 @@
+; EzyMap Scalp Mastery V2.2 BTC - EzyMap_V2_2_BTCUSD_DIAGNOSTIC_FIRSTPASS.set
+;
+; ############################################################################
+; #  THIS IS NOT A TRADING PROFILE. IT IS A MEASURING INSTRUMENT.            #
+; #                                                                          #
+; #  It is DELIBERATELY OVER-PERMISSIVE. Two filters are switched off        #
+; #  outright and the lot ladder is un-halved, for one reason only: to make  #
+; #  a run in which NOTHING SHOULD BE ABLE TO ZERO OUT THE TRADE COUNT.      #
+; #  Its expectancy is meaningless. Do not judge the strategy by it, do not  #
+; #  optimise on it, and do not put it on a live account.                    #
+; ############################################################################
+;
+; ---------------------------------------------------------------------------
+; WHY THIS FILE EXISTS
+; ---------------------------------------------------------------------------
+; Three BTCUSD.sc Strategy Tester runs at 100 / 1000 / 3000 deposit all ended:
+;
+;     READY=511, stored=54, deployed=0, LIVE=0
+;
+; 511 signals became READY, 54 were stored as persistent setups, and not one
+; of the 54 ever reached the broker. Every gate between "stored" and "sent"
+; is a candidate, and before V2.2 BTC S06 only ONE of them (the V2.1a
+; confluence score) reported a pass/fail rate, so the journal could not
+; distinguish "the spread filter rejected all 54" from "the volatility veto
+; rejected all 54" from "no touch ever occurred".
+;
+; S06 added the missing counters. This file is the run you use to read them
+; under conditions where the two most suspect filters cannot be the answer.
+;
+; Load this ON TOP of your V2.1b working set, on a BTCUSD or BTCUSD.sc chart,
+; over the SAME period as the zero-trade runs. Every input not listed keeps
+; its current value. It is EzyMap_V2_2_BTCUSD_RECOMMENDED.set with four
+; changes, all marked *** DIAGNOSTIC CHANGE *** below.
+;
+; ---------------------------------------------------------------------------
+; WHAT TO READ AFTERWARDS
+; ---------------------------------------------------------------------------
+; At OnDeinit the journal now prints:
+;
+;   V2.2 BTC S06 DEPLOYMENT GATE BREAKDOWN | SPREAD REJECTED: n
+;     | ENVIRONMENT REJECTED: n | DAILY CAPACITY REJECTED: n
+;     | ORDER-SEND ATTEMPTS: n
+;   V2.2 BTC S06 DEPLOYMENT GATE BREAKDOWN BY PATH | ...
+;
+; Read ORDER-SEND ATTEMPTS first. If it is greater than zero the EA can
+; deploy, and the zero-trade runs were caused by a FILTER you can now
+; re-enable one at a time. If it is still zero with this profile loaded, no
+; input in this EA is responsible - see "IF THIS STILL PRODUCES ZERO" below.
+;
+; EXPECTED ABSENCE: the "V2.1a CONFLUENCE FILTER RATE" line will NOT appear in
+; this run. LogConfluenceFilterRate() returns early when
+; InpUseConfluenceScoring is false, by design since V2.1a S01, because a rate
+; of 0/0 would imply a filter that never ran had rejected everything. That is
+; correct behaviour, not a missing log. The confluence line becomes readable
+; again at step 3 of the retest, when scoring is switched back on. If you want
+; it populated in THIS run instead, set InpUseConfluenceScoring=true and
+; InpMinConfluenceScore=0.0 rather than switching the engine off - the gate
+; then counts every attempt and passes every one.
+;
+; ---------------------------------------------------------------------------
+; IF THIS STILL PRODUCES ZERO
+; ---------------------------------------------------------------------------
+; Stop tuning. With the spread gate disabled, the confluence engine off and a
+; lot ladder that clears the broker minimum at 100 units, no input in this
+; file can be the cause. Check the environment instead:
+;
+;   - No M5 history downloaded for BTCUSD.sc in the tester (the most common
+;     cause by far - check the tester's own "history" tab, not the chart)
+;   - Symbol not selected in Market Watch
+;   - Algo trading disabled, or the tester's date range outside the data
+;   - The symbol's SYMBOL_VOLUME_MIN / SYMBOL_VOLUME_STEP being something
+;     unexpected - read the OnInit "BROKER-NATIVE LOT SIZING" line, which
+;     prints both
+;   - A deployment failure happening BEFORE these gates: read the
+;     SetDeploymentFailure reasons in the journal
+;
+; Report the DEPLOYMENT GATE BREAKDOWN line and the OnInit block back rather
+; than changing more numbers.
+;
+; ---------------------------------------------------------------------------
+; *** DIAGNOSTIC CHANGE 1 of 4 - SPREAD GATE DISABLED ***
+; ---------------------------------------------------------------------------
+; SpreadAllowed() opens with "if(InpMaxSpreadPoints<=0) return true;" - zero
+; is an existing, documented no-op path, not a hack. Confirmed by reading the
+; function in EzyMap_V2_2_BTCUSD_ADAPTATION.mq5.
+;
+; This is the SINGLE MOST LIKELY cause of the zero-trade runs, and the reason
+; is arithmetic rather than strategy. The gate computes
+; (tick.ask-tick.bid)/_Point and compares it to InpMaxSpreadPoints=1200. On a
+; BTCUSD symbol quoted with 2 digits, _Point is 0.01, so a perfectly ordinary
+; $30 spread is 3000 points - two and a half times the limit, on every single
+; tick, forever. RECOMMENDED.set's own section 7 already flags that 1200 is an
+; unverified placeholder widened 10x from gold because the broker's point
+; convention was unknown at authoring time.
+;
+; Before re-enabling it, read the OnInit line the EA already prints:
+;   V2.2 BTC SPREAD CHECK | observed spread=... points (... price) | ...
+; and set InpMaxSpreadPoints to roughly 2-3x the calm-market reading.
+InpMaxSpreadPoints=0
+;
+; ---------------------------------------------------------------------------
+; *** DIAGNOSTIC CHANGE 2 of 4 - CONFLUENCE ENGINE OFF ***
+; ---------------------------------------------------------------------------
+; ConfluenceGateAllows() returns true immediately when this is false, before
+; touching its counters and before the volatility hard-block is consulted, so
+; this one switch neutralises the ENTIRE V2.1a gate - session score,
+; volatility score, InpMinConfluenceScore and InpHardBlockExtremeVol together.
+; ConfluenceScore() would return a neutral 1.0 pass-through even if it ran.
+;
+; The suspect inside this group is the volatility hard block. Its test is
+; "ATR percentile < 20 OR > 90" against the same rolling window the reading
+; comes from, which marks about 30% of bars extreme BY CONSTRUCTION even in a
+; calm market, and clusters far worse than that on a one-directional trending
+; day. As a hard veto it fired before the score was consulted and before any
+; counter was incremented, so it was completely invisible in the journal.
+;
+; The remaining V2.1a inputs are left at RECOMMENDED values so that turning
+; the engine back on at step 3 restores that profile exactly. They have no
+; effect while the master switch is off. InpHardBlockExtremeVol is pinned
+; false here as belt and braces.
+InpUseConfluenceScoring=false
+InpMinConfluenceScore=0.45
+InpScoreSession=false
+InpScoreVolatilityRegime=true
+InpVolATRPeriod=14
+InpVolTimeframe=5
+InpVolPercentileLookback=500
+InpVolLowPercentile=20.0
+InpVolHighPercentile=90.0
+InpVolatilityWeight=1.0
+InpVolNormalScore=1.0
+InpVolExtremeScore=0.15
+InpHardBlockExtremeVol=false
+;
+; ---------------------------------------------------------------------------
+; *** DIAGNOSTIC CHANGE 3 of 4 - LOT LADDER UN-HALVED ***
+; ---------------------------------------------------------------------------
+; THIS IS A REAL BUG IN RECOMMENDED.set AT SMALL BALANCES, not just a
+; diagnostic convenience, and it fully explains the 100-deposit run on its own.
+;
+; RECOMMENDED.set halves the gold ladder to InpStandardSetupLotPer100=0.005
+; for BTC margin headroom. ConfidenceSetupLot() computes
+; targetLot = lotPer100 * (sizingCapital / InpBaseEquity), so at a 100-unit
+; deposit the STANDARD target is 0.005 * (100/100) = 0.005 lots. That is BELOW
+; a 0.01 broker minimum, so NormalizeVolumeDown() returns 0.0, and because
+; IsLiveCentAccount() is false in the Strategy Tester the live-cent
+; minimum-lot fallback does not apply either - the function logs
+; "REAL CENT SIZE BLOCK" and returns 0.0. Zero volume, no deployment.
+;
+; That hits the DIRECT ZERO-CONF path unconditionally, because it always calls
+; ConfidenceSetupLot(0) and confidence 0 is always the STANDARD tier. GOOD
+; (0.010) and QUALITY (0.015) survive at 100 units; STANDARD does not.
+;
+; NOTE that InpForceMinimumBaseSizing does NOT rescue this. The floor raises
+; the sizing CAPITAL to 100, and at a 100-unit deposit it already was 100 -
+; the shortfall is in the per-100 lot RATE, not in the capital. This is worth
+; being explicit about because it is exactly the case the floor was requested
+; for and exactly the case it cannot fix.
+;
+; The unhalved ladder below is gold's, and gives 0.01 at 100 units - the
+; broker minimum, which is what a 100-unit account should be trading anyway.
+; If you go back to the halved ladder, use at least a 200-unit deposit.
+InpBaseEquity=100.0
+InpBaseLayerLot=0.01
+InpStandardSetupLotPer100=0.01
+InpGoodSetupLotPer100=0.02
+InpQualitySetupLotPer100=0.03
+InpForceMinimumBaseSizing=true
+;
+; ---------------------------------------------------------------------------
+; *** DIAGNOSTIC CHANGE 4 of 4 - RISK GUARD WIDENED ***
+; ---------------------------------------------------------------------------
+; CapVolumeForStandardRiskGuard() blocks outright when even the broker minimum
+; lot would risk more than this percentage of equity, logging
+; "STANDARD RISK GUARD BLOCK". On BTC with a 210-pip (= $210) stop, one 0.01
+; lot risks about $2.10, which is 2.1% of a 100-unit account - inside the
+; compiled default of 5.0%, but not by much, and the ATR-resolved stop can run
+; wider than the 210-pip preset. RECOMMENDED.set does not set this input at
+; all, so it runs at that 5.0% default. Widened here so it cannot be the thing
+; that zeroes the run. REMOVE THIS LINE (OR SET IT BACK TO 5.0) BEFORE ANY
+; REAL TEST - it is the one change in this file that genuinely increases risk,
+; and unlike the other three it is not part of the RECOMMENDED profile.
+InpConfidenceLotRiskGuardPct=25.0
+;
+; ---------------------------------------------------------------------------
+; EVERYTHING BELOW IS UNCHANGED FROM RECOMMENDED.set
+; ---------------------------------------------------------------------------
+; Reproduced in full so this file is self-contained and so the geometry the
+; EA trades is the geometry you are actually trying to diagnose. See
+; EzyMap_V2_2_BTCUSD_RECOMMENDED.set for the reasoning behind every number;
+; all of it still applies, and all of it is still UNVALIDATED against real BTC
+; data.
+;
+; ATR geometry - ON. Self-relative, so it transfers to BTC. Multipliers are
+; gold's tuned dimensionless ratios; only the pip-denominated floor/ceiling
+; are rescaled x10.
+InpUseATRGeometry=true
+InpATRPeriod=14
+InpATRTimeframe=5
+InpATRStopMultiplier=1.60
+InpATRTrailMultiplier=0.55
+InpATRArmMultiplier=0.35
+InpATRStopFloorPips=120.0
+InpATRStopCeilingPips=350.0
+InpATRTrailFloorPips=50.0
+;
+; Stop / trail / breakeven. Some are superseded at runtime by ATR geometry,
+; some are only rescaled by it, some are never touched by it.
+InpPresetStopLossPips=210.0
+InpTrailArmPips=70.0
+InpTrailInitialDistancePips=70.0
+InpTrailTightenAtPips=999.0
+InpTrailTightDistancePips=70.0
+InpTrailingActivationPips=0.0
+InpTrailingDistancePips=70.0
+InpTrailingStepPips=10.0
+InpBreakevenLockAtPips=90.0
+InpBreakevenLockOffsetPips=10.0
+;
+; Partial TP.
+InpPartialTPPips=110.0
+InpGradeAPartialTPPips=160.0
+InpGradeBPartialTPPips=110.0
+InpGradeCPartialTPPips=70.0
+;
+; Tolerances and zone geometry - live regardless of ATR geometry.
+InpEntryTouchTolerancePips=50.0
+InpZeroConfTouchTolerancePips=90.0
+InpZeroConfClusterTolerancePips=90.0
+InpConfluenceTolerancePips=700.0
+InpZoneIdentityTolerancePips=80.0
+InpM1ZoneTolerancePips=80.0
+InpSnrFrontRunPips=100.0
+InpLimitZoneDuplicateTolerancePips=10.0
+InpLiveLimitGeometryExtensionPips=200.0
+InpTouchStallMaxExtendPips=20.0
+;
+; Mode stop/target scaffolding - feeds RR planning and PersistentFallbackSL().
+InpScalpStopPips=200.0
+InpIntradayStopPips=350.0
+InpSwingStopPips=700.0
+InpScalpTargetMinPoints=150.0
+InpScalpTargetMaxPoints=800.0
+InpIntradayTargetMinPoints=600.0
+InpIntradayTargetMaxPoints=2500.0
+InpSwingTargetMinPoints=1800.0
+InpSwingTargetMaxPoints=8000.0
+;
+; Distal stops - only consumed when InpUseZoneDistalStops is true, which is
+; not enabled here.
+InpDistalStopBufferPips=30.0
+InpDistalStopMinPips=100.0
+InpDistalStopMaxPips=300.0
+;
+; Round-number grading tolerance - only consumed when InpUseZoneGrading is
+; true, which is not enabled here.
+InpRoundNumberTolerancePips=50.0
+;
+; Higher-timeframe level separation floors (V2.2 BTC S03).
+InpH4LevelMinDistancePips=700.0
+InpD1LevelMinDistancePips=1200.0
+InpW1LevelMinDistancePips=2000.0
+InpH1LevelMinDistancePips=700.0
+;
+; Slippage. Unchanged; only the spread gate above was disabled.
+InpDeviationPoints=200
+;
+; Magic number - distinct from the XAUUSD default so the journal is readable.
+InpMagicNumber=2475222
