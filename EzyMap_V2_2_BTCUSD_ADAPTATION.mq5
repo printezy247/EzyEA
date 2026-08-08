@@ -371,6 +371,20 @@
 //              in the XAUUSD lineage), InpSpreadCalibrationTicks,      |
 //              InpSpreadCalibrationMultiplier                          |
 //                                                                    |
+//      CORRECTION (found from the very next test run, same stage):    |
+//      the ceiling was originally InpMaxSpreadPoints itself, which     |
+//      silently clamped the calibrated cap straight back down to      |
+//      the stale 120 default whenever no .set was loaded - the        |
+//      user's own journal showed "calibrated cap=120.0" verbatim.     |
+//      A broker reference (Vantage Markets) puts typical BTCUSD       |
+//      spread at ~$15-17/unit, ~1500-1700 points on a 2-digit         |
+//      symbol - 12-14x what that ceiling let through. The ceiling     |
+//      is now its own input, InpSpreadCalibrationCeilingPoints        |
+//      (default 0 = uncapped), fully decoupled from                   |
+//      InpMaxSpreadPoints, which keeps its old meaning only in the    |
+//      static (non-calibrating) branch.                               |
+//      Inputs: InpSpreadCalibrationCeilingPoints                      |
+//                                                                    |
 //  BASE NOTE: this file descends from the V3.176 line, NOT from the   |
 //  separate V3.180 PARITY_HARDENED branch. It does not contain the    |
 //  V3.180 P01-P13 parity fixes. NowMs() and TradeRetcodePartial()     |
@@ -783,9 +797,24 @@ input int    InpMaxSpreadPoints          = 120;
 // Default TRUE here (three static guesses have failed); default FALSE in the
 // XAUUSD lineage this was ported from, where the static value already has a
 // working track record and must not be silently overridden.
+//
+// CORRECTION (same stage, found from the very next test run): the ceiling
+// below used to be InpMaxSpreadPoints itself, which defeated the entire
+// point of calibrating - a user running with no .set loaded still has
+// InpMaxSpreadPoints=120, so "median * multiplier" got clamped straight back
+// down to the same 120 the feature exists to get past. The journal from that
+// run showed it happening verbatim: "current spread exceeds calibrated
+// cap=120.0" - not a coincidence, the ceiling clamp landed exactly on the
+// legacy default. A broker reference for BTCUSD CFDs (Vantage Markets) puts
+// typical spread around $15-17/unit, which on a 2-digit-quoted symbol is on
+// the order of 1500-1700 points - roughly 12-14x what that ceiling allowed
+// through. The ceiling is now its OWN input, decoupled from
+// InpMaxSpreadPoints (which keeps its old meaning, but only in the static/
+// non-calibrating branch below).
 input bool   InpAutoCalibrateSpreadCap      = true;
 input int    InpSpreadCalibrationTicks      = 100;
 input double InpSpreadCalibrationMultiplier = 3.0;
+input int    InpSpreadCalibrationCeilingPoints = 0; // 0 = uncapped
 input int    InpDeviationPoints          = 20;
 input bool   InpUseAsyncMode             = false;
 input bool   InpUseLimitStopLayers       = true;
@@ -9731,8 +9760,8 @@ bool SpreadAllowed()
       double mult=MathMax(1.0,InpSpreadCalibrationMultiplier);
       double effective=median*mult;
 
-      if(InpMaxSpreadPoints>0)
-         effective=MathMin(effective,(double)InpMaxSpreadPoints);
+      if(InpSpreadCalibrationCeilingPoints>0)
+         effective=MathMin(effective,(double)InpSpreadCalibrationCeilingPoints);
 
       g_spreadCalEffectiveCap=MathMax(1.0,effective);
 
@@ -9740,7 +9769,9 @@ bool SpreadAllowed()
           " | samples="+IntegerToString(g_spreadCalCount)+
           " | median observed="+DoubleToString(median,1)+" points"+
           " | multiplier="+DoubleToString(mult,2)+
-          " | ceiling(InpMaxSpreadPoints)="+IntegerToString(InpMaxSpreadPoints)+
+          " | ceiling(InpSpreadCalibrationCeilingPoints)="+
+          IntegerToString(InpSpreadCalibrationCeilingPoints)+
+          (InpSpreadCalibrationCeilingPoints<=0?" (uncapped)":"")+
           " | EFFECTIVE CAP NOW ENFORCED="+
           DoubleToString(g_spreadCalEffectiveCap,1)+" points");
    }
@@ -15729,6 +15760,9 @@ int OnInit()
        (InpAutoCalibrateSpreadCap
         ? (" | calibrating over first "+IntegerToString(MathMax(20,InpSpreadCalibrationTicks))+
            " ticks, multiplier="+DoubleToString(MathMax(1.0,InpSpreadCalibrationMultiplier),2)+
+           " | ceiling="+(InpSpreadCalibrationCeilingPoints>0
+                          ?IntegerToString(InpSpreadCalibrationCeilingPoints)
+                          :"uncapped")+
            " | filter INACTIVE (fail-open) until calibration completes - watch for"+
            " V2.2 BTC SPREAD AUTO-CALIBRATION COMPLETE")
         : (" | static InpMaxSpreadPoints="+IntegerToString(InpMaxSpreadPoints)+

@@ -102,10 +102,13 @@
 ; "filter is completely disabled, full stop" state as before.
 ;
 ; Once this pass confirms trades occur, the NEXT test should flip
-; InpAutoCalibrateSpreadCap back to true (its compiled default) with
-; InpMaxSpreadPoints left as a generous ceiling, and you should see
-; "V2.2 BTC SPREAD AUTO-CALIBRATION COMPLETE" report a real measured cap
-; instead of guessing another static number.
+; InpAutoCalibrateSpreadCap back to true (its compiled default) - see
+; RECOMMENDED.set, which leaves InpSpreadCalibrationCeilingPoints at 0
+; (uncapped) on purpose, since that input used to be InpMaxSpreadPoints
+; itself and a leftover 120/1200/5000 value there silently clamped the
+; calibrated cap back down to whatever static number was left behind. You
+; should then see "V2.2 BTC SPREAD AUTO-CALIBRATION COMPLETE" report a real
+; measured cap instead of guessing another static number.
 InpAutoCalibrateSpreadCap=false
 InpMaxSpreadPoints=0
 ;

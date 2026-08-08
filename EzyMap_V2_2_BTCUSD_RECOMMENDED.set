@@ -188,21 +188,32 @@ InpH1LevelMinDistancePips=700.0
 ; sixth number, InpAutoCalibrateSpreadCap now measures the symbol's own real
 ; spread for InpSpreadCalibrationTicks ticks after attach (filter INACTIVE /
 ; fail-open while collecting) and sets the ENFORCED cap to
-; median(observed) * InpSpreadCalibrationMultiplier. InpMaxSpreadPoints below
-; is now only a safety CEILING on that measured value, not the enforced
-; number itself - left generous on purpose so the ceiling should never bind
-; in normal conditions; if it does, that is itself informative (means the
-; measured spread * multiplier wants to exceed 5000 points, i.e. the calm-
-; market spread itself is enormous).
+; median(observed) * InpSpreadCalibrationMultiplier.
+;
+; CORRECTION (found from the very next test run): this section originally set
+; InpMaxSpreadPoints=5000 as "just a ceiling", but that input is ALSO the
+; static-mode value, and a run with NO .set loaded compiles in at 120 - the
+; calibrated cap was getting clamped straight back down to 120 by that
+; leftover default, which is exactly what the user's own journal showed
+; ("current spread exceeds calibrated cap=120.0"). The ceiling is now its OWN
+; input, InpSpreadCalibrationCeilingPoints, fully independent of
+; InpMaxSpreadPoints (which this file leaves at its plain 120 default below -
+; it is inert while calibration is on). A broker reference for BTCUSD CFDs
+; (Vantage Markets) puts typical spread around $15-17/unit, roughly
+; 1500-1700 points on a 2-digit-quoted symbol, so 0 (uncapped) is set here on
+; purpose: trust median * multiplier rather than guess a ceiling number that
+; could reproduce this exact bug again.
 ;
 ; DO THIS: attach/run and read the OnInit line "V2.2 BTC SPREAD GUARD MODE",
 ; then watch for "V2.2 BTC SPREAD AUTO-CALIBRATION COMPLETE" a few dozen ticks
-; later - it states the measured median and the cap it locked in. That is now
-; the number to sanity-check, not something to author by hand.
+; later - it states the measured median and the cap it locked in. That median
+; is the real answer to "what is this symbol's usual spread", more reliable
+; than any reference figure since it comes from this exact broker feed.
 InpAutoCalibrateSpreadCap=true
 InpSpreadCalibrationTicks=100
 InpSpreadCalibrationMultiplier=3.0
-InpMaxSpreadPoints=5000
+InpSpreadCalibrationCeilingPoints=0
+InpMaxSpreadPoints=120
 InpDeviationPoints=200
 ;
 ; ---------------------------------------------------------------------------
