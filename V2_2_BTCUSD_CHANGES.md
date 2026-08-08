@@ -529,3 +529,452 @@ Run `EzyMap_V2_2_BTCUSD_STAGE0_BASELINE.set` against a V2.1b binary on gold. The
 be indistinguishable. **If they are not, the regression is in S03's four substitutions or in
 S01's gold branch** — those are the only two places a gold-visible difference could come
 from, and both are argued above to be arithmetically identical.
+
+---
+
+# S06 — sizing floor + deployment-gate instrumentation (diagnostic pass)
+
+**Added after S01–S05.** `#property version` bumped `2.200` → `2.201` (line **364**). File
+16,363 → **16,572 lines**. One new input, eleven new counter globals, one new function,
+fifteen counter increments at existing call sites, **zero changed function signatures**,
+28 diff hunks.
+
+The identical patch is applied to `EzyMap_V2_1b_TRIGGER_REFINED.mq5` as **V2.1b S03** — the
+added code is byte-identical apart from the stage tag in comments and log strings. See
+`V2_1b_CHANGES.md`.
+
+### ⚠️ This stage breaks the V2.2 "four inputs, all default to base" rule
+
+`InpForceMinimumBaseSizing` is a **fifth** V2.2 input and it is the one that **defaults to
+`true`**, i.e. to the new behaviour, at explicit request. That is the V2.1b polarity, not
+the V2.2 polarity. `EzyMap_V2_2_BTCUSD_STAGE0_BASELINE.set` now pins it `false` so the
+control arm remains a true V2.1b reproduction. Point 2 of *Five things to know* above is
+still correct for S01–S05 and is now wrong for S06; this paragraph is the correction.
+
+---
+
+## The problem this stage exists to solve
+
+Three BTCUSD.sc Strategy Tester runs, at deposits of **100, 1000 and 3000**, all ended:
+
+```
+READY=511, stored=54, deployed=0, LIVE=0
+```
+
+511 signals reached READY, 54 became stored persistent setups, **and not one of the 54 ever
+reached the broker.** The working hypothesis was that lot sizing collapsed at or below 100
+equity.
+
+---
+
+## Finding 1 — the sizing formula was NOT undersizing at 100/1000/3000
+
+Verified by direct reading, not by test. The arithmetic:
+
+**Step 1 — `LotSizingCapitalUnits()`** (pre-S06, lines 2096–2106 of the old file):
+
+```
+double raw = InpUseBalanceForLotSizing ? ACCOUNT_BALANCE : ACCOUNT_EQUITY;   // default: BALANCE
+if(InpUseBrokerNativeDepositUnitsForLots) return MathMax(0.0, raw);          // default: true
+return MathMax(0.0, raw / MathMax(1.0, g_accountUnitDivisor));
+```
+
+With `InpUseBrokerNativeDepositUnitsForLots=true` (the default, line 510) it returns the
+**raw** balance. **No cent-currency division happens in that branch at all**, so a 100 USC
+balance and a 100 USD balance both resolve to a numeric `sizingCapital` of exactly `100`.
+
+The other branch reaches the same answer in the tester anyway:
+`InpAccountScaleMode=EZY_ACCOUNT_AUTO` (line 466) and `InpTesterAutoModeIsStandard=true`
+(line 470) make `ResolveAccountUnitDivisor()` return `1.0` under `MQL_TESTER` before any
+`.sc` suffix test runs, so `raw/1.0 = raw`. **Both branches give 100.**
+
+**Step 2 — the scale factor.** `AutoBaseLayerLot()` and `ConfidenceSetupLot()` both compute:
+
+```
+scale = sizingCapital / MathMax(1.0, InpBaseEquity)     // InpBaseEquity = 100.0
+```
+
+| Deposit | `sizingCapital` | `scale` |
+|---|---|---|
+| 100 | 100 | **1.0** |
+| 1000 | 1000 | **10.0** |
+| 3000 | 3000 | **30.0** |
+
+**Step 3 — the target.** `targetLot = lotPer100 * scale`. At a deposit of 100 the scale is
+exactly `1.0`, so **the target is exactly `lotPer100`** — the configured per-100 rate, not
+some fraction of it. At 1000 and 3000 it scales up tenfold and thirtyfold.
+
+**Conclusion: all three tested deposits sat at or above the point where the pre-S06 formula
+already behaved exactly as requested.** A "sizing collapses below 100" bug cannot explain
+zero deployments at 100, and certainly not at 1000 or 3000. The blocker was upstream of
+sizing.
+
+---
+
+## Finding 2 — but the RECOMMENDED lot ladder *does* zero out at a 100 deposit
+
+Separate from the formula, and **real**. This is a genuine bug in
+`EzyMap_V2_2_BTCUSD_RECOMMENDED.set`, found while proving Finding 1, and it fully explains
+the **100-deposit run on its own**.
+
+`RECOMMENDED.set` halves the gold ladder for BTC margin headroom:
+`InpStandardSetupLotPer100=0.005`. Following that number through `ConfidenceSetupLot()`:
+
+| Deposit | `targetLot` = `0.005 × scale` | `NormalizeVolumeDown()` with min 0.01 / step 0.01 | Result |
+|---|---|---|---|
+| **100** | `0.005 × 1` = **0.005** | `if(vol < minVol) return 0.0;` → **0.0** | ❌ **zero volume** |
+| 1000 | `0.005 × 10` = 0.05 | 0.05 | ✅ |
+| 3000 | `0.005 × 30` = 0.15 | 0.15 | ✅ |
+
+At 100 the target is below the broker minimum, so `normalized` is `0.0`, and the
+`liveCentCandidate` rescue does not fire because it requires `IsLiveCentAccount()`, which is
+`!MQLInfoInteger(MQL_TESTER) && divisor>1` — **false in the Strategy Tester by definition**.
+`ConfidenceSetupLot()` logs `REAL CENT SIZE BLOCK` and returns `0.0`. Downstream,
+`CapSetupVolumeForCentSafety(…, requested=0.0)` returns `0.0` immediately and the deployment
+fails on `volume < minVolume`.
+
+Two things sharpen this:
+
+- **It hits the direct zero-conf path unconditionally.** `SubmitDirectZeroConfMarket()`
+  calls `ConfidenceSetupLot(0)`, and confidence 0 is always the STANDARD tier.
+- **GOOD and QUALITY survive.** `0.010 × 1` = 0.010 clears the minimum exactly, and
+  `0.015 × 1` floors down to 0.010. Only STANDARD dies. So at a 100 deposit the EA loses the
+  entire zero-conf path plus every sub-3-confluence setup, silently.
+
+**`InpForceMinimumBaseSizing` does not fix this**, and it is worth being explicit about that
+because it is exactly the case the floor was requested for. The floor raises the sizing
+**capital** to `InpBaseEquity`; at a 100-unit deposit the capital already *was* 100. The
+shortfall is in the per-100 lot **rate**, not in the capital. The fix is to un-halve the
+ladder (or use a deposit of at least 200 units), which is what
+`EzyMap_V2_2_BTCUSD_DIAGNOSTIC_FIRSTPASS.set` does and what the new note in section 9 of
+`RECOMMENDED.set` says.
+
+This does **not** explain the 1000 and 3000 runs.
+
+---
+
+## Finding 3 — the two candidates that can zero out all three runs
+
+Both found by direct reading, neither previously instrumented, neither confirmed by a test.
+
+### Candidate A — `InpMaxSpreadPoints`, the strongest suspect
+
+`SpreadAllowed()` (lines 9509–9519 of the old file) is:
+
+```
+if(InpMaxSpreadPoints<=0) return true;
+...
+spread = (tick.ask - tick.bid) / _Point;
+return (spread <= InpMaxSpreadPoints);
+```
+
+`RECOMMENDED.set` ships `InpMaxSpreadPoints=1200`, and **that file's own section 7 already
+flags it** as an unverified placeholder widened 10× from gold, because "the broker's point
+convention for BTCUSD is unknown at authoring time."
+
+The failure mode is arithmetic, not strategic. On a BTCUSD symbol quoted with **2 digits**,
+`_Point` is `0.01`, so an entirely ordinary **$30** spread is **3000 points** — two and a
+half times the cap, on **every tick, forever**. That is a total, permanent, deposit-independent
+block, which is exactly the shape of the observed result: identical zero at three different
+balances. **This is the single most likely cause.**
+
+It is called from three sites (now lines **3470**, **11966**, **15211**), covering the
+zero-conf, persistent and legacy paths — so it gates everything.
+
+### Candidate B — `InpHardBlockExtremeVol`, a real drag, probably not a total block
+
+`ConfluenceGateAllows()` hard-vetoes before the soft score is consulted:
+
+```
+if(InpScoreVolatilityRegime && InpHardBlockExtremeVol && g_volRegimeExtreme)   // ~line 9879
+```
+
+`g_volRegimeExtreme` is set in `VolatilityRegimeScore()` as
+`percentile < InpVolLowPercentile || percentile > InpVolHighPercentile`, with
+`RECOMMENDED.set` at `20` / `90`.
+
+**The honest version of this concern, which is narrower than it first appears:** the test is
+a percentile **rank** of the current ATR against the same 500-bar trailing window it is
+drawn from. By construction that marks roughly **30% of bars extreme even in a perfectly
+calm market** — the tails of a rank distribution are always populated. As a *hard veto* that
+is a permanent ~30% frequency tax that no price action can avoid, which is a real design
+problem. On a single strongly-trending day the window (500 M5 bars ≈ 42 hours) is
+non-stationary and trending the same way, so readings cluster in the tails for long
+stretches and the rate goes well above 30%.
+
+**But ~30–60% is not 100%.** Unlike the spread gate, this cannot on its own produce 0 of 54
+unless the ATR sat persistently in one tail for the entire run. It is best read as a
+plausible **compounding** factor, and — more importantly — as something that was firing
+completely invisibly, because the hard block returns before any counter is touched.
+
+One thing it cannot be: `RefreshVolatilityATR()` returns early when fewer than 20 bars are
+usable, leaving `g_volATRPercentile` at `-1.0`, and `VolatilityRegimeScore()` then scores
+**NORMAL** and never sets the extreme flag. A cold start does not manufacture rejections.
+
+### Why the instrumentation matters more than either guess
+
+Neither gate had any counter. Guessing at better numbers without knowing which gate fired
+produces a fourth zero-trade run carrying no more information than the first three. **That
+is why the instrumentation, not the retuning, is the primary deliverable of S06.**
+
+---
+
+## S06(a) — `InpForceMinimumBaseSizing`
+
+New input at line **577**, immediately after `InpBaseLayerLot`. `LotSizingCapitalUnits()`
+(lines **2181–2198**) refactored from two bare returns into a local `capital` that both
+branches assign, floored identically before return:
+
+```
+   double capital=InpUseBrokerNativeDepositUnitsForLots
+                  ? MathMax(0.0,raw)
+                  : MathMax(0.0,raw/MathMax(1.0,g_accountUnitDivisor));
+
+   if(InpForceMinimumBaseSizing)
+      capital=MathMax(capital,MathMax(1.0,InpBaseEquity));
+
+   return capital;
+```
+
+Given Findings 1 and 2, this input's practical effect is **narrower than the request
+implied**: it only changes anything below `InpBaseEquity` deposit units, and none of the
+three failing runs was in that range. It is shipped because it was asked for, it is correct,
+and it removes a real edge case — not because it fixes the reported symptom.
+
+### Proof it cannot weaken a real risk cap
+
+Verified by grep rather than assumed. **`LotSizingCapitalUnits()` has exactly four call
+sites** (declaration 2105, definition 2181), unchanged in count by this edit:
+
+| Line | Call site | What it does with the value | Risk-bearing? |
+|---|---|---|---|
+| **9240** | `AutoBaseLayerLot()` | `rawLot = InpBaseLayerLot * (sizingCapital/baseEquity)` — nominal base-layer target | no |
+| **12356** | `ConfidenceSetupLot()` | `targetLot = lotPer100 * (sizingCapital/baseEquity)` — nominal confidence target | no |
+| **15814** | `OnInit`, `BROKER-NATIVE LOT SIZING` log line | printed; feeds a display-only `standardRawTarget` | no |
+| **16382** | `OnTimer`, `LIVE PARITY STATUS` log line | printed as `lot targets S/G/Q=` | no |
+
+**All four are nominal-lot-target calculations or log lines. None is a `$`-risk or
+margin-percentage calculation.** Further:
+
+- `CapSetupVolumeForCentSafety()` and `CapVolumeForStandardRiskGuard()` — the two real caps —
+  **appear nowhere in that list**. `CapVolumeForStandardRiskGuard()` reads
+  `AccountInfoDouble(ACCOUNT_EQUITY)` and `OrderCalcProfit` directly (lines 9179–9181 area);
+  the cent path uses `OrderCalcProfit`/`OrderCalcMargin` against the real symbol. Both still
+  have final authority over every submitted volume.
+- The `effectiveEquity < MinimumTradingEquity()` refusal at the top of **both** sizing
+  functions tests `EffectiveAccountEquity()`, **not** the floored value — an under-funded
+  account is still refused before the floor is consulted.
+
+A maintenance note naming all four call sites lives in the input's comment block (lines
+**547–576**) so this audit does not need redoing from scratch.
+
+---
+
+## S06(b) — deployment-gate breakdown instrumentation
+
+Eleven counters at lines **2620–2630**, beneath the existing V2.1a counters, reset in
+`OnInit` at **15583–15593**:
+
+```
+g_spreadRejectStd    g_spreadRejectZc    g_spreadRejectOther
+g_envRejectStd       g_envRejectZc
+g_capacityRejectStd  g_capacityRejectZc  g_capacityRejectOther
+g_orderSendStd       g_orderSendZc       g_orderSendOther
+```
+
+`STANDARD` / `ZERO-CONF` are the same two scored paths the confluence line uses, so the two
+summaries read side by side. `OTHER` is the legacy bridge-signal path
+(`ArmReadySignal()` → `PlaceOneLayer()`), which belongs to neither scored path and so is not
+forced into an artificial split. `TradingEnvironmentReady()` is never called from that path,
+hence no `OTHER` column on the environment field.
+
+**No gate function was modified.** `SpreadAllowed()`, `TradingEnvironmentReady()`,
+`DailyRiskCapacityAvailable()` and `LotSizingCapitalUnits()` keep their exact signatures and
+bodies. Increments sit at the **call sites**, on the false branch only, beside whatever
+logging and `return` already existed:
+
+| Line | Enclosing function | Gate | Counter |
+|---|---|---|---|
+| **3463** | `SubmitDirectZeroConfMarket()` | `DailyRiskCapacityAvailable()` | `g_capacityRejectZc` |
+| **3470** | `SubmitDirectZeroConfMarket()` | `SpreadAllowed()` | `g_spreadRejectZc` |
+| **3520** | `SubmitDirectZeroConfMarket()` | `TradingEnvironmentReady()` | `g_envRejectZc` |
+| **3579** | `SubmitDirectZeroConfMarket()` | *(order send)* | `g_orderSendZc` |
+| **3682** | `ProcessDirectZeroConfluenceTriggers()` | `DailyRiskCapacityAvailable()` | `g_capacityRejectZc` |
+| **11966** | `PlacePersistentLayer()` | `SpreadAllowed()` | `g_spreadRejectStd` |
+| **12000** | `PlacePersistentLayer()` | `DailyRiskCapacityAvailable()` | `g_capacityRejectStd` |
+| **12083** | `PlacePersistentLayer()` | *(order send)* | `g_orderSendStd` |
+| **12993** | `PersistentQualityPass()` | `DailyRiskCapacityAvailable()` | `g_capacityRejectStd` |
+| **13679** | `DeployAggressiveArmSetup()` | `DailyRiskCapacityAvailable()` | `g_capacityRejectStd` |
+| **13715** | `DeployAggressiveArmSetup()` | `TradingEnvironmentReady()` | `g_envRejectStd` |
+| **13984** | `DeployPersistentSetup()` | `TradingEnvironmentReady()` | `g_envRejectStd` |
+| **14922** | `PlaceOneLayer()` *(legacy)* | `DailyRiskCapacityAvailable()` | `g_capacityRejectOther` |
+| **14942** | `PlaceOneLayer()` *(legacy)* | *(order send)* | `g_orderSendOther` |
+| **15211** | `ArmReadySignal()` *(legacy)* | `SpreadAllowed()` | `g_spreadRejectOther` |
+
+Braces were added around two previously brace-less single-statement returns (**3682**,
+**14922**); that is the whole `{}` +2 delta outside the new function and changes no behaviour.
+
+**Order-send counting.** No pre-existing global counted send attempts — `g_directZeroConf.attempts`
+is a per-setup struct field, not a run total — so a new counter was added rather than
+duplicating something existing. It increments **once** per submission, immediately before the
+first `trade.Buy`/`trade.Sell`, so the "retry without SL on reject" second send is
+deliberately not double-counted: the number means *deployments that reached the broker*.
+
+New function `LogDeploymentGateBreakdown()` at lines **10083–10118**, immediately after
+`LogConfluenceFilterRate()`, forward-declared at **2038** beside it, called from `OnDeinit`
+at **16293** directly after the `LogConfluenceFilterRate()` call:
+
+```
+V2.2 BTC S06 DEPLOYMENT GATE BREAKDOWN | SPREAD REJECTED: n | ENVIRONMENT REJECTED: n | DAILY CAPACITY REJECTED: n | ORDER-SEND ATTEMPTS: n
+V2.2 BTC S06 DEPLOYMENT GATE BREAKDOWN BY PATH | SPREAD std/zc/other: n/n/n | ENVIRONMENT std/zc: n/n | DAILY CAPACITY std/zc/other: n/n/n | ORDER-SEND std/zc/other: n/n/n
+```
+
+**Deviation:** the brief specified one line. The per-path split went on a second line rather
+than widening the mandated line's fields, so the mandated string stays greppable verbatim.
+
+**Deliberately not gated by any input**, unlike `LogConfluenceFilterRate()`. The reasoning
+inverts here: a breakdown of all zeros is the *most* informative outcome, because it proves
+nothing ever reached these gates and the blocker is upstream. Suppressing that would hide
+exactly the case this was built for.
+
+Note `TradingEnvironmentReady()` returns `true` immediately under `MQL_TESTER`, so
+`ENVIRONMENT REJECTED` is **always 0 in a backtest** by design. It is in the line for live
+runs. A non-zero value there in a tester run would itself be a bug report.
+
+---
+
+## `.set` file changes
+
+### `EzyMap_V2_2_BTCUSD_STAGE0_BASELINE.set`
+
+`InpForceMinimumBaseSizing=false` added, with a note that this file now pins **five** inputs
+and that this fifth one is the polarity exception. At ≥100 deposit units the two arms are
+arithmetically identical, so seeing no difference is expected.
+
+### `EzyMap_V2_2_BTCUSD_RECOMMENDED.set`
+
+| Change | Section | Detail |
+|---|---|---|
+| `InpForceMinimumBaseSizing=true` **added** | 9 (sizing) | The compiled default, listed explicitly. Carries the Finding-1 arithmetic and, importantly, the **Finding-2 warning** that the halved ladder produces zero volume for the STANDARD tier at exactly 100 units |
+| `InpHardBlockExtremeVol` **`true` → `false`** | 10 (confluence) | See below |
+
+**Why the hard block was turned off.** Because a single trending test day with a trailing
+percentile window can classify a large fraction of bars as extreme, hard-vetoing nearly
+every deployment **with no visibility into how often it fired**. Soft-score first: an
+extreme reading still scores `InpVolExtremeScore=0.15`, still drags the aggregate down, and
+with session scoring off it still fails `InpMinConfluenceScore=0.45` — so this is **not** a
+permissiveness change, it is a **visibility** change. The same bars are still rejected; they
+are now rejected *through* `ConfluenceGateAllows()`, where they get counted and show up in
+the `V2.1a CONFLUENCE FILTER RATE` line, instead of being vetoed silently before the score
+is consulted. Re-enable once you have seen real percentile behaviour in your own log. If you
+want the soft gate to genuinely *admit* extreme bars while measuring, `InpMinConfluenceScore`
+has to come below `0.15` too — the hard block is not the only thing rejecting them.
+
+**This is a judgment call made from static reading, not from a test run.**
+
+### New: `EzyMap_V2_2_BTCUSD_DIAGNOSTIC_FIRSTPASS.set`
+
+A deliberately over-permissive **measuring instrument, not a trading profile**, whose only
+purpose is to produce one run in which nothing should be able to zero out the trade count.
+It is `RECOMMENDED.set` reproduced in full with four marked changes:
+
+| # | Change | Why |
+|---|---|---|
+| 1 | `InpMaxSpreadPoints=0` | Disables the spread gate via `SpreadAllowed()`'s existing, documented `if(InpMaxSpreadPoints<=0) return true;` no-op path — **confirmed by reading the function**, not assumed. Removes Candidate A |
+| 2 | `InpUseConfluenceScoring=false` | `ConfluenceGateAllows()` returns `true` before touching its counters and before the hard block is consulted, so this one switch neutralises the **entire** V2.1a gate — session, volatility, `InpMinConfluenceScore` and `InpHardBlockExtremeVol` together. Removes Candidate B. The remaining V2.1a inputs are left at RECOMMENDED values so step 3 restores that profile exactly |
+| 3 | Lot ladder un-halved to `0.01/0.02/0.03` | Removes Finding 2, so a 100-unit deposit can actually produce a non-zero STANDARD lot |
+| 4 | `InpConfidenceLotRiskGuardPct=25.0` | `CapVolumeForStandardRiskGuard()` blocks outright when even the minimum lot exceeds the cap (`STANDARD RISK GUARD BLOCK`). RECOMMENDED does not set this input, so it runs at the compiled 5.0%. Widened so it cannot be the thing that zeroes the run. **This is the one change that genuinely increases risk — remove it before any real test** |
+
+**Deviation from the brief:** changes 3 and 4 were not specified; the brief said "sizing as
+in RECOMMENDED". They were added because sizing as in RECOMMENDED is precisely what zeroes
+the 100-unit case (Finding 2), which would defeat the profile's entire purpose. Both are
+marked in the file and both are called out as things to revert.
+
+**Expected absence in this run:** the `V2.1a CONFLUENCE FILTER RATE` line will **not**
+appear, because `LogConfluenceFilterRate()` returns early when `InpUseConfluenceScoring` is
+false — by design since V2.1a S01, so a 0/0 rate cannot imply a filter that never ran had
+rejected everything. That is correct behaviour, not a missing log; the line becomes readable
+at step 3. The file says so, and offers the alternative
+(`InpUseConfluenceScoring=true` + `InpMinConfluenceScore=0.0`) if you want the gate counted
+and passing in the first pass instead.
+
+---
+
+## Retest procedure
+
+1. **Run `EzyMap_V2_2_BTCUSD_DIAGNOSTIC_FIRSTPASS.set`** over the same period as the
+   zero-trade runs, at a deposit of at least 100.
+   **If this still produces zero trades, stop tuning.** With the spread gate disabled, the
+   confluence engine off and a ladder that clears the broker minimum at 100 units, no input
+   in this EA can be responsible. The cause is environmental — no M5 history downloaded for
+   BTCUSD.sc in the tester (by far the most common), symbol not selected in Market Watch,
+   algo trading disabled, tester date range outside the available data, or an unexpected
+   `SYMBOL_VOLUME_MIN`/`SYMBOL_VOLUME_STEP` (both printed by the OnInit
+   `BROKER-NATIVE LOT SIZING` line). **Report that back rather than tuning blind.**
+2. **Read the two new lines** from that run:
+   `V2.2 BTC S06 DEPLOYMENT GATE BREAKDOWN` and `… BY PATH`. Check `ORDER-SEND ATTEMPTS`
+   first. Expect `SPREAD REJECTED: 0` (gate disabled) and `ENVIRONMENT REJECTED: 0` (always
+   0 in the tester). `V2.1a CONFLUENCE FILTER RATE` will be absent — see above.
+3. **Re-enable `InpMaxSpreadPoints` alone**, at a *real observed value*. Read it off the
+   OnInit line the EA already ships:
+   `V2.2 BTC SPREAD CHECK | observed spread=… points (… price) | …`
+   Watch it for a few minutes and across a session boundary, then set roughly 2–3× the calm
+   reading. Re-run. If the trade count collapses again and `SPREAD REJECTED` is large, the
+   spread gate was the original blocker and the observed reading was still too tight.
+4. **Re-enable `InpUseConfluenceScoring=true` alone** (spread still at the value from step
+   3), leaving `InpHardBlockExtremeVol=false`. Re-run and read `V2.1a CONFLUENCE FILTER RATE`
+   — it now reports the pass rate of the soft gate, split by path.
+5. **Re-enable `InpHardBlockExtremeVol=true` last.** Re-run and compare the confluence pass
+   rate against step 4. The difference is the hard block's exact contribution — the number
+   that was unmeasurable before S06. If it costs more than the ~30% the percentile bands
+   imply structurally, widen `InpVolLowPercentile`/`InpVolHighPercentile` or leave the hard
+   block off and rely on the soft score.
+6. **Restore `InpConfidenceLotRiskGuardPct` to 5.0** and decide the lot ladder from the
+   observed margin usage before treating any result as real.
+
+Change one thing per run and re-read the same two lines each time. That is the whole point
+of the instrumentation.
+
+---
+
+## S06 verification performed
+
+| Check | Result |
+|---|---|
+| Brace / paren / bracket balance (tokenizer excluding strings, char literals, line and block comments) | ✅ `{}` 932/932 · `()` 6345/6345 · `[]` 1178/1178; residual stack 0, no mismatched pairs |
+| Balance delta accounted for | ✅ `{}` **+3** = new function body (1) + braces round the two brace-less returns at 3682 and 14922 (2). `()` **+37** = two `Log(` calls and their 15 `IntegerToString((int)…)` pairs (32) + definition, forward declaration and `OnDeinit` call (3) + net +2 from the `LotSizingCapitalUnits()` rewrite. `[]` **+0**. **Identical deltas in both files** |
+| No existing function signature changed | ✅ machine-diffed the set of top-level signature lines old vs new: the **only** difference in either direction is the addition of `void LogDeploymentGateBreakdown()` and its forward declaration. `SpreadAllowed()`, `TradingEnvironmentReady()`, `DailyRiskCapacityAvailable()` and `LotSizingCapitalUnits()` unchanged in arity and return type |
+| `LotSizingCapitalUnits()` call sites re-counted after the edit | ✅ still exactly 4, at 9240 / 12356 / 15814 / 16382. All audited in the table above |
+| No risk or margin cap consumes `LotSizingCapitalUnits()` | ✅ `CapSetupVolumeForCentSafety()` and `CapVolumeForStandardRiskGuard()` appear at no line in the call-site list; both read `ACCOUNT_EQUITY` / `OrderCalcProfit` / `OrderCalcMargin` directly |
+| No new `MQL_TESTER` branches | ✅ 13 raw grep hits, **unchanged** (pre-S06: 13, post-S06: 13) |
+| `GetTickCount64` still confined to `NowMs()` | ✅ 1 occurrence |
+| New identifiers do not collide | ✅ none of the eleven counter names, nor `InpForceMinimumBaseSizing`, nor `LogDeploymentGateBreakdown`, existed anywhere pre-S06 |
+| Declared before first use | ✅ input at 577, first use 2194; counters at 2620–2630, first use 3463; forward declaration at 2038, first call 16293 |
+| New function declared consistently with file convention | ✅ forward declaration immediately beside `LogConfluenceFilterRate();`, definition immediately after that function's body, `OnDeinit` call immediately after that function's call |
+| MQL5 string handling | ✅ no reliance on implicit adjacent string-literal concatenation; every join uses explicit `+` |
+| Diff hunk count matches intent | ✅ 28 hunks (27 + the `STAGE SUMMARY (S01-S05)` → `(S01-S06)` title line), no unintended edit |
+| Every `.set` input name matches a real declaration | ✅ script-checked, not eyeballed. `STAGE0_BASELINE` 5 entries, `RECOMMENDED` 72, `DIAGNOSTIC_FIRSTPASS` 73 — every `Inp…` name resolves to an `input` declaration in the `.mq5`; no missing names, no duplicates, no unparsed lines |
+| Patch identical to the V2.1b S03 patch | ✅ added lines from both diffs extracted and compared with the stage tag normalised: **byte-identical apart from the tag string, the header block and the version number** |
+| Header block style matches prior stages | ✅ `V2.2 BTC STAGE SUMMARY (S01-S06)` at line 226, S06 block at 305–356, same box-drawing and 72-column width |
+| Not committed to git | ✅ files written only |
+| **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
+| **`InpHardBlockExtremeVol=false` validated by a test run** | ❌ **no — judgment call from static reading** |
+| **`DIAGNOSTIC_FIRSTPASS.set` validated by a test run** | ❌ **no — judgment call from static reading** |
+
+---
+
+## ⚠️ What is still unknown after S06
+
+**Nothing in this stage has been run.** There is still no MQL5 toolchain and no BTC price
+history in this environment, so:
+
+- The claim that the spread gate is the most likely blocker is **reasoned, not observed.**
+- Turning `InpHardBlockExtremeVol` off is a **judgment call**, not a finding.
+- `DIAGNOSTIC_FIRSTPASS.set` is a **hypothesis about what to disable**, not a validated
+  profile.
+
+Findings 1 and 2 are the exceptions — those are arithmetic derived from the source and hold
+regardless of any test. Everything else needs the run described in *Retest procedure*.
+**Please run `DIAGNOSTIC_FIRSTPASS.set` and report back what the `DEPLOYMENT GATE BREAKDOWN`
+line actually says.** That single line will settle in one run what three previous runs could
+not.

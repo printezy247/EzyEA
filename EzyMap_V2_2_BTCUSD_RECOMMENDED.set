@@ -238,6 +238,28 @@ InpStandardSetupLotPer100=0.005
 InpGoodSetupLotPer100=0.010
 InpQualitySetupLotPer100=0.015
 ;
+; V2.2 BTC S06 - NOMINAL SIZING FLOOR. New input, and it is already the
+; compiled-in default; listed explicitly so the value is visible in the
+; tester. With it true, LotSizingCapitalUnits() never reports less than
+; InpBaseEquity, so an account below 100 deposit units still sizes as if it
+; had 100 instead of targeting a lot below the broker minimum.
+;
+; READ THIS IF YOU CAME HERE LOOKING FOR THE ZERO-TRADE CAUSE: this input is
+; NOT it. With InpUseBrokerNativeDepositUnitsForLots at its default true, a
+; 100-unit deposit ALREADY resolved to a sizing capital of exactly 100, so the
+; STANDARD target was already 0.005*(100/100) = 0.005 lots, and at 1000 and
+; 3000 it was 0.05 and 0.15. None of the three tested balances was ever
+; undersized by the pre-S06 formula. See V2_2_BTCUSD_CHANGES.md.
+;
+; NOTE the interaction with the HALVED ladder above: at exactly 100 units the
+; STANDARD target is 0.005 lots, which is BELOW the usual 0.01 broker minimum,
+; so NormalizeVolumeDown() floors it to 0 and ConfidenceSetupLot() returns 0
+; on a standard account. The floor does not rescue that, because the target is
+; already computed at the full 100 units. If you are running a 100-unit
+; standard account on BTC you need InpStandardSetupLotPer100=0.01 (the
+; unhalved gold ladder), not this input. The halved ladder assumes >=200 units.
+InpForceMinimumBaseSizing=true
+;
 ; ---------------------------------------------------------------------------
 ; 10. CONFLUENCE SCORING (V2.1a) - session OFF, volatility ON
 ; ---------------------------------------------------------------------------
@@ -266,7 +288,37 @@ InpQualitySetupLotPer100=0.015
 ;
 ; With session off, the aggregate score is just the volatility score, so
 ; InpMinConfluenceScore=0.45 admits normal (1.00) and rejects extreme (0.15).
-; InpHardBlockExtremeVol is the separate outright veto and is left on.
+;
+; *** InpHardBlockExtremeVol CHANGED true -> false AT V2.2 BTC S06. ***
+;
+; Changed from true because a single trending test day with a trailing
+; percentile window can classify a large fraction of bars as extreme,
+; hard-vetoing nearly every deployment with no visibility into how often it
+; fired. Two things make that worse than it first looks:
+;
+;   1. THE BANDS ARE STRUCTURALLY LOSSY EVEN IN A CALM MARKET. The test is
+;      "percentile < 20 OR percentile > 90" against the SAME rolling window
+;      the reading is drawn from. By construction that marks about 30% of
+;      bars extreme in the steady state - it is a percentile rank, so the
+;      tails are always populated. As a HARD VETO that is a permanent ~30%
+;      frequency tax that no amount of good price action can avoid.
+;   2. ON A TRENDING DAY IT IS WORSE. The window is 500 M5 bars (~42 hours),
+;      so on a one-directional run the whole sample is non-stationary and
+;      trending the same way, and the readings cluster in the tails for long
+;      stretches rather than distributing evenly.
+;
+; Soft-score first: an extreme reading still scores InpVolExtremeScore=0.15,
+; which is below InpMinConfluenceScore=0.45, so with session scoring off it
+; still fails the soft gate. Turning the hard block off therefore changes
+; almost nothing about WHICH bars are rejected right now - what it buys is
+; that the rejection now flows through ConfluenceGateAllows()' counters and
+; shows up in the V2.1a CONFLUENCE FILTER RATE line, instead of vetoing
+; silently before the score is even consulted. Visibility, not permissiveness.
+;
+; Re-enable once you have seen real percentile behaviour in your own log. If
+; you want the soft gate to genuinely admit extreme bars while you measure,
+; drop InpMinConfluenceScore below 0.15 as well - the hard block is not the
+; only thing rejecting them.
 ;
 ; InpVolTimeframe=5 and InpVolATRPeriod=14 match InpATRTimeframe/InpATRPeriod
 ; above, so the V3.190 S03 geometry ATR handle is REUSED rather than a second
@@ -283,7 +335,7 @@ InpVolHighPercentile=90.0
 InpVolatilityWeight=1.0
 InpVolNormalScore=1.0
 InpVolExtremeScore=0.15
-InpHardBlockExtremeVol=true
+InpHardBlockExtremeVol=false
 ;
 ; ---------------------------------------------------------------------------
 ; 11. WHAT IS DELIBERATELY NOT IN THIS FILE

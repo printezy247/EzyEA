@@ -15,7 +15,20 @@
 ; both counts - the H4_SINGLE loop still runs both levels and h4[0]/h4[1] stay
 ; available as cluster partners. LOW_RISK and READY are untouched.
 ;
-; Only the V2.1b S01-S02 inputs are listed. Load this ON TOP of your V2.1a
+; S03 (InpForceMinimumBaseSizing=true): NEW INPUT, and it is already the
+; compiled-in default, so this line changes nothing on a fresh binary. It is
+; listed anyway for the same reason the other two are - this file exists to
+; make the intended values explicit in the tester rather than implied. It
+; floors the NOMINAL lot-sizing target at InpBaseEquity so an account below
+; 100 deposit units still sizes as if it had 100. It reaches no risk or margin
+; calculation; the broker-native caps still have the final word. At 100 units
+; or above it is arithmetically a no-op. Set false (see STAGE0_BASELINE) for
+; the unfloored pre-S03 formula.
+;
+; S03 also added the DEPLOYMENT GATE BREAKDOWN log line at OnDeinit. It has no
+; input, prints in every arm, and changes no behaviour.
+;
+; Only the V2.1b S01-S03 inputs are listed. Load this ON TOP of your V2.1a
 ; working set - every other input keeps its current value.
 ;
 ; Expect FEWER zero-conf fills than STAGE0. Compare trade count first and
@@ -29,3 +42,4 @@
 ;
 InpZeroConfAllowCurrentMapTier=false
 InpZeroConfIncludeLevel1=false
+InpForceMinimumBaseSizing=true

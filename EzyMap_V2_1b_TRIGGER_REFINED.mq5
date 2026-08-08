@@ -223,6 +223,52 @@
 //  rule lives in ProcessDirectZeroConfluenceTriggers(). See           |
 //  V2_1b_CHANGES.md.                                                  |
 //                                                                    |
+//  V2.1b STAGE S03 SUMMARY                                            |
+//                                                                    |
+//  Added after S01-S02 as a diagnostic + sizing-floor patch. No       |
+//  trigger-ladder, confluence-gate, exit-geometry or sizing           |
+//  choke-point logic is touched.                                      |
+//                                                                    |
+//  S03 SIZING FLOOR + DEPLOYMENT-GATE INSTRUMENTATION                 |
+//                                                                    |
+//      (a) SIZING FLOOR. InpForceMinimumBaseSizing (DEFAULT TRUE -    |
+//          a deliberate polarity exception, same precedent as the     |
+//          two V2.1b S01/S02 inputs above) floors                     |
+//          LotSizingCapitalUnits() at InpBaseEquity, so an account    |
+//          below 100 units still sizes as if it had 100 instead of    |
+//          targeting a lot below the broker minimum. This is a        |
+//          NOMINAL target floor only: LotSizingCapitalUnits() has     |
+//          exactly four call sites - AutoBaseLayerLot(),              |
+//          ConfidenceSetupLot() and two log lines - and reaches NO    |
+//          risk or margin calculation. The real caps                  |
+//          (CapSetupVolumeForCentSafety() /                           |
+//          CapVolumeForStandardRiskGuard()) read ACCOUNT_EQUITY and   |
+//          OrderCalcProfit/OrderCalcMargin directly and still have    |
+//          the final word, and the MinimumTradingEquity() refusal     |
+//          still tests EffectiveAccountEquity(), unfloored.           |
+//                                                                    |
+//      (b) DEPLOYMENT-GATE BREAKDOWN. ConfluenceGateAllows() has      |
+//          had pass/fail counters since V2.1a S01, but the three      |
+//          gates beside it on every deployment path had none, so      |
+//          there was no way to read from the journal whether the      |
+//          spread filter, the trading-environment check or the        |
+//          daily-risk lock was what zeroed a run. Counters are now    |
+//          incremented AT THE CALL SITES of SpreadAllowed(),          |
+//          TradingEnvironmentReady() and DailyRiskCapacityAvailable() |
+//          on their false branches, plus one order-send attempt       |
+//          counter, split STANDARD / ZERO-CONF / OTHER. The three     |
+//          gate functions themselves are UNCHANGED - no signature,    |
+//          no control flow, no existing log text.                     |
+//          LogDeploymentGateBreakdown() prints the totals and the     |
+//          per-path split at OnDeinit, beside the existing V2.1a      |
+//          CONFLUENCE FILTER RATE line.                               |
+//          No input gates this log: an all-zero breakdown is itself   |
+//          the finding (nothing ever reached these gates).            |
+//                                                                    |
+//      Inputs: InpForceMinimumBaseSizing                              |
+//                                                                    |
+//      See V2_1b_CHANGES.md.                                          |
+//                                                                    |
 //  BASE NOTE: this file descends from the V3.176 line, NOT from the   |
 //  separate V3.180 PARITY_HARDENED branch. It does not contain the    |
 //  V3.180 P01-P13 parity fixes. NowMs() and TradeRetcodePartial()     |
@@ -230,7 +276,7 @@
 //  were never present in this lineage; they were not removed.         |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "2.102"
+#property version   "2.103"
 
 #include <Trade/Trade.mqh>
 
@@ -412,6 +458,38 @@ input bool   InpAutoScaleLayerLot         = true;
 input double InpMinimumAccountEquity      = 5.0; // keep $100 base sizing alive after small drawdown
 input double InpBaseEquity                = 100.0;
 input double InpBaseLayerLot              = 0.01;
+
+// V2.1b S03 / V2.2 BTC S06: floor the lot-sizing TARGET at InpBaseEquity so an
+// account below $100 (or 100 cent-units) still sizes as if it had $100, rather
+// than the base-layer target shrinking below 0.01 and potentially rounding to
+// a lot the broker rejects. This does NOT weaken real risk protection: the
+// downstream broker-native caps (CapSetupVolumeForCentSafety() /
+// CapVolumeForStandardRiskGuard(), both driven by OrderCalcProfit/
+// OrderCalcMargin against the ACTUAL account equity/margin, not this floored
+// number) still clamp the final size to what the real account can actually
+// afford -- this floor only affects the NOMINAL starting target, never the
+// final risk-checked size.
+//
+// VERIFIED at V2.1b S03 / V2.2 BTC S06 by full-file grep: LotSizingCapitalUnits()
+// has exactly four call sites, none of them a $-risk or margin-percentage
+// calculation --
+//   1. AutoBaseLayerLot()       - nominal base-layer lot target
+//   2. ConfidenceSetupLot()     - nominal confidence lot target
+//   3. OnInit "BROKER-NATIVE LOT SIZING" log line   - display only
+//   4. OnTimer "LIVE PARITY STATUS" log line        - display only
+// Neither CapSetupVolumeForCentSafety() nor CapVolumeForStandardRiskGuard()
+// calls it; both read AccountInfoDouble(ACCOUNT_EQUITY) and
+// OrderCalcProfit/OrderCalcMargin directly. Also note the separate
+// MinimumTradingEquity() gate inside AutoBaseLayerLot()/ConfidenceSetupLot()
+// tests EffectiveAccountEquity(), NOT this floored value, so a genuinely
+// under-funded account is still refused. If a future change makes any risk or
+// margin cap consume LotSizingCapitalUnits(), STOP and re-audit this floor.
+//
+// Default TRUE per explicit user request -- this is a deliberate exception to
+// the usual "new inputs default to old behaviour" rule, same precedent as
+// V2.1b's two reversed-polarity rollback inputs. Set false to restore the old
+// unfloored scaling for A/B comparison.
+input bool   InpForceMinimumBaseSizing    = true;
 
 // V2.002 confidence-based SETUP volume.
 // These are TOTAL lots for the complete setup at $100 equity.
@@ -1838,6 +1916,7 @@ double ConfluenceScore();
 bool ConfluenceGateAllows(string path,string context);
 void CaptureConfluenceSnapshot(int analyticsIndex);
 void LogConfluenceFilterRate();
+void LogDeploymentGateBreakdown();
 void RefreshGeometryATR();
 double CurrentGeometryATR();
 void ResolveATRGeometryPips(double &presetPips,double &armPips,double &initPips,
@@ -1986,10 +2065,17 @@ double LotSizingCapitalUnits()
               ? AccountInfoDouble(ACCOUNT_BALANCE)
               : AccountInfoDouble(ACCOUNT_EQUITY);
 
-   if(InpUseBrokerNativeDepositUnitsForLots)
-      return MathMax(0.0,raw);
+   double capital=InpUseBrokerNativeDepositUnitsForLots
+                  ? MathMax(0.0,raw)
+                  : MathMax(0.0,raw/MathMax(1.0,g_accountUnitDivisor));
 
-   return MathMax(0.0,raw/MathMax(1.0,g_accountUnitDivisor));
+   // V2.1b S03 / V2.2 BTC S06: nominal sizing floor, applied identically to
+   // both branches above. See InpForceMinimumBaseSizing for the full rationale
+   // and the call-site audit proving this cannot reach a risk/margin cap.
+   if(InpForceMinimumBaseSizing)
+      capital=MathMax(capital,MathMax(1.0,InpBaseEquity));
+
+   return capital;
 }
 
 bool IsLiveCentAccount()
@@ -2371,6 +2457,37 @@ long     g_stdAttempts=0;
 long     g_stdPassed=0;
 long     g_zcAttempts=0;
 long     g_zcPassed=0;
+
+// V2.1b S03: deployment-gate rejection instrumentation.
+//
+// WHY: a run that ends "READY=511, stored=54, deployed=0" gives no way to tell
+// WHICH gate zeroed it out. ConfluenceGateAllows() has had pass/fail counters
+// since V2.1a S1, but the three gates that sit alongside it on every
+// deployment path - SpreadAllowed(), TradingEnvironmentReady() and
+// DailyRiskCapacityAvailable() - had none, so a spread filter set to a wrong
+// point convention (or a hard volatility veto firing on every bar) looked
+// exactly like "no signals". These counters make each of those visible.
+//
+// HOW: the three gate FUNCTIONS are deliberately unchanged. Every counter is
+// incremented at the CALL SITE, on the false branch only, alongside whatever
+// logging/return that site already did - no control flow and no existing log
+// text is altered.
+//
+// SPLIT: STANDARD = persistent-setup deployment path (V21A_PATH_STANDARD),
+// ZERO-CONF = direct zero-confluence market path (V21A_PATH_ZEROCONF), OTHER =
+// the legacy bridge-signal arm/PlaceOneLayer path, which belongs to neither of
+// the two scored entry paths and so cannot be attributed to either.
+long     g_spreadRejectStd=0;
+long     g_spreadRejectZc=0;
+long     g_spreadRejectOther=0;
+long     g_envRejectStd=0;
+long     g_envRejectZc=0;
+long     g_capacityRejectStd=0;
+long     g_capacityRejectZc=0;
+long     g_capacityRejectOther=0;
+long     g_orderSendStd=0;
+long     g_orderSendZc=0;
+long     g_orderSendOther=0;
 
 
 // V3.190 S00: single monotonic millisecond clock for every timing decision in
@@ -3200,12 +3317,14 @@ bool SubmitDirectZeroConfMarket()
    if(!DailyRiskCapacityAvailable(
          "DIRECT ZERO-CONF "+g_directZeroConf.triggerText))
    {
+      g_capacityRejectZc++;   // V2.1b S03 instrumentation
       g_directZeroConf.active=false;
       return false;
    }
 
    if(!SpreadAllowed())
    {
+      g_spreadRejectZc++;     // V2.1b S03 instrumentation
       Log("DIRECT ZERO-CONF MARKET RETRY | trigger="+
           g_directZeroConf.triggerText+
           " | direction="+
@@ -3255,6 +3374,7 @@ bool SubmitDirectZeroConfMarket()
    string envReason="";
    if(!TradingEnvironmentReady(envReason))
    {
+      g_envRejectZc++;        // V2.1b S03 instrumentation
       Log("DIRECT ZERO-CONF MARKET RETRY | trigger="+g_directZeroConf.triggerText+
           " | direction="+string(direction==1?"BUY":"SELL")+
           " | attempt="+IntegerToString(g_directZeroConf.attempts)+
@@ -3313,6 +3433,7 @@ bool SubmitDirectZeroConfMarket()
    // affected the account, it just never showed up in that report, which is
    // why its totals (trade count and net P/L) never reconciled with the
    // account's real balance change or with ReportJournalPerformance().
+   g_orderSendZc++;           // V2.1b S03 instrumentation
    g_directZeroConfSerial++;
    long directZcId=5000000000000+g_directZeroConfSerial;
    string comment=PersistentTag(directZcId)+" L1/1 DZC-"+
@@ -3414,7 +3535,10 @@ void ProcessDirectZeroConfluenceTriggers()
       return;
 
    if(!DailyRiskCapacityAvailable("DIRECT ZERO-CONF TRIGGER SCAN"))
+   {
+      g_capacityRejectZc++;   // V2.1b S03 instrumentation
       return;
+   }
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol,tick))
@@ -9763,6 +9887,54 @@ void LogConfluenceFilterRate()
        IntegerToString((int)g_zcAttempts)+")");
 }
 
+// V2.1b S03: end-of-run deployment-gate breakdown. Companion to
+// LogConfluenceFilterRate() above - that line answers "did the confluence
+// score reject everything?", this one answers "did spread, environment or
+// daily capacity reject everything?". Together they cover every gate that
+// stands between a stored READY setup and an order-send attempt.
+//
+// Deliberately NOT suppressed by any input: unlike the confluence rate, a run
+// where all four numbers are zero is itself the most important possible
+// finding - it means nothing ever even reached these gates, so the blocker is
+// further upstream (no setups armed, no touches registered, or an environment
+// problem outside the EA such as missing tester history).
+void LogDeploymentGateBreakdown()
+{
+   long spreadTotal  =g_spreadRejectStd+g_spreadRejectZc+g_spreadRejectOther;
+   long envTotal     =g_envRejectStd+g_envRejectZc;
+   long capacityTotal=g_capacityRejectStd+g_capacityRejectZc+
+                      g_capacityRejectOther;
+   long sendTotal    =g_orderSendStd+g_orderSendZc+g_orderSendOther;
+
+   Log("V2.1b S03 DEPLOYMENT GATE BREAKDOWN | SPREAD REJECTED: "+
+       IntegerToString((int)spreadTotal)+
+       " | ENVIRONMENT REJECTED: "+IntegerToString((int)envTotal)+
+       " | DAILY CAPACITY REJECTED: "+IntegerToString((int)capacityTotal)+
+       " | ORDER-SEND ATTEMPTS: "+IntegerToString((int)sendTotal));
+
+   // Second line carries the per-path split. STANDARD and ZERO-CONF match the
+   // two scored entry paths in the CONFLUENCE FILTER RATE line above, so the
+   // two lines can be read side by side. OTHER is the legacy bridge-signal
+   // arm/PlaceOneLayer path, which belongs to neither scored path.
+   // TradingEnvironmentReady() is never called from the OTHER path, which is
+   // why the environment field has no OTHER column.
+   Log("V2.1b S03 DEPLOYMENT GATE BREAKDOWN BY PATH | SPREAD std/zc/other: "+
+       IntegerToString((int)g_spreadRejectStd)+"/"+
+       IntegerToString((int)g_spreadRejectZc)+"/"+
+       IntegerToString((int)g_spreadRejectOther)+
+       " | ENVIRONMENT std/zc: "+
+       IntegerToString((int)g_envRejectStd)+"/"+
+       IntegerToString((int)g_envRejectZc)+
+       " | DAILY CAPACITY std/zc/other: "+
+       IntegerToString((int)g_capacityRejectStd)+"/"+
+       IntegerToString((int)g_capacityRejectZc)+"/"+
+       IntegerToString((int)g_capacityRejectOther)+
+       " | ORDER-SEND std/zc/other: "+
+       IntegerToString((int)g_orderSendStd)+"/"+
+       IntegerToString((int)g_orderSendZc)+"/"+
+       IntegerToString((int)g_orderSendOther));
+}
+
 //---------------------- Existing trade detection --------------------
 int CountOurPendingOrders()
 {
@@ -11609,6 +11781,7 @@ bool PlacePersistentLayer(PersistentReadySetup &setup,
    // real current quote, independent of order kind.
    if(!SpreadAllowed())
    {
+      g_spreadRejectStd++;    // V2.1b S03 instrumentation
       Log("SPREAD FILTER BLOCK | signal="+(string)setup.id+
           " | current spread exceeds InpMaxSpreadPoints="+
           IntegerToString(InpMaxSpreadPoints));
@@ -11642,6 +11815,7 @@ bool PlacePersistentLayer(PersistentReadySetup &setup,
    if(!DailyRiskCapacityAvailable(
          plannedKindText+" signal="+(string)setup.id))
    {
+      g_capacityRejectStd++;  // V2.1b S03 instrumentation
       SetDeploymentFailure(
          "daily risk lock: "+g_dayLockReason,
          0,"","",false);
@@ -11724,6 +11898,7 @@ bool PlacePersistentLayer(PersistentReadySetup &setup,
                          : estimatedEntry+exactDistance);
    double brokerSL=BrokerSafeExecutionSL(setup.direction,estimatedEntry,exactSL);
 
+   g_orderSendStd++;          // V2.1b S03 instrumentation
    bool ok=SubmitPersistentLayerOrder(setup,p,comment,brokerSL,tp);
    uint retcode=trade.ResultRetcode();
    bool accepted=(ok && TradeRetcodeAccepted(retcode));
@@ -12633,6 +12808,7 @@ bool PersistentQualityPass(PersistentReadySetup &setup,string &reason)
    if(!DailyRiskCapacityAvailable(
          "PERSISTENT QUALITY signal="+(string)setup.id))
    {
+      g_capacityRejectStd++;  // V2.1b S03 instrumentation
       reason=g_dayLockReason;
       return false;
    }
@@ -13318,6 +13494,7 @@ bool DeployAggressiveArmSetup(int index)
          (string)g_persistentSetups[index].id+
          " zero-conf="+string(forceZeroConf?"YES":"NO")))
    {
+      g_capacityRejectStd++;  // V2.1b S03 instrumentation
       SetDeploymentFailure(
          "daily risk lock: "+g_dayLockReason,
          0,"","",false);
@@ -13353,6 +13530,7 @@ bool DeployAggressiveArmSetup(int index)
    string tradeEnvironmentReason="";
    if(!TradingEnvironmentReady(tradeEnvironmentReason))
    {
+      g_envRejectStd++;       // V2.1b S03 instrumentation
       bool temporary=
          (StringFind(tradeEnvironmentReason,
                      "disconnected")>=0);
@@ -13621,6 +13799,7 @@ bool DeployPersistentSetup(int index)
    string tradeEnvironmentReason="";
    if(!TradingEnvironmentReady(tradeEnvironmentReason))
    {
+      g_envRejectStd++;       // V2.1b S03 instrumentation
       Log("LIVE ENTRY BLOCKED | "+tradeEnvironmentReason+
           " | signal="+(string)g_persistentSetups[index].id);
       return false;
@@ -14557,7 +14736,10 @@ bool PlaceOneLayer(int direction,LayerPlan &p,int layerIndex,int totalLayers,lon
          IntegerToString(layerIndex+1)+
          "/"+
          IntegerToString(totalLayers)))
+   {
+      g_capacityRejectOther++;   // V2.1b S03 instrumentation
       return false;
+   }
 
    if(!M5ClosedLossCapacityAvailable(
          "LEGACY layer "+
@@ -14575,6 +14757,7 @@ bool PlaceOneLayer(int direction,LayerPlan &p,int layerIndex,int totalLayers,lon
       return false;
 
    string comment="EZP2 "+IntegerToString((int)signalId)+" L"+IntegerToString(layerIndex+1)+"/"+IntegerToString(totalLayers);
+   g_orderSendOther++;           // V2.1b S03 instrumentation
    bool ok=false;
 
    if(direction==1)
@@ -14843,6 +15026,7 @@ bool ArmReadySignal(BridgeSignal &s)
 
    if(!SpreadAllowed())
    {
+      g_spreadRejectOther++;     // V2.1b S03 instrumentation
       Log("Spread filter blocked READY setup.");
       return false;
    }
@@ -15211,6 +15395,21 @@ int OnInit()
    g_stdPassed=0;
    g_zcAttempts=0;
    g_zcPassed=0;
+
+   // V2.1b S03: reset the deployment-gate breakdown counters alongside the
+   // confluence counters, so both summaries describe the same run.
+   g_spreadRejectStd=0;
+   g_spreadRejectZc=0;
+   g_spreadRejectOther=0;
+   g_envRejectStd=0;
+   g_envRejectZc=0;
+   g_capacityRejectStd=0;
+   g_capacityRejectZc=0;
+   g_capacityRejectOther=0;
+   g_orderSendStd=0;
+   g_orderSendZc=0;
+   g_orderSendOther=0;
+
    g_v21aSessionCode=V21A_SESSION_UNSET;
    g_v21aSessionHour=-1;
    g_v21aSessionScore=-1.0;
@@ -15792,6 +15991,10 @@ void OnDeinit(const int reason)
    // while the engine is off so a run with no gate evaluations does not
    // print a 0/0 rate.
    LogConfluenceFilterRate();
+
+   // V2.1b S03: which of the non-confluence gates rejected deployments,
+   // and how many attempts actually reached the broker.
+   LogDeploymentGateBreakdown();
 
    EventKillTimer();
 
