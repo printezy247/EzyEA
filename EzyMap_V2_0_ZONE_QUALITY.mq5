@@ -808,6 +808,27 @@ input double InpTouch4PlusSizeMult             = 0.20;
 // distance. Gold zones drift a little between refreshes of the H1/M15 map.
 input double InpZoneIdentityTolerancePips      = 8.0;
 
+//========================= V2.0 STAGE 3 =============================
+// V2.0 S3: departure strength scoring.
+// OLD BEHAVIOUR: zone quality was never measured against how price LEFT the
+// zone when it formed. A zone that price crawled away from and one it was
+// launched out of were sized identically, even though the impulsive
+// departure is the one that signals real resting interest.
+// NEW: score the origin leg once, at zone formation, and freeze it.
+// Default false = V3.190 (no departure measurement).
+
+// V2.0 S3: master switch. RECOMMENDED true.
+input bool   InpScoreDepartureStrength         = false;
+// V2.0 S3: how many bars of the departure leg to measure.
+input int    InpDepartureLookbackBars          = 6;
+// V2.0 S3: departure range / base range at or above this scores 1.0 on the
+// range component; at or below InpWeakDepartureRatio it scores 0.0.
+input double InpStrongDepartureRatio           = 3.0;
+input double InpWeakDepartureRatio             = 1.5;
+input double InpStrongDepartureSizeMult        = 1.00;
+input double InpModerateDepartureSizeMult      = 0.70;
+input double InpWeakDepartureSizeMult          = 0.40;
+
 // V3.164 live XAUUSD.sc protection parity.
 // Account denomination affects money and lot sizing, never price distance.
 // Historical M1 highs/lows cannot arm a trail immediately after attaching
@@ -1396,6 +1417,8 @@ void FreezeTrailGeometry(int index,int direction,double entry);
 double Clamp(double v,double lo,double hi);
 double NormalizeVolumeDown(double vol);
 int VolumeDigits();
+double ComputeDepartureScore(double zoneLo,double zoneHi,datetime zoneTime,int direction);
+double DepartureSizeMultiplier(double score);
 int ZoneTouchIndex(double lo,double hi);
 int ZoneTouchCount(double lo,double hi);
 int RegisterZoneTouch(double lo,double hi);
@@ -4406,6 +4429,129 @@ void ManageHybridTrailingPositions(string context)
 
 
 
+//---------------------- V2.0 S3 departure strength -------------------
+
+// V2.0 S3: score how impulsively price left this zone when it formed.
+// Returns 0.0-1.0, or -1.0 when it cannot be measured.
+//
+// Two components, deliberately continuous rather than bucketed:
+//   range  - the departure leg's travel divided by the zone's own base range.
+//            A zone price exploded away from has a high ratio.
+//   bodies - the run of strong-bodied candles (body > 60% of range) heading
+//            away from the zone. Measures conviction rather than distance.
+// Combined 60/40 in favour of range, because distance travelled is the harder
+// signal to fake with a single outsized bar.
+double ComputeDepartureScore(double zoneLo,double zoneHi,
+                             datetime zoneTime,int direction)
+{
+   if(!InpScoreDepartureStrength)
+      return -1.0;
+
+   double lo=MathMin(zoneLo,zoneHi);
+   double hi=MathMax(zoneLo,zoneHi);
+
+   if(lo<=0.0 || hi<=lo || zoneTime<=0)
+      return -1.0;
+
+   int lookback=(int)MathMax(2,MathMin(50,InpDepartureLookbackBars));
+
+   int shift=iBarShift(_Symbol,g_supportTF,zoneTime,false);
+   if(shift<0)
+      return -1.0;
+
+   MqlRates rates[];
+   ArraySetAsSeries(rates,true);
+
+   // The zone bar itself plus the leg that left it.
+   int need=shift+2;
+   if(need<lookback+2)
+      need=lookback+2;
+
+   if(CopyRates(_Symbol,g_supportTF,0,need+2,rates)<need)
+      return -1.0;
+
+   if(shift>=ArraySize(rates))
+      return -1.0;
+
+   double baseRange=hi-lo;
+   if(baseRange<=_Point)
+      return -1.0;
+
+   // Walk FORWARD in time from the zone bar, i.e. DOWN the series index.
+   double departureExtreme=(direction==1)?hi:lo;
+   int    strongBodies=0;
+   bool   runIntact=true;
+   int    measured=0;
+
+   for(int k=1;k<=lookback;k++)
+   {
+      int idx=shift-k;
+      if(idx<0) break;
+      if(idx>=ArraySize(rates)) continue;
+
+      measured++;
+
+      if(direction==1)
+         departureExtreme=MathMax(departureExtreme,rates[idx].high);
+      else
+         departureExtreme=MathMin(departureExtreme,rates[idx].low);
+
+      double range=rates[idx].high-rates[idx].low;
+      if(range<=_Point)
+      {
+         runIntact=false;
+         continue;
+      }
+
+      double body=MathAbs(rates[idx].close-rates[idx].open);
+      bool directional=(direction==1)
+                       ? (rates[idx].close>rates[idx].open)
+                       : (rates[idx].close<rates[idx].open);
+
+      // Consecutive run only - a counter bar ends it.
+      if(runIntact && directional && body>=range*0.60)
+         strongBodies++;
+      else
+         runIntact=false;
+   }
+
+   if(measured<=0)
+      return -1.0;
+
+   double departureRange=(direction==1)
+                         ? departureExtreme-hi
+                         : lo-departureExtreme;
+
+   if(departureRange<0.0)
+      departureRange=0.0;
+
+   double ratio=departureRange/baseRange;
+
+   double weak  =MathMax(0.01,InpWeakDepartureRatio);
+   double strong=MathMax(weak+0.01,InpStrongDepartureRatio);
+
+   double rangeScore=Clamp((ratio-weak)/(strong-weak),0.0,1.0);
+   double bodyScore =Clamp((double)strongBodies/(double)MathMax(1,measured),0.0,1.0);
+
+   return Clamp(rangeScore*0.60+bodyScore*0.40,0.0,1.0);
+}
+
+
+// V2.0 S3: departure score -> size multiplier. Score < 0 means unmeasured,
+// which must never penalise the setup.
+double DepartureSizeMultiplier(double score)
+{
+   if(!InpScoreDepartureStrength || score<0.0)
+      return 1.0;
+
+   if(score>=0.70) return MathMax(0.0,InpStrongDepartureSizeMult);
+   if(score>=0.35) return MathMax(0.0,InpModerateDepartureSizeMult);
+
+   return MathMax(0.0,InpWeakDepartureSizeMult);
+}
+
+
+
 //------------------------ V2.0 S2 zone freshness ---------------------
 
 // V2.0 S2: locate an existing record for this zone, or -1.
@@ -4759,6 +4905,22 @@ double V2QualitySizeMultiplier(int direction,string &reason)
       else if(reason=="")
       {
          reason="touch #"+IntegerToString(g_qualityContextTouches)+" (full size)";
+      }
+   }
+
+   // ---- departure strength (S3) ----
+   if(InpScoreDepartureStrength &&
+      g_qualityContextValid &&
+      g_qualityContextDeparture>=0.0)
+   {
+      double departure=DepartureSizeMultiplier(g_qualityContextDeparture);
+
+      if(departure<multiplier)
+      {
+         multiplier=departure;
+         reason="departure "+
+                DoubleToString(g_qualityContextDeparture,2)+
+                " x"+DoubleToString(departure,2);
       }
    }
 
@@ -10740,7 +10902,10 @@ bool QueuePersistentSetup(ReadySnapshot &r,int direction)
    g_persistentSetups[slot].touchPrice=0.0;
    g_persistentSetups[slot].deployAttempts=0;
    g_persistentSetups[slot].zoneTouchNumber=0;
-   g_persistentSetups[slot].departureScore=-1.0;
+   // V2.0 S3: scored ONCE here, at zone formation, and frozen with the setup
+   // so it cannot drift as the M15 map refreshes underneath it.
+   g_persistentSetups[slot].departureScore=
+      ComputeDepartureScore(r.supportLo,r.supportHi,r.entryTime,direction);
    g_persistentSetups[slot].zoneGrade=0;
    g_persistentSetups[slot].lastDeployAttemptClock=0;
    g_persistentSetups[slot].lastDeployAttemptTickMs=0;
@@ -10759,6 +10924,10 @@ bool QueuePersistentSetup(ReadySnapshot &r,int direction)
    g_persistentQueuedCount++;
 
    Log("SOURCE READY STORED | signal="+(string)id+
+       " | V2.0 departure score="+
+       (g_persistentSetups[slot].departureScore>=0.0
+        ? DoubleToString(g_persistentSetups[slot].departureScore,2)
+        : "n/a")+
        " | "+string(direction==1?"BUY":"SELL")+
        " | conf="+IntegerToString(r.confluences)+
        " | required="+IntegerToString(r.requiredConfluences)+
