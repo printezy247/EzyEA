@@ -1,0 +1,37 @@
+; EzyMap Scalp Mastery V3.190 - EzyMap_V3_190_STAGE4.set
+; STAGE 4 - adds touch confirmation before fill (either M1-close-inside or a
+; 3s stall; 45s timeout falls back to market). Cumulative: S1..S4.
+;
+; Only the V3.190 S01-S05 inputs are listed. Every other input keeps the
+; value already in your terminal, so load this ON TOP of your working set.
+; InpATRTimeframe=5 is PERIOD_M5.
+;
+InpTrailArmPips=4.0
+InpTrailInitialDistancePips=12.0
+InpTrailTightenAtPips=16.0
+InpTrailTightDistancePips=7.0
+InpUseBreakevenLock=true
+InpBreakevenLockAtPips=9.0
+InpBreakevenLockOffsetPips=1.0
+InpUsePartialTakeProfit=true
+InpPartialTPPips=11.0
+InpPartialTPPercent=55.0
+InpBreakevenAfterPartial=true
+InpUseATRGeometry=true
+InpATRPeriod=14
+InpATRTimeframe=5
+InpATRStopMultiplier=1.6
+InpATRTrailMultiplier=0.55
+InpATRArmMultiplier=0.35
+InpATRStopFloorPips=12.0
+InpATRStopCeilingPips=35.0
+InpATRTrailFloorPips=5.0
+InpRequireTouchConfirmation=true
+InpTouchConfirmMode=0
+InpTouchStallSeconds=3
+InpTouchStallMaxExtendPips=2.0
+InpTouchConfirmTimeoutSec=45
+InpScaleInOnConfirmation=false
+InpInitialLayerCount=1
+InpScaleInTriggerATRMult=0.5
+InpMaxScaleInLayers=2

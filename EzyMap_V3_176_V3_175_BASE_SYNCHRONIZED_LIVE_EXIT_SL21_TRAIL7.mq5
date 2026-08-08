@@ -8130,10 +8130,23 @@ void WriteEzyMapBacktestReport()
       long setupId=0;
       int layerIndex=0,totalLayers=0;
 
+      // Attribution is by MAGIC NUMBER, not by comment. Previously any entry
+      // deal whose comment did not parse as "EZR<id>..." was skipped outright,
+      // so its volume AND its profit/loss vanished from this report while
+      // still affecting the real account - which is why TOTAL ENTRY LOTS and
+      // NET PROFIT never matched "lot traded"/the final balance. Order
+      // comments are not a reliable key: brokers truncate and overwrite them,
+      // and not every entry path tags them identically. Deals that cannot be
+      // grouped into a setup now fall into the UNATTRIBUTED row (id 0) instead
+      // of being dropped, so the totals always reconcile with the account.
       if(!ParsePersistentComment(
             HistoryDealGetString(ticket,DEAL_COMMENT),
             setupId,layerIndex,totalLayers))
-         continue;
+      {
+         setupId=0;
+         layerIndex=0;
+         totalLayers=0;
+      }
 
       long positionId=(long)HistoryDealGetInteger(ticket,DEAL_POSITION_ID);
 
@@ -8273,10 +8286,52 @@ void WriteEzyMapBacktestReport()
    Log("NET PROFIT FROM REPORTED SETUPS: "+DoubleToString(totalNet,2)+
        " | AVG PROFIT CAPTURE: "+DoubleToString(avgCapture,1)+"%");
 
+   int unattributed=FindReportSetupRow(rows,0);
+
+   if(unattributed>=0)
+      Log("UNATTRIBUTED (no parseable setup tag, counted in the totals above): "+
+          "entry lots="+
+          DoubleToString(rows[unattributed].entryLots,VolumeDigits())+
+          " | net="+DoubleToString(rows[unattributed].netProfit,2)+
+          " | these are magic-matched trades that could not be grouped into a"+
+          " setup id; they are included so the totals reconcile.");
+
    Log("L1 TP HITS: "+IntegerToString(l1Hits)+
        " | L2 TP HITS: "+IntegerToString(l2Hits)+
        " | RUNNER TP HITS: "+IntegerToString(runnerHits)+
        " | PEAK-LOCK CLOSES: "+IntegerToString(peakLockCloses));
+
+   // Self-check: this report groups by setup, ReportJournalPerformance()
+   // reconstructs straight from broker history. They cover the same deals, so
+   // any difference means attribution is losing trades again - surface it here
+   // instead of letting the two figures silently disagree.
+   JournalPerformanceSnapshot reconcile;
+
+   if(BuildJournalPerformanceSnapshot(reconcile))
+   {
+      double lotsDelta=totalEntryLots-reconcile.lotsTraded;
+      double netDelta=totalNet-reconcile.closedNetPnl;
+      bool matches=(MathAbs(lotsDelta)<=0.005 &&
+                    MathAbs(netDelta)<=0.01);
+
+      Log("RECONCILIATION vs BROKER HISTORY: "+
+          string(matches?"OK":"MISMATCH")+
+          " | report lots="+DoubleToString(totalEntryLots,VolumeDigits())+
+          " vs history lots="+DoubleToString(reconcile.lotsTraded,VolumeDigits())+
+          " (delta "+DoubleToString(lotsDelta,VolumeDigits())+")"+
+          " | report net="+DoubleToString(totalNet,2)+
+          " vs history closed net="+DoubleToString(reconcile.closedNetPnl,2)+
+          " (delta "+DoubleToString(netDelta,2)+")"+
+          " | history total trades="+IntegerToString(reconcile.totalTrades)+
+          " | still-open trades at report time="+
+          IntegerToString(reconcile.openTrades));
+
+      if(reconcile.openTrades>0)
+         Log("RECONCILIATION NOTE: "+IntegerToString(reconcile.openTrades)+
+             " position(s) were still open when this report was written."+
+             " Their floating P/L is not part of either net figure, so the"+
+             " account balance change will differ by that amount.");
+   }
 
    Log("============================================================");
 
@@ -8330,7 +8385,7 @@ void WriteEzyMapBacktestReport()
          : 0.0;
 
       FileWrite(handle,
-                (string)rows[i].id,
+                rows[i].id==0?"UNATTRIBUTED":(string)rows[i].id,
                 DirectionText(rows[i].direction),
                 rows[i].confidence,
                 DoubleToString(rows[i].riskPct,2),

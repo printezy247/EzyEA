@@ -1,0 +1,38 @@
+; EzyMap Scalp Mastery V3.190 - EzyMap_V3_190_STAGE0_BASELINE.set
+; STAGE 0 - CONTROL. Every V3.190 feature OFF. Reproduces the V3.176
+; exit/entry behaviour this build descends from. Run this first; it is the
+; baseline every other stage is measured against.
+;
+; Only the V3.190 S01-S05 inputs are listed. Every other input keeps the
+; value already in your terminal, so load this ON TOP of your working set.
+; InpATRTimeframe=5 is PERIOD_M5.
+;
+InpTrailArmPips=7.0
+InpTrailInitialDistancePips=7.0
+InpTrailTightenAtPips=999.0
+InpTrailTightDistancePips=7.0
+InpUseBreakevenLock=false
+InpBreakevenLockAtPips=9.0
+InpBreakevenLockOffsetPips=1.0
+InpUsePartialTakeProfit=false
+InpPartialTPPips=11.0
+InpPartialTPPercent=55.0
+InpBreakevenAfterPartial=true
+InpUseATRGeometry=false
+InpATRPeriod=14
+InpATRTimeframe=5
+InpATRStopMultiplier=1.6
+InpATRTrailMultiplier=0.55
+InpATRArmMultiplier=0.35
+InpATRStopFloorPips=12.0
+InpATRStopCeilingPips=35.0
+InpATRTrailFloorPips=5.0
+InpRequireTouchConfirmation=false
+InpTouchConfirmMode=0
+InpTouchStallSeconds=3
+InpTouchStallMaxExtendPips=2.0
+InpTouchConfirmTimeoutSec=45
+InpScaleInOnConfirmation=false
+InpInitialLayerCount=1
+InpScaleInTriggerATRMult=0.5
+InpMaxScaleInLayers=2
