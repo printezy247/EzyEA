@@ -829,6 +829,37 @@ input double InpStrongDepartureSizeMult        = 1.00;
 input double InpModerateDepartureSizeMult      = 0.70;
 input double InpWeakDepartureSizeMult          = 0.40;
 
+//========================= V2.0 STAGE 4 =============================
+// V2.0 S4: unified A/B/C zone grade.
+// OLD BEHAVIOUR: S02 and S03 each produced their own size multiplier. Even
+// taking the least-favourable rather than the product, two independent knobs
+// are hard to reason about and cannot express "this zone deserves a different
+// EXIT", only a different size.
+// NEW: fold freshness, departure and H1 alignment into ONE grade that is the
+// SINGLE consumer - it replaces the individual multipliers rather than
+// stacking on them - and let that grade drive size AND exit geometry.
+// Default false = the S02/S03 multipliers stay in charge.
+
+// V2.0 S4: master switch. RECOMMENDED true.
+input bool   InpUseZoneGrading                 = false;
+input double InpGradeASizeMult                 = 1.00;
+input double InpGradeBSizeMult                 = 0.60;
+input double InpGradeCSizeMult                 = 0.30;
+// V2.0 S4: grade-differentiated partial TP, overriding InpPartialTPPips from
+// V3.190 S02. A-grades are given room; C-grades book fast.
+input double InpGradeAPartialTPPips            = 16.0;
+input double InpGradeBPartialTPPips            = 11.0;
+input double InpGradeCPartialTPPips            = 7.0;
+// V2.0 S4: grade-differentiated trail, as a multiple of the V3.190 S01/S03
+// base trail distance.
+input double InpGradeATrailMult                = 1.40;
+input double InpGradeBTrailMult                = 1.00;
+input double InpGradeCTrailMult                = 0.70;
+// V2.0 S4: gold respects round numbers. A zone whose proximal edge sits
+// within this distance of a $5 or $10 level is upgraded one step (C->B or
+// B->A). Upgrade only - it can never downgrade a zone.
+input double InpRoundNumberTolerancePips       = 5.0;
+
 // V3.164 live XAUUSD.sc protection parity.
 // Account denomination affects money and lot sizing, never price distance.
 // Historical M1 highs/lows cannot arm a trail immediately after attaching
@@ -1203,6 +1234,11 @@ struct HybridTrailState
    // V3.190 S2: a position may only be partial-closed once.
    bool     partialTaken;
    double   partialRequestedVolume;
+
+   // V2.0 S4: grade frozen with the position, so exit geometry cannot shift
+   // mid-trade (same constraint as V3.190 S03 geometry freezing).
+   int      zoneGrade;
+   double   partialTargetDistance;
 };
 
 struct ExitExecutionState
@@ -1417,6 +1453,14 @@ void FreezeTrailGeometry(int index,int direction,double entry);
 double Clamp(double v,double lo,double hi);
 double NormalizeVolumeDown(double vol);
 int VolumeDigits();
+bool NearGoldRoundNumber(double price,double &levelOut);
+int ComputeZoneGrade(int direction,int touchNumber,double departureScore,
+                     double proximalEdge,string &detail);
+string ZoneGradeText(int grade);
+double GradeSizeMultiplier(int grade);
+double GradeTrailMultiplier(int grade);
+double GradePartialTPPips(int grade);
+int ResolvePositionZoneGrade(ulong ticket);
 double ComputeDepartureScore(double zoneLo,double zoneHi,datetime zoneTime,int direction);
 double DepartureSizeMultiplier(double score);
 int ZoneTouchIndex(double lo,double hi);
@@ -3362,6 +3406,17 @@ void FreezeTrailGeometry(int index,int direction,double entry)
    g_hybridTrailStates[index].breakevenOffset     =(beOffset<=0.0)
                                                    ? 0.0
                                                    : ProtectionPriceDistance(beOffset);
+   // V2.0 S4: apply the grade's trail multiplier and partial target to the
+   // frozen geometry. Resolved once here and never re-read.
+   int grade=ResolvePositionZoneGrade(g_hybridTrailStates[index].ticket);
+   double gradeTrail=GradeTrailMultiplier(grade);
+
+   g_hybridTrailStates[index].zoneGrade=grade;
+   g_hybridTrailStates[index].trailInitialDistance*=gradeTrail;
+   g_hybridTrailStates[index].trailTightDistance  *=gradeTrail;
+   g_hybridTrailStates[index].partialTargetDistance=
+      ProtectionPriceDistance(GradePartialTPPips(grade));
+
    g_hybridTrailStates[index].frozenATR           =atrValue;
    g_hybridTrailStates[index].breakevenLocked     =false;
    g_hybridTrailStates[index].partialTaken        =false;
@@ -3382,6 +3437,10 @@ void FreezeTrailGeometry(int index,int direction,double entry)
        " | BE lock="+string(InpUseBreakevenLock?"ON":"OFF")+
        " @"+DoubleToString(bePips,1)+"p"+
        " +"+DoubleToString(beOffset,1)+"p"+
+       " | grade="+
+       (grade>0?ZoneGradeText(grade)+" (trail x"+DoubleToString(gradeTrail,2)+
+                ", partial "+DoubleToString(GradePartialTPPips(grade),1)+"p)"
+              :"ungraded")+
        " | ATR geometry="+string(InpUseATRGeometry?"ON":"OFF")+
        (atrValue>0.0
         ?" | frozen ATR="+DoubleToString(atrValue/pip,1)+"p"
@@ -4099,7 +4158,11 @@ void ManageHybridTrailingPositions(string context)
          !g_hybridTrailStates[stateIndex].partialTaken)
       {
          double currentFavourable=(direction==1)?current-entry:entry-current;
-         double partialTarget=ProtectionPriceDistance(MathMax(0.1,InpPartialTPPips));
+         // V2.0 S4: grade-differentiated partial target, frozen at open.
+         double partialTarget=
+            (g_hybridTrailStates[stateIndex].partialTargetDistance>0.0)
+            ? g_hybridTrailStates[stateIndex].partialTargetDistance
+            : ProtectionPriceDistance(MathMax(0.1,InpPartialTPPips));
 
          if(currentFavourable>=partialTarget-_Point*0.25)
          {
@@ -4426,6 +4489,159 @@ void ManageHybridTrailingPositions(string context)
    PruneExitExecutionStates();
 }
 
+
+
+
+//------------------------- V2.0 S4 zone grading ----------------------
+
+// V2.0 S4: is this price within tolerance of a $5 or $10 round level?
+// Gold pivots around those levels, so a zone edge sitting on one carries
+// extra resting interest.
+bool NearGoldRoundNumber(double price,double &levelOut)
+{
+   levelOut=0.0;
+
+   if(price<=0.0)
+      return false;
+
+   double tolerance=
+      MathMax(0.0,InpRoundNumberTolerancePips)*MathMax(StrategyPipSize(),_Point);
+
+   // $10 first so the stronger level is the one reported.
+   double ten=MathRound(price/10.0)*10.0;
+   if(MathAbs(price-ten)<=tolerance)
+   {
+      levelOut=ten;
+      return true;
+   }
+
+   double five=MathRound(price/5.0)*5.0;
+   if(MathAbs(price-five)<=tolerance)
+   {
+      levelOut=five;
+      return true;
+   }
+
+   return false;
+}
+
+
+// V2.0 S4: grade a zone. 1=A, 2=B, 3=C.
+//   A : 1st touch AND departure >= 0.70 AND aligned with H1 bias
+//   C : 3rd+ touch OR departure < 0.35 OR counter-trend to H1 bias
+//   B : everything else
+// A round-number proximal edge then upgrades one step.
+int ComputeZoneGrade(int direction,int touchNumber,double departureScore,
+                     double proximalEdge,string &detail)
+{
+   detail="";
+
+   // Unknown inputs must not manufacture a good grade OR a bad one. An
+   // unmeasured departure is treated as neutral, not as weak.
+   bool departureKnown=(departureScore>=0.0);
+   bool counterTrend  =IsCounterToH1Bias(direction);
+   bool firstTouch    =(touchNumber<=1);
+   bool staleTouch    =(touchNumber>=3);
+
+   int grade=2;
+
+   bool gradeA=firstTouch &&
+               departureKnown && departureScore>=0.70 &&
+               !counterTrend;
+
+   bool gradeC=staleTouch ||
+               (departureKnown && departureScore<0.35) ||
+               counterTrend;
+
+   // C wins ties: a stale or counter-trend zone is not an A even if the
+   // departure was explosive.
+   if(gradeC)      grade=3;
+   else if(gradeA) grade=1;
+   else            grade=2;
+
+   detail="touch#"+IntegerToString(touchNumber)+
+          " departure="+(departureKnown?DoubleToString(departureScore,2):"n/a")+
+          " H1="+(counterTrend?"counter":"aligned");
+
+   double roundLevel=0.0;
+   if(grade>1 && NearGoldRoundNumber(proximalEdge,roundLevel))
+   {
+      grade--;
+      detail+=" +round("+DoubleToString(roundLevel,2)+")";
+   }
+
+   detail+=" -> "+string(grade==1?"A":(grade==2?"B":"C"));
+   return grade;
+}
+
+
+string ZoneGradeText(int grade)
+{
+   if(grade==1) return "A";
+   if(grade==2) return "B";
+   if(grade==3) return "C";
+   return "?";
+}
+
+
+double GradeSizeMultiplier(int grade)
+{
+   if(grade==1) return MathMax(0.0,InpGradeASizeMult);
+   if(grade==2) return MathMax(0.0,InpGradeBSizeMult);
+   if(grade==3) return MathMax(0.0,InpGradeCSizeMult);
+   return 1.0;
+}
+
+
+double GradeTrailMultiplier(int grade)
+{
+   if(!InpUseZoneGrading) return 1.0;
+   if(grade==1) return MathMax(0.05,InpGradeATrailMult);
+   if(grade==2) return MathMax(0.05,InpGradeBTrailMult);
+   if(grade==3) return MathMax(0.05,InpGradeCTrailMult);
+   return 1.0;
+}
+
+
+double GradePartialTPPips(int grade)
+{
+   if(!InpUseZoneGrading) return MathMax(0.1,InpPartialTPPips);
+   if(grade==1) return MathMax(0.1,InpGradeAPartialTPPips);
+   if(grade==2) return MathMax(0.1,InpGradeBPartialTPPips);
+   if(grade==3) return MathMax(0.1,InpGradeCPartialTPPips);
+   return MathMax(0.1,InpPartialTPPips);
+}
+
+
+// V2.0 S4: recover the grade a position was deployed under, by mapping its
+// order comment back to the originating setup. Returns 0 when unknown, which
+// leaves geometry at the ungraded defaults.
+int ResolvePositionZoneGrade(ulong ticket)
+{
+   if(!InpUseZoneGrading)
+      return 0;
+
+   if(!PositionSelectByTicket(ticket))
+      return 0;
+
+   long setupId=0;
+   int layerIndex=0,totalLayers=0;
+
+   if(!ParsePersistentComment(PositionGetString(POSITION_COMMENT),
+                              setupId,layerIndex,totalLayers))
+      return 0;
+
+   if(setupId<=0)
+      return 0;
+
+   for(int i=0;i<ArraySize(g_persistentSetups);i++)
+   {
+      if(g_persistentSetups[i].id==setupId)
+         return g_persistentSetups[i].zoneGrade;
+   }
+
+   return 0;
+}
 
 
 
@@ -4871,6 +5087,19 @@ double V2QualitySizeMultiplier(int direction,string &reason)
    reason="";
 
    double multiplier=1.0;
+
+   // ---- unified grade (S4) ----
+   // When grading is on it REPLACES the individual S01/S02/S03 multipliers
+   // rather than stacking with them. Exactly one factor decides size.
+   if(InpUseZoneGrading && g_qualityContextValid && g_qualityContextGrade>0)
+   {
+      double gradeMult=GradeSizeMultiplier(g_qualityContextGrade);
+
+      reason="grade "+ZoneGradeText(g_qualityContextGrade)+
+             " x"+DoubleToString(gradeMult,2);
+
+      return MathMax(0.0,gradeMult);
+   }
 
    // ---- H1 bias (S1) ----
    if(InpUseH1BiasFilter && InpH1BiasMode!=0 && IsCounterToH1Bias(direction))
@@ -12768,6 +12997,38 @@ void ProcessPersistentSetups()
             g_persistentSetups[i].zoneTouchNumber=
                RegisterZoneTouch(g_persistentSetups[i].entryLo,
                                  g_persistentSetups[i].entryHi);
+
+            // V2.0 S4: grade is fixed at the moment of the touch that will
+            // deploy it, then frozen - so the size it was graded for and the
+            // exit geometry it runs on can never disagree.
+            if(InpUseZoneGrading)
+            {
+               string gradeDetail="";
+
+               double proximalEdge=
+                  (direction==1)
+                  ? g_persistentSetups[i].entryHi
+                  : g_persistentSetups[i].entryLo;
+
+               g_persistentSetups[i].zoneGrade=
+                  ComputeZoneGrade(direction,
+                                   g_persistentSetups[i].zoneTouchNumber,
+                                   g_persistentSetups[i].departureScore,
+                                   proximalEdge,
+                                   gradeDetail);
+
+               Log("V2.0 S4 ZONE GRADED | signal="+(string)id+
+                   " | "+gradeDetail+
+                   " | size x"+
+                   DoubleToString(GradeSizeMultiplier(
+                      g_persistentSetups[i].zoneGrade),2)+
+                   " | trail x"+
+                   DoubleToString(GradeTrailMultiplier(
+                      g_persistentSetups[i].zoneGrade),2)+
+                   " | partial TP="+
+                   DoubleToString(GradePartialTPPips(
+                      g_persistentSetups[i].zoneGrade),1)+" pips");
+            }
 
             double triggerLo=
                zeroConf
