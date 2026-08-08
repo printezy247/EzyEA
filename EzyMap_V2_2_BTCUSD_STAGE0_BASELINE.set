@@ -64,3 +64,13 @@ InpH1LevelMinDistancePips=70.0
 ; instrumentation with no input and no rollback switch. It prints in both
 ; arms and changes no behaviour, so it does not compromise this control.
 InpForceMinimumBaseSizing=false
+;
+; ---------------------------------------------------------------------------
+; S07 (added after S06) - InpAutoCalibrateSpreadCap
+; ---------------------------------------------------------------------------
+; Same polarity exception as S06, for the same reason: this is the input that
+; makes SpreadAllowed() measure the real spread instead of comparing against
+; the static InpMaxSpreadPoints. It DEFAULTS TO TRUE in this file (three
+; static-cap guesses failed on BTCUSD.sc); pin it FALSE here so this control
+; arm enforces the plain static cap exactly as V2.1b/gold always have.
+InpAutoCalibrateSpreadCap=false

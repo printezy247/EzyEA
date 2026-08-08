@@ -93,9 +93,20 @@
 ; unverified placeholder widened 10x from gold because the broker's point
 ; convention was unknown at authoring time.
 ;
-; Before re-enabling it, read the OnInit line the EA already prints:
-;   V2.2 BTC SPREAD CHECK | observed spread=... points (... price) | ...
-; and set InpMaxSpreadPoints to roughly 2-3x the calm-market reading.
+; UPDATE (S07): a real fix landed for this instead of just a better guess -
+; SpreadAllowed() can now auto-calibrate the cap from the symbol's own
+; observed spread. But for THIS diagnostic pass the goal is to prove the EA
+; can deploy with the spread gate fully OUT OF THE PICTURE, not to test the
+; new calibration logic, so explicitly turn calibration OFF and rely on the
+; existing InpMaxSpreadPoints<=0 no-op path - the same one-line, unambiguous
+; "filter is completely disabled, full stop" state as before.
+;
+; Once this pass confirms trades occur, the NEXT test should flip
+; InpAutoCalibrateSpreadCap back to true (its compiled default) with
+; InpMaxSpreadPoints left as a generous ceiling, and you should see
+; "V2.2 BTC SPREAD AUTO-CALIBRATION COMPLETE" report a real measured cap
+; instead of guessing another static number.
+InpAutoCalibrateSpreadCap=false
 InpMaxSpreadPoints=0
 ;
 ; ---------------------------------------------------------------------------
