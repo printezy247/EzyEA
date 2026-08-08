@@ -860,6 +860,27 @@ input double InpGradeCTrailMult                = 0.70;
 // B->A). Upgrade only - it can never downgrade a zone.
 input double InpRoundNumberTolerancePips       = 5.0;
 
+//========================= V2.0 STAGE 5 =============================
+// V2.0 S5: supply/demand distal-edge stops.
+// OLD BEHAVIOUR: the stop was a fixed 21 pips, or an ATR multiple under
+// V3.190 S03. Neither is tied to where the zone is actually INVALIDATED - a
+// stop can sit inside the zone it is trading, so ordinary rotation inside the
+// zone stops the trade out on a thesis that has not failed.
+// NEW: place the stop just beyond the zone's distal edge, which is the price
+// at which the zone premise is genuinely wrong.
+// Default false = V3.190 stop selection.
+
+// V2.0 S5: master switch. RECOMMENDED true.
+input bool   InpUseZoneDistalStops             = false;
+input double InpDistalStopBufferPips           = 3.0;
+input double InpDistalStopMinPips              = 10.0;
+input double InpDistalStopMaxPips              = 30.0;
+// V2.0 S5: when the zone is so wide that its distal stop would exceed
+// InpDistalStopMaxPips, fall back to the V3.190 ATR/fixed stop rather than
+// clamping. A zone that wide is a different setup and must be SIZED as one -
+// clamping would silently under-stop it while sizing as if the stop held.
+input bool   InpFallbackToATRStop              = true;
+
 // V3.164 live XAUUSD.sc protection parity.
 // Account denomination affects money and lot sizing, never price distance.
 // Historical M1 highs/lows cannot arm a trail immediately after attaching
@@ -1159,6 +1180,13 @@ struct DirectZeroConfState
 
 struct SetupAnalytics
 {
+   // V2.0 quality attribution captured at deployment.
+   int v2ZoneGrade;
+   int v2TouchNumber;
+   double v2DepartureScore;
+   int v2H1BiasAligned;
+   double v2ActualStopPips;
+
    bool used;
    bool peakRunnerArmed;
    long id;
@@ -1189,6 +1217,14 @@ struct ReportSetupRow
 {
    long id;
    int direction;
+   // V2.0: quality attribution, so win rate and expectancy can be measured
+   // PER GRADE / PER TOUCH from the CSV. Without these the grading table is
+   // unfalsifiable.
+   int zoneGrade;
+   int zoneTouchNumber;
+   double departureScore;
+   int h1BiasAligned;      // 1 aligned, -1 counter, 0 neutral/unknown
+   double actualStopPips;
    int confidence;
    double riskPct;
    double targetRR;
@@ -1481,6 +1517,9 @@ void RefreshGeometryATR();
 double CurrentGeometryATR();
 void ResolveATRGeometryPips(double &presetPips,double &armPips,double &initPips,
                             double &tightPips,double &tightenAtPips,double &atrPrice);
+double ResolveDistalStopPips();
+void SetDistalContext(int direction,double entry,double zoneLo,double zoneHi);
+void ClearDistalContext();
 double ResolvedPresetStopPips();
 bool TouchConfirmationSatisfied(PersistentReadySetup &setup,int direction,
                                 double zoneLo,double zoneHi,double cmp,
@@ -1914,6 +1953,15 @@ ZoneTouchRecord g_zoneTouches[];
 // CapSetupVolumeForCentSafety() is the single sizing choke point but it has no
 // setup handle, so the deploying path publishes the setup's quality here just
 // before sizing and clears it afterwards.
+// V2.0 S5: the zone the entry currently being sized belongs to, so
+// ResolvedPresetStopPips() can derive a distal stop. Published and cleared
+// alongside the quality context.
+bool   g_distalContextValid=false;
+double g_distalContextLo=0.0;
+double g_distalContextHi=0.0;
+int    g_distalContextDirection=0;
+double g_distalContextEntry=0.0;
+
 bool   g_qualityContextValid=false;
 int    g_qualityContextTouches=0;
 double g_qualityContextDeparture=-1.0;
@@ -2817,6 +2865,8 @@ bool SubmitDirectZeroConfMarket()
                         g_directZeroConf.triggerHi);
 
    SetQualityContext(direction,directTouchNumber,-1.0,0);
+   SetDistalContext(direction,entry,
+                    g_directZeroConf.triggerLo,g_directZeroConf.triggerHi);
 
    double volume=CapSetupVolumeForCentSafety(direction,entry,brokerSL,requested);
 
@@ -3363,8 +3413,72 @@ void ResolveATRGeometryPips(double &presetPips,
 // Every order-send path and every risk calculation uses this rather than
 // InpPresetStopLossPips directly, so a variable stop cannot desync sizing
 // from the stop actually placed.
+// V2.0 S5: stop distance in pips from the zone's distal edge, or -1.0 when
+// the zone cannot produce a usable one (no zone, degenerate geometry, or the
+// zone is wider than InpDistalStopMaxPips allows).
+double ResolveDistalStopPips()
+{
+   if(!InpUseZoneDistalStops || !g_distalContextValid)
+      return -1.0;
+
+   double lo=g_distalContextLo;
+   double hi=g_distalContextHi;
+   double entry=g_distalContextEntry;
+   int direction=g_distalContextDirection;
+
+   if(lo<=0.0 || hi<=lo || entry<=0.0 || direction==0)
+      return -1.0;
+
+   double pip=MathMax(StrategyPipSize(),_Point);
+   double buffer=MathMax(0.0,InpDistalStopBufferPips)*pip;
+
+   // Distal edge = the far side of the zone, the price at which the zone
+   // premise is actually wrong. BUY at demand -> below the zone low.
+   double distal=(direction==1) ? lo-buffer : hi+buffer;
+
+   double distance=(direction==1) ? entry-distal : distal-entry;
+
+   if(distance<=0.0)
+      return -1.0;
+
+   double pips=distance/pip;
+   double minPips=MathMax(0.1,InpDistalStopMinPips);
+   double maxPips=MathMax(minPips,InpDistalStopMaxPips);
+
+   if(pips>maxPips)
+   {
+      // Too wide to be this setup. Fall back rather than clamp: clamping
+      // would place a stop the zone does not justify while sizing as though
+      // it did.
+      if(InpFallbackToATRStop)
+      {
+         Log("V2.0 S5 DISTAL STOP FALLBACK | "+
+             string(direction==1?"BUY":"SELL")+
+             " | zone="+DoubleToString(lo,_Digits)+".."+DoubleToString(hi,_Digits)+
+             " | distal would need "+DoubleToString(pips,1)+" pips"+
+             " > max "+DoubleToString(maxPips,1)+
+             " | using ATR/fixed stop instead");
+         return -1.0;
+      }
+
+      pips=maxPips;
+   }
+
+   return MathMax(minPips,pips);
+}
+
+
 double ResolvedPresetStopPips()
 {
+   // V2.0 S5: a zone-derived stop takes precedence over ATR/fixed. Because
+   // every order-send path AND the risk cap read this one function, sizing is
+   // automatically computed against the stop actually placed - the variable
+   // stop can never desync from the risk calculation.
+   double distalPips=ResolveDistalStopPips();
+
+   if(distalPips>0.0)
+      return distalPips;
+
    double presetPips = MathMax(0.1,InpPresetStopLossPips);
    double armPips    = MathMax(0.0,InpTrailArmPips);
    double initPips   = MathMax(0.1,InpTrailInitialDistancePips);
@@ -3394,6 +3508,28 @@ void FreezeTrailGeometry(int index,int direction,double entry)
    // before anything is converted to price distance. Frozen from this point.
    ResolveATRGeometryPips(presetPips,armPips,initPips,tightPips,
                           tightenAt,atrValue);
+
+   // V2.0 S5: if this position's stop came from the zone's distal edge, the
+   // trail and arm distances must scale with it or the S01 phase ratios drift
+   // - a 30-pip stop with a 7-pip arm is a completely different trade shape
+   // from a 12-pip stop with a 7-pip arm. Scaling keeps the shape constant.
+   double actualPresetPips=ResolvedPresetStopPips();
+
+   if(InpUseZoneDistalStops &&
+      actualPresetPips>0.0 &&
+      presetPips>0.0 &&
+      MathAbs(actualPresetPips-presetPips)>0.01)
+   {
+      double stopRatio=actualPresetPips/presetPips;
+
+      presetPips=actualPresetPips;
+      armPips   *=stopRatio;
+      initPips  *=stopRatio;
+      tightPips *=stopRatio;
+      tightenAt *=stopRatio;
+      bePips    *=stopRatio;
+      beOffset  *=stopRatio;
+   }
 
    g_hybridTrailStates[index].presetDistance      =ProtectionPriceDistance(presetPips);
    g_hybridTrailStates[index].armDistance         =(armPips<=0.0)
@@ -4979,6 +5115,26 @@ void LoadZoneTouchState()
 
 // V2.0 S2/S4: publish the quality of the entry about to be sized, so the
 // sizing choke point can see it.
+void SetDistalContext(int direction,double entry,double zoneLo,double zoneHi)
+{
+   g_distalContextValid    =true;
+   g_distalContextDirection=direction;
+   g_distalContextEntry    =entry;
+   g_distalContextLo       =MathMin(zoneLo,zoneHi);
+   g_distalContextHi       =MathMax(zoneLo,zoneHi);
+}
+
+
+void ClearDistalContext()
+{
+   g_distalContextValid    =false;
+   g_distalContextDirection=0;
+   g_distalContextEntry    =0.0;
+   g_distalContextLo       =0.0;
+   g_distalContextHi       =0.0;
+}
+
+
 void SetQualityContext(int direction,int touches,double departure,int grade)
 {
    g_qualityContextValid    =true;
@@ -4991,6 +5147,7 @@ void SetQualityContext(int direction,int touches,double departure,int grade)
 
 void ClearQualityContext()
 {
+   ClearDistalContext();
    g_qualityContextValid    =false;
    g_qualityContextDirection=0;
    g_qualityContextTouches  =0;
@@ -9791,6 +9948,19 @@ void RegisterSetupAnalytics(PersistentReadySetup &setup)
    g_setupAnalytics[idx].plannedLayers=setup.layersPlaced;
    g_setupAnalytics[idx].armedTime=setup.armedClock;
    g_setupAnalytics[idx].deployedTime=setup.deployedClock;
+
+   // V2.0: freeze the quality attributes this setup was actually deployed on.
+   g_setupAnalytics[idx].v2ZoneGrade      =setup.zoneGrade;
+   g_setupAnalytics[idx].v2TouchNumber    =setup.zoneTouchNumber;
+   g_setupAnalytics[idx].v2DepartureScore =setup.departureScore;
+   g_setupAnalytics[idx].v2H1BiasAligned  =
+      (H1BiasDirection()==0)
+      ? 0
+      : (IsCounterToH1Bias(setup.direction)?-1:1);
+   g_setupAnalytics[idx].v2ActualStopPips =
+      (g_pipSize>0.0 && setup.structuralSL>0.0)
+      ? MathAbs(((setup.entryLo+setup.entryHi)*0.5)-setup.structuralSL)/g_pipSize
+      : 0.0;
 }
 
 long ResolveSetupIdFromSelectedHistory(long positionId,
@@ -9956,6 +10126,11 @@ int EnsureReportSetupRow(ReportSetupRow &rows[],long id)
       rows[n].peakCampaignProfit=g_setupAnalytics[a].peakCampaignProfit;
       rows[n].peakRunnerProfit=g_setupAnalytics[a].peakRunnerProfit;
       rows[n].peakLockCloses=g_setupAnalytics[a].peakLockCloses;
+      rows[n].zoneGrade=g_setupAnalytics[a].v2ZoneGrade;
+      rows[n].zoneTouchNumber=g_setupAnalytics[a].v2TouchNumber;
+      rows[n].departureScore=g_setupAnalytics[a].v2DepartureScore;
+      rows[n].h1BiasAligned=g_setupAnalytics[a].v2H1BiasAligned;
+      rows[n].actualStopPips=g_setupAnalytics[a].v2ActualStopPips;
    }
 
    return n;
@@ -10118,6 +10293,11 @@ void WriteEzyMapBacktestReport()
          rows[i].peakCampaignProfit=g_setupAnalytics[a].peakCampaignProfit;
          rows[i].peakRunnerProfit=g_setupAnalytics[a].peakRunnerProfit;
          rows[i].peakLockCloses=g_setupAnalytics[a].peakLockCloses;
+         rows[i].zoneGrade=g_setupAnalytics[a].v2ZoneGrade;
+         rows[i].zoneTouchNumber=g_setupAnalytics[a].v2TouchNumber;
+         rows[i].departureScore=g_setupAnalytics[a].v2DepartureScore;
+         rows[i].h1BiasAligned=g_setupAnalytics[a].v2H1BiasAligned;
+         rows[i].actualStopPips=g_setupAnalytics[a].v2ActualStopPips;
       }
 
       totalEntryLots+=rows[i].entryLots;
@@ -10252,7 +10432,12 @@ void WriteEzyMapBacktestReport()
              "Layer1TPHits",
              "Layer2TPHits",
              "RunnerTPHits",
-             "PeakLockCloses");
+             "PeakLockCloses",
+             "ZoneGrade",
+             "TouchNumber",
+             "DepartureScore",
+             "H1BiasAligned",
+             "ActualStopPips");
 
    for(int i=0;i<ArraySize(rows);i++)
    {
@@ -10277,7 +10462,15 @@ void WriteEzyMapBacktestReport()
                 rows[i].layer1TPHits,
                 rows[i].layer2TPHits,
                 rows[i].runnerTPHits,
-                rows[i].peakLockCloses);
+                rows[i].peakLockCloses,
+                ZoneGradeText(rows[i].zoneGrade),
+                rows[i].zoneTouchNumber,
+                (rows[i].departureScore>=0.0
+                 ? DoubleToString(rows[i].departureScore,3)
+                 : "n/a"),
+                (rows[i].h1BiasAligned==1?"ALIGNED":
+                 (rows[i].h1BiasAligned==-1?"COUNTER":"NEUTRAL")),
+                DoubleToString(rows[i].actualStopPips,1));
    }
 
    FileWrite(handle,"");
@@ -11923,6 +12116,7 @@ bool BuildAggressiveArmPlans(PersistentReadySetup &setup,
                      setup.zoneTouchNumber,
                      setup.departureScore,
                      setup.zoneGrade);
+   SetDistalContext(direction,marketPrice,setup.entryLo,setup.entryHi);
 
    targetSetupLot=
       CapSetupVolumeForCentSafety(direction,
@@ -12069,6 +12263,7 @@ bool BuildForcedZeroConfluenceMarketPlan(PersistentReadySetup &setup,LayerPlan &
                      setup.zoneTouchNumber,
                      setup.departureScore,
                      setup.zoneGrade);
+   SetDistalContext(direction,marketPrice,setup.entryLo,setup.entryHi);
 
    double volume=CapSetupVolumeForCentSafety(direction,marketPrice,
                                              setup.structuralSL,requested);
@@ -12533,6 +12728,10 @@ bool DeployPersistentSetup(int index)
                      g_persistentSetups[index].zoneTouchNumber,
                      g_persistentSetups[index].departureScore,
                      g_persistentSetups[index].zoneGrade);
+   SetDistalContext(g_persistentSetups[index].direction,
+                    marketPrice,
+                    g_persistentSetups[index].entryLo,
+                    g_persistentSetups[index].entryHi);
 
    targetSetupLot=
       CapSetupVolumeForCentSafety(
