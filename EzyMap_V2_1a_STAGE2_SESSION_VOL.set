@@ -1,0 +1,38 @@
+; EzyMap Scalp Mastery V2.1a - EzyMap_V2_1a_STAGE2_SESSION_VOL.set
+; STAGE 2 - session timing score + volatility regime score, both weighted 1.0,
+; plus the separate hard veto on extreme volatility. Cumulative: S01+S02.
+;
+; Only the V2.1a S01-S02 inputs are listed. Load this ON TOP of your
+; V2.0 working set - every other input keeps its current value.
+;
+; InpVolTimeframe=5 is PERIOD_M5. When this AND InpVolATRPeriod match the
+; V3.190 S03 geometry ATR inputs (InpATRTimeframe / InpATRPeriod) AND
+; InpUseATRGeometry is true, the existing cached ATR handle is REUSED - the
+; init log says which handle was taken.
+;
+; With both sources at weight 1.0 the aggregate is their plain average, so
+; the default threshold 0.45 admits e.g. NY-only + normal volatility
+; (0.65+1.00)/2 = 0.825 and rejects DEAD + extreme (0.15+0.15)/2 = 0.150.
+; Tune the threshold against the STAGE1 trade count, not in the abstract.
+;
+InpUseConfluenceScoring=true
+InpMinConfluenceScore=0.45
+InpScoreSession=true
+InpLondonOpenHour=8
+InpNYOpenHour=13
+InpNYCloseHour=21
+InpSessionWeight=1.0
+InpOverlapSessionScore=1.0
+InpSingleSessionScore=0.65
+InpAsiaSessionScore=0.35
+InpDeadZoneScore=0.15
+InpScoreVolatilityRegime=true
+InpVolATRPeriod=14
+InpVolTimeframe=5
+InpVolPercentileLookback=500
+InpVolLowPercentile=20.0
+InpVolHighPercentile=90.0
+InpVolatilityWeight=1.0
+InpVolNormalScore=1.0
+InpVolExtremeScore=0.15
+InpHardBlockExtremeVol=true
