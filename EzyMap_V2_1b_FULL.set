@@ -1,0 +1,31 @@
+; EzyMap Scalp Mastery V2.1b - EzyMap_V2_1b_FULL.set
+; FULL V2.1b - both stages active. Cumulative: S01+S02. These are also the
+; compiled-in DEFAULTS, so this file is redundant with a fresh binary; it
+; exists so the A/B pair is symmetric and so the intended values are explicit
+; in the tester rather than implied.
+;
+; S01 (InpZeroConfAllowCurrentMapTier=false): the CURRENT_MAP / CURRENT_OUTER
+; tier is excluded from the ladder, and CURRENT_OUTER's directional override
+; and retire-on-fill privileges go with it. Scored sources become W1_CLUSTER,
+; W1_SINGLE, D1_H4_CLUSTER, D1_SINGLE, LOW_RISK, READY. H4_SINGLE stays at
+; priority 7, unchanged.
+;
+; S02 (InpZeroConfIncludeLevel1=false): the four W1/D1 ladder loops start at
+; index 1, so only the OUTER level (S2/D2) can trigger. H4 is unaffected on
+; both counts - the H4_SINGLE loop still runs both levels and h4[0]/h4[1] stay
+; available as cluster partners. LOW_RISK and READY are untouched.
+;
+; Only the V2.1b S01-S02 inputs are listed. Load this ON TOP of your V2.1a
+; working set - every other input keeps its current value.
+;
+; Expect FEWER zero-conf fills than STAGE0. Compare trade count first and
+; expectancy second, and slice the CSV by trigger type: the whole point is
+; that the surviving six sources should carry a better win rate than the
+; nine-source mix did.
+;
+; Confirm from the OnInit log that you loaded it. This file must produce:
+;   V2.1b: CURRENT_MAP/CURRENT_OUTER tier disabled ...
+;   V2.1b: W1/D1 triggers restricted to S2/D2 (Level2) only ...
+;
+InpZeroConfAllowCurrentMapTier=false
+InpZeroConfIncludeLevel1=false

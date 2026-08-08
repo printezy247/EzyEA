@@ -1,0 +1,22 @@
+; EzyMap Scalp Mastery V2.1b - EzyMap_V2_1b_STAGE0_BASELINE.set
+; STAGE 0 - CONTROL. Both V2.1b inputs set to TRUE, which is the ROLLBACK
+; position, not the default. Reproduces the V2.1a zero-confluence trigger
+; ladder exactly: all nine sources present, W1 and D1 eligible on BOTH their
+; Level1 (S1/D1) and Level2 (S2/D2) levels, and CURRENT_OUTER keeps its
+; directional override right plus its retire-every-other-waiting-setup-on-fill
+; privilege.
+;
+; NOTE THE REVERSED POLARITY. In V3.190, V2.0 and V2.1a the baseline set was
+; the all-FALSE one. In V2.1b the baseline is the all-TRUE one: both new
+; inputs default to the NEW behaviour, so a default-valued binary is already
+; the changed EA. Loading this file is what gives you the old EA back.
+;
+; Only the V2.1b S01-S02 inputs are listed. Load this ON TOP of your V2.1a
+; working set - every other input keeps its current value.
+;
+; Confirm from the OnInit log that you loaded it. This file must produce:
+;   V2.1b: CURRENT_MAP/CURRENT_OUTER tier RESTORED (A/B control only) ...
+;   V2.1b: W1/D1 Level1 (S1/D1) inclusion RESTORED (A/B control only) ...
+;
+InpZeroConfAllowCurrentMapTier=true
+InpZeroConfIncludeLevel1=true
