@@ -2011,6 +2011,7 @@ bool M5ClosedLossCapacityAvailable(string context);
 void CancelAllPendingAtM5ClosedLossCap();
 void EnforceM5ClosedLossCap();
 bool SpreadAllowed();
+string EffectiveSpreadCapText();
 bool SubmitDirectZeroConfMarket();
 void ProcessDirectZeroConfluenceTriggers();
 bool IsLiveXAUUSDscProtectionChart();
@@ -3531,7 +3532,8 @@ bool SubmitDirectZeroConfMarket()
           string(direction==1?"BUY":"SELL")+
           " | attempt="+
           IntegerToString(g_directZeroConf.attempts)+
-          " | reason=spread filter: current spread exceeds InpMaxSpreadPoints");
+          " | reason=spread filter: current spread exceeds "+
+          EffectiveSpreadCapText());
       return false;
    }
 
@@ -9746,6 +9748,30 @@ bool SpreadAllowed()
    return true;
 }
 
+// V2.2 BTC S07 follow-up: the three SpreadAllowed() call sites below each log
+// a rejection with the literal text "InpMaxSpreadPoints=<raw input>" - which
+// is now misleading when InpAutoCalibrateSpreadCap is on, because a rejection
+// in that mode is compared against g_spreadCalEffectiveCap, not the raw
+// input. That ambiguity is exactly what made a real test run's journal
+// impossible to read: "current spread exceeds InpMaxSpreadPoints=120" looks
+// identical whether auto-calibration never ran (old .ex5) or ran and simply
+// arrived at a calibrated cap that still rejected this tick. This helper
+// reports what is ACTUALLY being enforced right now, so the rejection log
+// itself proves which code path produced it.
+string EffectiveSpreadCapText()
+{
+   if(!InpAutoCalibrateSpreadCap)
+      return "static cap="+IntegerToString(InpMaxSpreadPoints)+
+             (InpMaxSpreadPoints<=0?" (DISABLED, should not reject)":"");
+
+   if(g_spreadCalEffectiveCap<0.0)
+      return "STILL CALIBRATING ("+IntegerToString(g_spreadCalCount)+"/"+
+             IntegerToString(MathMax(20,InpSpreadCalibrationTicks))+
+             " samples, filter inactive, should not reject)";
+
+   return "calibrated cap="+DoubleToString(g_spreadCalEffectiveCap,1);
+}
+
 //====================== V2.1a CONFLUENCE ENGINE =====================
 // V2.1a S1/S2: one scoring engine, called from BOTH entry paths.
 //
@@ -12063,9 +12089,8 @@ bool PlacePersistentLayer(PersistentReadySetup &setup,
    {
       g_spreadRejectStd++;    // V2.2 BTC S06 instrumentation
       Log("SPREAD FILTER BLOCK | signal="+(string)setup.id+
-          " | current spread exceeds InpMaxSpreadPoints="+
-          IntegerToString(InpMaxSpreadPoints));
-      SetDeploymentFailure("spread filter: current spread exceeds InpMaxSpreadPoints",
+          " | current spread exceeds "+EffectiveSpreadCapText());
+      SetDeploymentFailure("spread filter: current spread exceeds "+EffectiveSpreadCapText(),
                            0,"","",true);
       return false;
    }
@@ -15307,7 +15332,8 @@ bool ArmReadySignal(BridgeSignal &s)
    if(!SpreadAllowed())
    {
       g_spreadRejectOther++;     // V2.2 BTC S06 instrumentation
-      Log("Spread filter blocked READY setup.");
+      Log("Spread filter blocked READY setup. | current spread exceeds "+
+          EffectiveSpreadCapText());
       return false;
    }
 
