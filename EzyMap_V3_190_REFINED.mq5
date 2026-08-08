@@ -649,6 +649,32 @@ input double InpPartialTPPercent               = 55.0;
 // cannot turn a booked win into a loss.
 input bool   InpBreakevenAfterPartial          = true;
 
+//------------------------- V3.190 STAGE 3 ---------------------------
+// V3.190 S3: ATR-normalized geometry.
+// OLD BEHAVIOUR: stop and trail were fixed pip counts (21/7) regardless of
+// conditions. Asia-session gold ATR can be a third of the New York figure, so
+// the same 7-pip arm is unreachable in quiet hours while the same 21-pip stop
+// sits inside the noise during news. NEW: derive the distances from ATR.
+// Default false = fixed pips, byte-identical to S01.
+
+// V3.190 S3: master switch. Default false = S01 fixed-pip geometry.
+// RECOMMENDED true.
+input bool   InpUseATRGeometry                 = false;
+input int    InpATRPeriod                      = 14;
+input ENUM_TIMEFRAMES InpATRTimeframe          = PERIOD_M5;
+// V3.190 S3: stop distance = ATR * this, clamped to the floor/ceiling below.
+input double InpATRStopMultiplier              = 1.60;
+// V3.190 S3: initial trail distance = ATR * this, floored by
+// InpATRTrailFloorPips. The tight distance and the tighten-at threshold are
+// scaled by the SAME ratio, which preserves the shape configured in S01
+// rather than inventing separate ATR multipliers for them.
+input double InpATRTrailMultiplier             = 0.55;
+// V3.190 S3: arm threshold = ATR * this.
+input double InpATRArmMultiplier               = 0.35;
+input double InpATRStopFloorPips               = 12.0;
+input double InpATRStopCeilingPips             = 35.0;
+input double InpATRTrailFloorPips              = 5.0;
+
 // V3.164 live XAUUSD.sc protection parity.
 // Account denomination affects money and lot sizing, never price distance.
 // Historical M1 highs/lows cannot arm a trail immediately after attaching
@@ -1213,6 +1239,17 @@ double LiveTrailActivationDistance(MqlTick &tick,double armDistance);
 bool TrailStopImproves(int direction,double candidate,double existing,double minimumGain);
 double TrailBetterStop(int direction,double a,double b);
 void FreezeTrailGeometry(int index,int direction,double entry);
+// V3.190 S2/S3: these are defined further down the file but are now called
+// from earlier functions (the ATR geometry resolver and the synchronized
+// close), so they need declaring up here.
+double Clamp(double v,double lo,double hi);
+double NormalizeVolumeDown(double vol);
+int VolumeDigits();
+void RefreshGeometryATR();
+double CurrentGeometryATR();
+void ResolveATRGeometryPips(double &presetPips,double &armPips,double &initPips,
+                            double &tightPips,double &tightenAtPips,double &atrPrice);
+double ResolvedPresetStopPips();
 double BrokerSafeExecutionSL(int direction,double marketPrice,double requestedSL);
 double BrokerSafeExecutionTP(int direction,
                              double entryPrice,
@@ -1617,6 +1654,14 @@ string PersistentTouchTriggerText(PersistentReadySetup &setup)
 
    return "READY";
 }
+
+// V3.190 S3: cached ATR. iATR() must not be called per tick, so the handle is
+// created once in OnInit, the buffer is read at most once per bar of
+// InpATRTimeframe, and every consumer reads the cached price value.
+int      g_geometryATRHandle=INVALID_HANDLE;
+double   g_geometryATRValue=0.0;
+datetime g_geometryATRBar=0;
+
 
 // V3.190 S00: single monotonic millisecond clock for every timing decision in
 // the EA. V3.176 called the raw OS tick counter directly from eight separate
@@ -2468,7 +2513,9 @@ bool SubmitDirectZeroConfMarket()
       return false;
 
    double entry=(direction==1)?tick.ask:tick.bid;
-   double exactDistance=ProtectionPriceDistance(InpPresetStopLossPips);
+   // V3.190 S3: resolved stop distance, so an ATR-derived stop is the one
+   // actually submitted (and the one sizing is computed against).
+   double exactDistance=ProtectionPriceDistance(ResolvedPresetStopPips());
    double exactSL=RoundProtectionStop(
       direction,
       direction==1 ? entry-exactDistance : entry+exactDistance);
@@ -2922,6 +2969,117 @@ double ReconstructTrailPeak(int direction,
 // are PRICE distances. When S03 is enabled the pip figures come from ATR
 // instead of the fixed inputs, but they land in the same fields and drive the
 // same phase machine - the logic is never forked.
+// V3.190 S3: refresh the cached ATR at most once per bar of the configured
+// timeframe. Called from the protection pass; the per-bar guard is what keeps
+// this off the per-tick cost path.
+void RefreshGeometryATR()
+{
+   if(!InpUseATRGeometry || g_geometryATRHandle==INVALID_HANDLE)
+      return;
+
+   datetime bar=iTime(_Symbol,InpATRTimeframe,0);
+
+   if(bar<=0 || bar==g_geometryATRBar)
+      return;
+
+   double buffer[];
+   ArraySetAsSeries(buffer,true);
+
+   // Shift 1: the last CLOSED bar. The forming bar's ATR moves intrabar and
+   // would make geometry depend on when in the bar a position happened to
+   // open.
+   if(CopyBuffer(g_geometryATRHandle,0,1,1,buffer)<1)
+      return;
+
+   if(buffer[0]<=0.0)
+      return;
+
+   g_geometryATRValue=buffer[0];
+   g_geometryATRBar=bar;
+}
+
+
+// V3.190 S3: cached ATR in PRICE units, 0.0 when unavailable or disabled.
+double CurrentGeometryATR()
+{
+   if(!InpUseATRGeometry)
+      return 0.0;
+
+   return g_geometryATRValue;
+}
+
+
+// V3.190 S3: overwrite the fixed pip geometry with ATR-derived figures.
+// A no-op when S03 is off or the ATR is not yet available, which is what
+// makes S01 behaviour byte-identical in that case. The results feed the SAME
+// phase machine as S01 - the logic is never forked.
+void ResolveATRGeometryPips(double &presetPips,
+                            double &armPips,
+                            double &initPips,
+                            double &tightPips,
+                            double &tightenAtPips,
+                            double &atrPrice)
+{
+   atrPrice=0.0;
+
+   double atr=CurrentGeometryATR();
+   if(atr<=0.0)
+      return;
+
+   double pip=MathMax(StrategyPipSize(),_Point);
+   double atrPips=atr/pip;
+
+   if(atrPips<=0.0)
+      return;
+
+   atrPrice=atr;
+
+   // Preserve the tight:initial shape the user configured in S01 instead of
+   // inventing separate ATR multipliers for the tighten phase.
+   double shapeReference=MathMax(0.1,initPips);
+   double atrInitial=MathMax(MathMax(0.1,InpATRTrailFloorPips),
+                             atrPips*MathMax(0.01,InpATRTrailMultiplier));
+   double ratio=atrInitial/shapeReference;
+
+   double floorPips  =MathMax(0.1,InpATRStopFloorPips);
+   double ceilingPips=MathMax(floorPips,InpATRStopCeilingPips);
+
+   presetPips=Clamp(atrPips*MathMax(0.01,InpATRStopMultiplier),
+                    floorPips,ceilingPips);
+
+   armPips  =MathMax(0.0,atrPips*MathMax(0.0,InpATRArmMultiplier));
+   tightPips=MathMax(MathMax(0.1,InpATRTrailFloorPips),tightPips*ratio);
+
+   // An unreachable tighten threshold (the S01 default of 999) must stay
+   // unreachable after scaling.
+   tightenAtPips=tightenAtPips*ratio;
+
+   initPips=atrInitial;
+}
+
+
+// V3.190 S3: the stop distance in pips that a NEW order should carry. Order
+// submission happens before any HybridTrailState exists, so it cannot read
+// the frozen geometry and has to resolve the same figure independently.
+// Every order-send path and every risk calculation uses this rather than
+// InpPresetStopLossPips directly, so a variable stop cannot desync sizing
+// from the stop actually placed.
+double ResolvedPresetStopPips()
+{
+   double presetPips = MathMax(0.1,InpPresetStopLossPips);
+   double armPips    = MathMax(0.0,InpTrailArmPips);
+   double initPips   = MathMax(0.1,InpTrailInitialDistancePips);
+   double tightPips  = MathMax(0.1,InpTrailTightDistancePips);
+   double tightenAt  = MathMax(0.0,InpTrailTightenAtPips);
+   double atrValue   = 0.0;
+
+   ResolveATRGeometryPips(presetPips,armPips,initPips,tightPips,
+                          tightenAt,atrValue);
+
+   return presetPips;
+}
+
+
 void FreezeTrailGeometry(int index,int direction,double entry)
 {
    double presetPips = MathMax(0.1,InpPresetStopLossPips);
@@ -2932,6 +3090,11 @@ void FreezeTrailGeometry(int index,int direction,double entry)
    double bePips     = MathMax(0.0,InpBreakevenLockAtPips);
    double beOffset   = MathMax(0.0,InpBreakevenLockOffsetPips);
    double atrValue   = 0.0;
+
+   // V3.190 S3: ATR-sourced geometry replaces the fixed pip figures here,
+   // before anything is converted to price distance. Frozen from this point.
+   ResolveATRGeometryPips(presetPips,armPips,initPips,tightPips,
+                          tightenAt,atrValue);
 
    g_hybridTrailStates[index].presetDistance      =ProtectionPriceDistance(presetPips);
    g_hybridTrailStates[index].armDistance         =(armPips<=0.0)
@@ -2964,6 +3127,7 @@ void FreezeTrailGeometry(int index,int direction,double entry)
        " | BE lock="+string(InpUseBreakevenLock?"ON":"OFF")+
        " @"+DoubleToString(bePips,1)+"p"+
        " +"+DoubleToString(beOffset,1)+"p"+
+       " | ATR geometry="+string(InpUseATRGeometry?"ON":"OFF")+
        (atrValue>0.0
         ?" | frozen ATR="+DoubleToString(atrValue/pip,1)+"p"
         :""));
@@ -3602,6 +3766,9 @@ void ManageHybridTrailingPositions(string context)
 {
    if(!InpUseFixedPipTrail)
       return;
+
+   // V3.190 S3: no-op unless a new bar of InpATRTimeframe has formed.
+   RefreshGeometryATR();
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol,tick))
@@ -7241,10 +7408,24 @@ double CapSetupVolumeForCentSafety(int direction,
          return 0.0;
       }
 
-      double protectionDistance=ProtectionPriceDistance(InpTrailingDistancePips);
-      double protectionSL=RoundProtectionStop(
-         direction,
-         direction==1 ? entry-protectionDistance : entry+protectionDistance);
+      // V3.190 S3: risk must be measured against the ACTUAL stop for this
+      // setup. This previously used the TRAILING distance, which understated
+      // the real entry->stop risk by two thirds (7 pips vs a 21-pip stop) and
+      // would be wrong again in a different way once S03 makes the stop
+      // variable. Prefer the caller's real sl; fall back to the resolved
+      // preset distance only if no usable stop was supplied.
+      double protectionSL=sl;
+
+      if(protectionSL<=0.0 ||
+         (direction==1 && protectionSL>=entry) ||
+         (direction==-1 && protectionSL<=entry))
+      {
+         double protectionDistance=
+            ProtectionPriceDistance(ResolvedPresetStopPips());
+         protectionSL=RoundProtectionStop(
+            direction,
+            direction==1 ? entry-protectionDistance : entry+protectionDistance);
+      }
       double candidatePnL=0.0;
       if(!OrderCalcProfit(orderType,_Symbol,candidate,entry,protectionSL,candidatePnL))
       {
@@ -7264,7 +7445,7 @@ double CapSetupVolumeForCentSafety(int direction,
          candidate=NormalizeVolumeDown(permitted);
          if(candidate<minVol-1e-12)
          {
-            Log("LIVE CENT PARITY BLOCK | 50-pip risk="+
+            Log("LIVE CENT PARITY BLOCK | entry->stop risk="+
                 DoubleToString(riskPct,2)+"% exceeds max "+
                 DoubleToString(InpCentMaxRiskPerSetupPct,2)+"% and normalized lot is below minimum");
             return 0.0;
@@ -7303,7 +7484,7 @@ double CapSetupVolumeForCentSafety(int direction,
 
       Log("LIVE CENT PARITY APPROVED | candidate="+
           DoubleToString(candidate,VolumeDigits())+
-          " | 50-pip risk="+DoubleToString(candidateRisk,2)+" "+
+          " | entry->stop risk="+DoubleToString(candidateRisk,2)+" "+
           AccountInfoString(ACCOUNT_CURRENCY)+
           " ("+DoubleToString(riskPct,2)+"%)"+
           " | margin="+DoubleToString(candidateMargin,2)+
@@ -9214,7 +9395,9 @@ bool PlacePersistentLayer(PersistentReadySetup &setup,
    double tp=InpUseTakeProfit
              ? BrokerSafeExecutionTP(setup.direction,estimatedEntry,requestedTP)
              : 0.0;
-   double exactDistance=ProtectionPriceDistance(InpPresetStopLossPips);
+   // V3.190 S3: resolved stop distance, so an ATR-derived stop is the one
+   // actually submitted (and the one sizing is computed against).
+   double exactDistance=ProtectionPriceDistance(ResolvedPresetStopPips());
    double exactSL=RoundProtectionStop(
       setup.direction,
       setup.direction==1 ? estimatedEntry-exactDistance
@@ -10474,7 +10657,9 @@ bool BuildForcedZeroConfluenceMarketPlan(PersistentReadySetup &setup,LayerPlan &
 
    int direction=setup.direction;
    double marketPrice=(direction==1)?tick.ask:tick.bid;
-   double exactDistance=ProtectionPriceDistance(InpPresetStopLossPips);
+   // V3.190 S3: resolved stop distance, so an ATR-derived stop is the one
+   // actually submitted (and the one sizing is computed against).
+   double exactDistance=ProtectionPriceDistance(ResolvedPresetStopPips());
 
    setup.structuralSL=RoundProtectionStop(
       direction,
@@ -12266,6 +12451,40 @@ int OnInit()
    ArrayResize(g_zcM5ReclaimRates,0);
    ArrayResize(g_exitExecutionStates,0);
 
+   // V3.190 S3: create the ATR handle once. iATR() per tick is exactly the
+   // kind of cost the tick handler must not carry.
+   g_geometryATRHandle=INVALID_HANDLE;
+   g_geometryATRValue=0.0;
+   g_geometryATRBar=0;
+
+   if(InpUseATRGeometry)
+   {
+      g_geometryATRHandle=iATR(_Symbol,InpATRTimeframe,MathMax(1,InpATRPeriod));
+
+      if(g_geometryATRHandle==INVALID_HANDLE)
+      {
+         Log("V3.190 S3 ATR HANDLE FAILED"+
+             " | timeframe="+EnumToString(InpATRTimeframe)+
+             " | period="+IntegerToString(MathMax(1,InpATRPeriod))+
+             " | error="+IntegerToString(GetLastError())+
+             " | falling back to fixed-pip geometry");
+      }
+      else
+      {
+         RefreshGeometryATR();
+         Log("V3.190 S3 ATR GEOMETRY ENABLED"+
+             " | timeframe="+EnumToString(InpATRTimeframe)+
+             " | period="+IntegerToString(MathMax(1,InpATRPeriod))+
+             " | stop x"+DoubleToString(InpATRStopMultiplier,2)+
+             " (floor "+DoubleToString(InpATRStopFloorPips,1)+
+             "p / ceiling "+DoubleToString(InpATRStopCeilingPips,1)+"p)"+
+             " | trail x"+DoubleToString(InpATRTrailMultiplier,2)+
+             " (floor "+DoubleToString(InpATRTrailFloorPips,1)+"p)"+
+             " | arm x"+DoubleToString(InpATRArmMultiplier,2)+
+             " | geometry frozen per position at open");
+      }
+   }
+
    ApplyPremiumChartTheme();
 
    trade.SetExpertMagicNumber(InpMagicNumber);
@@ -12787,6 +13006,14 @@ void OnDeinit(const int reason)
        ", campaign setups="+IntegerToString(g_campaignSetups)+
        ", day lock="+g_dayLockReason+".");
    EventKillTimer();
+
+   // V3.190 S3: release the cached ATR handle.
+   if(g_geometryATRHandle!=INVALID_HANDLE)
+   {
+      IndicatorRelease(g_geometryATRHandle);
+      g_geometryATRHandle=INVALID_HANDLE;
+   }
+
    SaveState();
    ClearHistoricalMarkers();
    ObjectsDeleteAll(0,PREFIX);
