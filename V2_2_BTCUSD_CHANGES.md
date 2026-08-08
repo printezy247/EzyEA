@@ -1129,3 +1129,75 @@ in place — the next test should report it.
 | `STAGE0_BASELINE.set` / `DIAGNOSTIC_FIRSTPASS.set` need no new pin | ✅ both already set `InpAutoCalibrateSpreadCap=false`, so the calibration branch (and its ceiling) never executes in either control arm |
 | **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
 | **Fix validated by a real run** | ❌ **no — the ceiling-decoupling is reasoned from the exact number (`120.0`) observed in the user's own journal, not yet re-tested** |
+
+---
+
+## S08 — ATR-adaptive stop/trail geometry turned on by default
+
+**The ceiling fix worked.** The next test run confirmed it: `SPREAD REJECTED` went from
+229,027 to **0**, and the run went from 0 deployments to `deployed=312, LIVE=305,
+completed=305`. The deployment-gate bug across S06/S07 is fully resolved — the EA now
+places and manages real trades on `BTCUSD.sc`.
+
+That same run surfaced the next problem: `TOTAL SETUPS: 528 | wins=56 | losses=403 |
+flat=69` — a **~12% win rate**. The user confirmed this run used the plain compiled
+defaults, no `.set` loaded (they don't write code and asked to receive a ready-to-run `.mq5`
+going forward rather than instructions to hand-edit `.set` files — every fix from here on
+should be a compiled-default change, not a `.set`-only one).
+
+At compiled defaults, `InpUseATRGeometry=false`, so every stop was a flat
+`InpPresetStopLossPips=21` "strategy pips." `StrategyPipSize()` returns `$1` for BTC — the
+file's own long-standing comment only ever worked this out for gold ("on XAU, one strategy
+pip is 0.10 price"), so a BTC "21-pip stop" is a flat **$21** stop on a symbol trading around
+$65,000 with $10-40 of noise on a single M5 candle (visible directly in the user's own
+chart screenshot). A stop that tight relative to ordinary noise, not a wrong directional
+signal, is the most likely single explanation for a win rate this low.
+
+### Fix
+
+No new code was needed — V3.190 already built ATR-adaptive geometry (`InpUseATRGeometry`,
+`ResolveATRGeometryPips()`) for the analogous gold problem (Asia-session ATR a third of New
+York's). Two compiled-default changes in this file only (V3.190/V2.1b keep the gold-proven
+fixed-pip defaults untouched):
+
+- `InpUseATRGeometry`: `false` → **`true`**.
+- `InpATRStopCeilingPips`: `35.0` → **`500.0`**.
+
+The ceiling change matters as much as turning the switch on. `ResolveATRGeometryPips()`
+computes `Clamp(atrPips * InpATRStopMultiplier, floor, ceiling)` — a gold-sized ceiling of 35
+left in place would have silently clamped the ATR-derived BTC stop straight back down to
+"too tight," the identical bug shape S07 already found and fixed once for the spread cap.
+500 is deliberately generous (a BTC M5 ATR would need to exceed roughly $312 before it ever
+binds) so it acts as a safety backstop against a runaway ATR reading, not an everyday clamp.
+`InpATRStopFloorPips` (12.0) is left unchanged — BTC's ATR is expected to sit well above it,
+so it was never the operative constraint.
+
+`RECOMMENDED.set`'s existing section 1 already reasoned through this exact scaling problem
+independently (pip = $1 on BTC vs $0.10 on gold, "multiply gold's flat pip counts by 10") and
+sets its own more specific `InpATRStopCeilingPips=350`; that number stands when the `.set` is
+loaded (`.set` values override compiled defaults) and is not disturbed by this stage — a
+short cross-reference comment was added there instead so the two numbers don't look like an
+unexplained conflict later.
+
+### `.set` file changes
+
+`STAGE0_BASELINE.set` gained the S08 polarity-exception pin (`InpUseATRGeometry=false`,
+`InpATRStopCeilingPips=35.0`), same pattern as S06/S07, so the control arm still reproduces
+plain fixed-pip gold/V2.1b behaviour exactly.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Brace / paren / bracket balance | ✅ `{}` 937/937 · `()` 6400/6400 · `[]` 1187/1187, residual 0 (comment + default-value only change, no structural edit) |
+| No function signature or control-flow changed | ✅ only two `input` default values changed; `ResolveATRGeometryPips()`, `RefreshGeometryATR()`, `CurrentGeometryATR()` untouched |
+| `STAGE0_BASELINE.set` reproduces pre-S08 behaviour | ✅ pins both changed defaults back to their old values |
+| Every `.set` input name resolves to a real declaration | ✅ script-checked: `RECOMMENDED` 76, `STAGE0_BASELINE` 8, `DIAGNOSTIC_FIRSTPASS` 74 entries, zero missing |
+| **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
+| **Fix validated by a real run** | ❌ **no — reasoned from the file's own documented pip-to-dollar conversion and the observed noise scale in the user's chart, not yet re-tested** |
+
+**Next test:** re-pull, recompile with no `.set` needed, and re-run. Read the `V2.2 BTC
+SPREAD AUTO-CALIBRATION COMPLETE` line for the real measured spread (still open from S07),
+and this time also check the win/loss split and net profit — if the win rate is still very
+low with ATR-adaptive stops active, the geometry scale was not the (whole) story and the
+next place to look is the entry/direction signal logic itself.

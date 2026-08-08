@@ -223,7 +223,7 @@
 //  rule lives in ProcessDirectZeroConfluenceTriggers(). See           |
 //  V2_1b_CHANGES.md.                                                  |
 //                                                                    |
-//  V2.2 BTC STAGE SUMMARY (S01-S07)                                   |
+//  V2.2 BTC STAGE SUMMARY (S01-S08)                                   |
 //                                                                    |
 //  Incremental build on V2.1b. This is a PORTABILITY AND BUGFIX pass, |
 //  not a strategy change. Scope: make the EA behave correctly on      |
@@ -385,6 +385,29 @@
 //      static (non-calibrating) branch.                               |
 //      Inputs: InpSpreadCalibrationCeilingPoints                      |
 //                                                                    |
+//  S08 ATR-ADAPTIVE STOP/TRAIL GEOMETRY TURNED ON BY DEFAULT           |
+//      A real test run at compiled defaults (spread gate now fixed,   |
+//      312 deployed / 305 completed) came back with a 12% win rate    |
+//      (56/403/69). InpUseATRGeometry was still false, so every       |
+//      stop was a flat InpPresetStopLossPips=21 "strategy pip" -      |
+//      and StrategyPipSize() is $1 for BTC (the file's own comment    |
+//      only ever worked this out for XAU: "one strategy pip is 0.10   |
+//      price"), so that is a flat $21 stop on a ~$65,000 symbol       |
+//      with $10-40 of noise per single M5 candle. No code was        |
+//      needed - V3.190's existing ATR geometry (built for gold's      |
+//      Asia-vs-NY ATR swing) already derives stop/trail/arm from      |
+//      live ATR instead of a frozen constant. Turned on by default    |
+//      in THIS file only; V3.190/V2.1b keep it off (gold-proven       |
+//      fixed-pip behaviour, not touched).                             |
+//      InpATRStopCeilingPips raised 35 -> 500: the ceiling clamps     |
+//      atrPips*multiplier, so a gold-sized ceiling left in place      |
+//      would have silently re-imposed the same "too tight for BTC"    |
+//      bug this stage exists to fix - the identical shape of bug      |
+//      S07's spread ceiling had. 500 is a safety backstop (needs a    |
+//      BTC M5 ATR above ~$312 to ever bind), not an everyday clamp.   |
+//      Inputs: InpUseATRGeometry (default TRUE here, FALSE            |
+//              elsewhere), InpATRStopCeilingPips (500.0, was 35.0)    |
+//                                                                    |
 //  BASE NOTE: this file descends from the V3.176 line, NOT from the   |
 //  separate V3.180 PARITY_HARDENED branch. It does not contain the    |
 //  V3.180 P01-P13 parity fixes. NowMs() and TradeRetcodePartial()     |
@@ -392,7 +415,7 @@
 //  were never present in this lineage; they were not removed.         |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "2.202"
+#property version   "2.203"
 
 #include <Trade/Trade.mqh>
 
@@ -1067,7 +1090,21 @@ input bool   InpBreakevenAfterPartial          = true;
 
 // V3.190 S3: master switch. Default false = S01 fixed-pip geometry.
 // RECOMMENDED true.
-input bool   InpUseATRGeometry                 = false;
+//
+// V2.2 BTC S08: turned ON by default in this file only (V3.190/V2.1b keep
+// false, the gold-proven fixed-pip behaviour). WHY: a real test run at the
+// compiled defaults (InpUseATRGeometry=false, so a flat InpPresetStopLossPips
+// = 21 "strategy pips") produced a 12% win rate (56 wins / 403 losses / 69
+// flat out of 528 setups). StrategyPipSize() returns $1 for BTC (comment
+// above literally documents "on XAU, one strategy pip is 0.10 price" - it
+// was never re-derived for BTC's completely different absolute scale), so
+// that 21-pip preset is a flat $21 stop on a symbol trading around $65,000
+// with $10-40 of noise per single M5 candle - tight enough that ordinary
+// noise, not a wrong signal, is the most likely explanation for the low win
+// rate. ATR geometry already existed in this file for exactly this problem
+// (built to handle gold's Asia-vs-NY ATR swing) and needed no new code, only
+// turning on and rescaling its ceiling - see InpATRStopCeilingPips below.
+input bool   InpUseATRGeometry                 = true;
 input int    InpATRPeriod                      = 14;
 input ENUM_TIMEFRAMES InpATRTimeframe          = PERIOD_M5;
 // V3.190 S3: stop distance = ATR * this, clamped to the floor/ceiling below.
@@ -1080,7 +1117,15 @@ input double InpATRTrailMultiplier             = 0.55;
 // V3.190 S3: arm threshold = ATR * this.
 input double InpATRArmMultiplier               = 0.35;
 input double InpATRStopFloorPips               = 12.0;
-input double InpATRStopCeilingPips             = 35.0;
+// V2.2 BTC S08: was 35.0 (gold-scaled). This is a CEILING, not the enforced
+// value - ResolveATRGeometryPips() computes Clamp(atrPips*multiplier, floor,
+// ceiling), so a gold-sized ceiling here would silently re-impose the exact
+// same "stop too tight for BTC" bug this stage exists to fix, the same shape
+// of bug S07's spread ceiling had. Raised generously so it acts as a genuine
+// safety backstop against a runaway ATR reading, not an everyday clamp - a
+// BTC M5 ATR would need to exceed roughly $312 (500/1.60) before this ever
+// binds.
+input double InpATRStopCeilingPips             = 500.0;
 input double InpATRTrailFloorPips              = 5.0;
 
 //------------------------- V3.190 STAGE 4 ---------------------------

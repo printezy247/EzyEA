@@ -74,3 +74,16 @@ InpForceMinimumBaseSizing=false
 ; static-cap guesses failed on BTCUSD.sc); pin it FALSE here so this control
 ; arm enforces the plain static cap exactly as V2.1b/gold always have.
 InpAutoCalibrateSpreadCap=false
+;
+; ---------------------------------------------------------------------------
+; S08 (added after S07) - InpUseATRGeometry / InpATRStopCeilingPips
+; ---------------------------------------------------------------------------
+; Same polarity exception again: InpUseATRGeometry DEFAULTS TO TRUE in this
+; file (a flat 21-pip = $21 stop on BTC proved far too tight - 12% win rate
+; on a real test run), with InpATRStopCeilingPips raised 35 -> 500 so that
+; ceiling cannot silently clamp the ATR-derived stop back down to a
+; gold-sized figure. Pin both back to their pre-S08 values here so this
+; control arm runs the plain fixed-pip geometry exactly as V2.1b/gold always
+; have.
+InpUseATRGeometry=false
+InpATRStopCeilingPips=35.0
