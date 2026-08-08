@@ -1,0 +1,37 @@
+; EzyMap Scalp Mastery V2.1a - EzyMap_V2_1a_STAGE1_SESSION.set
+; STAGE 1 - session timing score only. The confluence engine is ON and the
+; session is its ONLY active source, so ConfluenceScore() is exactly the
+; session score and the threshold reads directly against the five session
+; values below. Cumulative: S01.
+;
+; Only the V2.1a S01-S02 inputs are listed. Load this ON TOP of your
+; V2.0 working set - every other input keeps its current value.
+;
+; InpVolTimeframe=5 is PERIOD_M5 (inert at this stage).
+;
+; BEFORE TRUSTING THIS RUN: check the "V2.1a CONFLUENCE ENGINE ENABLED" init
+; line and any "V2.1a CONFLUENCE" deployment line. The hour they print is
+; BROKER SERVER time. If your broker runs GMT+2/+3 the London open is at 09
+; or 10, not 08, and these three hour inputs must be shifted to match.
+;
+InpUseConfluenceScoring=true
+InpMinConfluenceScore=0.45
+InpScoreSession=true
+InpLondonOpenHour=8
+InpNYOpenHour=13
+InpNYCloseHour=21
+InpSessionWeight=1.0
+InpOverlapSessionScore=1.0
+InpSingleSessionScore=0.65
+InpAsiaSessionScore=0.35
+InpDeadZoneScore=0.15
+InpScoreVolatilityRegime=false
+InpVolATRPeriod=14
+InpVolTimeframe=5
+InpVolPercentileLookback=500
+InpVolLowPercentile=20.0
+InpVolHighPercentile=90.0
+InpVolatilityWeight=1.0
+InpVolNormalScore=1.0
+InpVolExtremeScore=0.15
+InpHardBlockExtremeVol=false
