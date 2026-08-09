@@ -37,7 +37,7 @@
 //| can be tested and trusted on its own before adding it.            |
 //+------------------------------------------------------------------+
 #property copyright "EzyScalp"
-#property version   "1.03"
+#property version   "1.04"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -81,6 +81,46 @@ input group "=== Daily Risk ==="
 // genuinely a write-off.
 input double InpDailyLossStopPct   = 75.0;
 input bool   InpCloseAllAtDailyStop = false;
+
+//====================== ORDER-RATE THROTTLE ============================
+// v1.04: added after reviewing a different, unrelated EA of the user's
+// (EzyMap V3.184 "EVERY_ZERO_CONF_LEVEL / NO_ENTRY_GOVERNORS") whose 100ms
+// unconditional retry-until-filled loop, run independently across up to 64
+// simultaneously tracked signal levels, could burst well over 100 order
+// requests/second to the broker during a fast market. The user confirmed
+// this is what triggered their broker's "server problem" alert and cost
+// real capital - not a broker outage, entry spamming. That EA had per-
+// direction and per-campaign POSITION caps, but nothing capping REQUEST
+// RATE itself, which is the thing a broker actually polices.
+//
+// This EA does not have a retry-until-filled loop (a failed send is simply
+// logged and left for the next bar), so it was not structurally exposed to
+// that specific failure mode - but a single, unconditional, GLOBAL floor on
+// time between any two order requests (regardless of how many signal
+// sources exist) is cheap insurance worth having from day one, and the
+// right place to enforce it going forward as more entry paths are added
+// (e.g. the Phase 2 news-breakout module, which WILL need its own retry
+// logic once built).
+input group "=== Order-Rate Throttle ==="
+input int    InpMinMsBetweenOrderRequests = 250;
+
+double g_lastOrderRequestMs = 0;
+
+// Every order-SENDING call site (open, modify, close) must check this
+// first. Emergency full-book closes (the daily circuit breaker) are
+// deliberately exempt - see CloseAllPositions() - because delaying a
+// protective close to respect a rate floor would be worse than the rate
+// floor is protecting against.
+bool OrderRequestThrottleOK()
+{
+   double nowMs=(double)GetTickCount64();
+   if(g_lastOrderRequestMs>0.0 &&
+      nowMs-g_lastOrderRequestMs<(double)MathMax(0,InpMinMsBetweenOrderRequests))
+      return false;
+
+   g_lastOrderRequestMs=nowMs;
+   return true;
+}
 
 //====================== SPREAD GUARD (auto-calibrating) ===============
 // Ported concept from the old EA's hardest-won lesson: a hand-guessed
@@ -408,6 +448,11 @@ bool DailyRiskCapacityAvailable()
    return !g_dayTradingLocked;
 }
 
+// Deliberately NOT gated by OrderRequestThrottleOK(): this only runs once,
+// when the daily circuit breaker trips, and every open position needs to
+// close as fast as possible at that point - delaying a protective close to
+// respect a rate floor would be worse than the rate floor is protecting
+// against.
 void CloseAllPositions()
 {
    for(int p=PositionsTotal()-1;p>=0;p--)
@@ -632,6 +677,9 @@ void TryOpenPosition()
       return;
    }
 
+   if(!OrderRequestThrottleOK())
+      return; // global rate floor - see the Order-Rate Throttle section
+
    string comment="EZS "+IntegerToString(direction==1?1:-1)+" "+
                   TimeToString(TimeCurrent(),TIME_DATE|TIME_MINUTES);
 
@@ -700,6 +748,9 @@ void ManagePositions()
 
       if(!improves)
          continue;
+
+      if(!OrderRequestThrottleOK())
+         continue; // global rate floor - try this position again next tick
 
       double currentTP=PositionGetDouble(POSITION_TP);
       bool sent=trade.PositionModify(ticket,candidateSL,currentTP);
@@ -827,7 +878,10 @@ int OnInit()
        " | daily risk stop="+DoubleToString(InpDailyLossStopPct,1)+"%"+
        " | signal timeframe="+EnumToString(InpSignalTimeframe)+
        " | channel lookback="+IntegerToString(InpChannelLookbackBars)+
-       " | trend filter="+string(InpUseTrendFilter?"ON":"OFF"));
+       " | trend filter="+string(InpUseTrendFilter?"ON":"OFF")+
+       " | min ms between order requests="+IntegerToString(InpMinMsBetweenOrderRequests));
+
+   g_lastOrderRequestMs=0;
 
    return INIT_SUCCEEDED;
 }

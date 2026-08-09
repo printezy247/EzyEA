@@ -1,5 +1,36 @@
 # EzyScalp XAUUSD FRESH V1 — Phase 1
 
+## v1.04 update — order-rate throttle (permanent safeguard)
+
+Reviewed a different, older EA of the user's (`EzyMap V3.184
+EVERY_ZERO_CONF_LEVEL / NO_ENTRY_GOVERNORS`) that had previously caused a
+real broker "server problem" alert and cost real capital. Root cause,
+confirmed by the user: **entry spamming, not an actual broker outage**.
+That file retried every signal every 100ms, unconditionally, until filled
+(`InpDeploymentRetryIntervalMs=100`), and tracked up to **64 independent
+zero-confluence levels simultaneously**, each with its own separate retry
+timer. During a fast market where several levels trigger at once, that
+design could burst well over 100 order requests/second at the broker —
+nothing capped *request rate*, only position counts.
+
+This EA never had a retry-until-filled loop (a failed send is just logged
+and left for the next bar), so it wasn't structurally exposed to that
+exact failure mode — but a global floor on request rate is cheap,
+permanent insurance worth having from day one, especially before Phase 2
+(news breakout) adds order logic that WILL need its own retries.
+
+**Added**: `InpMinMsBetweenOrderRequests` (default 250ms) — a single,
+global, unconditional minimum gap between *any* two order requests
+(open, modify, or... not close, see below), checked via
+`OrderRequestThrottleOK()` before every `trade.Buy`/`Sell`/`PositionModify`
+call in the file, regardless of which signal source triggered it.
+
+**Deliberately exempt**: `CloseAllPositions()` (the daily circuit
+breaker's emergency close-everything call) is NOT throttled — delaying a
+protective close to respect a rate floor would be worse than the rate
+floor is protecting against.
+
+
 ## v1.03 update
 
 v1.02 produced 84 closed trades / 7.73 lots on the $1000 test day, against
