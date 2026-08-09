@@ -1,0 +1,99 @@
+# EzyScalp XAUUSD FRESH V1 — Phase 1
+
+A clean-slate rebuild for XAUUSD, started after two weeks of patching
+`EzyMap_V2_1b`/`V2_2` revealed the old file's accumulated complexity
+(confidence-tier lot scaling, three separate layer-builders, a
+zero-confluence bypass path, ATR geometry bolted onto a fixed-pip base) was
+harder to reason about than the strategy itself. **Nothing is carried over
+from that file** — this is a fresh design, built directly from the design
+discussion and your three explicit answers:
+
+1. **Style**: scalping — frequent, small, fast trades.
+2. **Objective**: minimum daily drawdown, maximum daily lot volume traded —
+   not a per-trade risk-percentage target.
+3. **Risk**: no specific risk-per-trade; a single daily circuit breaker at
+   75% (deliberately loose, a backstop against a catastrophic day, not a
+   tight governor).
+4. **News**: trade it deliberately (breakout mode) — **not yet built**, see
+   "What's not in this file" below.
+
+## Sizing — exactly as you specified
+
+`LotForEquity()`: 100 (USD or USC) equity uses 0.01 lot. An account **below**
+100 still sizes as if it had 100 (a floor, never a below-minimum lot). An
+account **above** 100 scales up linearly from that same 100/0.01 anchor.
+Flat and proportional — no confidence tier, no per-signal multiplier, no
+risk-percentage/stop-distance calculation. This is the exact mechanism that
+caused the live lot-doubling bug on the old EA, and it is deliberately
+absent here from day one rather than removed after the fact.
+
+`InpBaseEquity` and `InpBaseLot` control the 100/0.01 anchor if you ever
+want to change it.
+
+## What Phase 1 actually does
+
+- **Entry**: a Donchian-style breakout — price clears the highest high /
+  lowest low of the last `InpChannelLookbackBars` CLOSED bars (default 20,
+  on M5) by at least `InpBreakoutATRFraction` (default 0.15) of the live
+  ATR. One decision per bar. An optional H1 EMA trend filter (default ON)
+  refuses counter-trend breakouts outright — gold has been a choppy,
+  news-driven correction through 2026 (Fed-leadership uncertainty,
+  geopolitical spikes), and a pure two-directional breakout scalper would
+  get chopped up trading against that structure.
+- **Exit**: stop = live ATR × `InpATRStopMultiplier` (default 1.2), target =
+  stop distance × `InpRewardRiskMultiple` (default 1.2R). Both are
+  ATR-relative, never a fixed pip guess — that guess-the-instrument's-scale
+  mistake is the single most expensive lesson from the old file.
+- **Trail**: arms only once the position's *real* floating profit
+  (`POSITION_PROFIT`, which already nets out the spread since a BUY closes
+  at bid and a SELL at ask) is positive — not just a favourable price move,
+  which can still be a net loss once spread is subtracted. This is the same
+  principle you asked for on the old EA's FIXEDEXIT test, built in from day
+  one this time.
+- **Spread guard**: auto-calibrating from the symbol's own real spread
+  (median observed × multiplier), the same mechanism that fixed the old
+  EA's zero-trade bug — never a hand-guessed static cap.
+- **Daily circuit breaker**: stops opening new trades once today's equity
+  drawdown hits `InpDailyLossStopPct` (default 75%), resets on the next
+  broker day.
+- **Sizing/account handling**: tester-safe cent-account detection — a
+  Strategy Tester deposit is never divided just because the symbol name or
+  account currency looks like a cent account, the same fix the old EA
+  needed.
+
+## What's NOT in this file yet (Phase 2)
+
+The **news-breakout module** — placing a straddle around scheduled
+high-impact releases (NFP, FOMC, CPI, Fed speakers) using MT5's built-in
+Economic Calendar (`CalendarValueHistory`) — is not built yet. Left out of
+this first delivery so the sizing/risk/baseline-entry skeleton can be
+tested and trusted on its own before adding it. Say the word once you've
+run this and it's behaving sensibly, and Phase 2 gets added on top without
+touching what's already here.
+
+## Verification done so far
+
+- Brace/paren/bracket balance checked with the same tokenizer script used
+  throughout the old EA's work: `{}` 45/45, `()` 326/326, `[]` 20/20,
+  residual 0.
+- Every function-call pattern (`trade.Buy`/`trade.Sell`, `iATR`, `iMA`,
+  `CopyBuffer`, `CopyRates`, `PositionGetTicket` loop, the `Upper()` helper)
+  is copied verbatim from patterns already proven to compile and run live in
+  the old EA — nothing here is untested syntax.
+- **Not verified**: there is no MQL5 toolchain in this environment, so this
+  has never actually been compiled. This is a fresh file with roughly 500
+  lines of new logic — please compile with MetaEditor (F7) and send me any
+  errors/warnings if it doesn't come back clean on the first try.
+
+## How to test
+
+1. Drop `EzyScalp_XAUUSD_FRESH_V1.mq5` into `MQL5\Experts\Advisors`,
+   compile (F7).
+2. Run it in the Strategy Tester on XAUUSD or XAUUSD.sc, M5, "Every tick
+   based on real ticks."
+3. Read the `EzyScalp XAUUSD FRESH V1: INIT` line at attach — confirms
+   account profile, base equity/lot, daily risk stop, and trend filter
+   state.
+4. Watch for `SPREAD AUTO-CALIBRATION COMPLETE` a short way into the run,
+   then `ENTRY SENT`/`ENTRY FAILED` lines as signals fire.
+5. No `.set` file is needed — every default above is compiled in.
