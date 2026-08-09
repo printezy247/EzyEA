@@ -309,6 +309,38 @@
 //      Inputs: none new. InpGoodSetupLotPer100/InpQualitySetupLotPer100|
 //      remain declared but are no longer read by ConfidenceSetupLot().|
 //                                                                    |
+//  S06 EXIT MODIFY BACKOFF (proactive - checked after the identical   |
+//      bug was found and fixed live on the EzyMap V2.2 BTC line, S11  |
+//      there)                                                         |
+//      A full-day live run on BTCUSD.sc (the V2.2 sibling) showed the |
+//      broker rejecting the same trailing-SL modify with "Invalid     |
+//      stops" repeatedly, with no correction, because                 |
+//      FixedTrailSLBrokerValid()/LatestBrokerValidExitSL()/           |
+//      BrokerTrailMinimumDistance() only require the broker-reported  |
+//      SYMBOL_TRADE_STOPS_LEVEL/FREEZE_LEVEL plus a small fixed 2-5   |
+//      POINT cushion, which can be too tight if the broker's real     |
+//      enforced minimum is wider than what those two symbol           |
+//      properties report. Diffed this file's                          |
+//      RequestSynchronizedPositionModify()/FixedTrailSLBrokerValid()/ |
+//      LatestBrokerValidExitSL()/BrokerTrailMinimumDistance() against |
+//      the pre-S11 EzyMap V2.2 BTC file and confirmed they are byte-  |
+//      identical, so the same latent bug applies here even though it  |
+//      has not (yet) been observed live on gold - a fixed few-point   |
+//      cushion is a more proportionate buffer on XAUUSD's price scale |
+//      than on BTC's, but the retry-forever-with-no-correction        |
+//      failure mode is identical if it is ever still too tight (a     |
+//      fast news spike, a widened broker spread). Fixed proactively   |
+//      rather than waiting for it to happen live.                     |
+//      FIX: identical to the V2.2 BTC S11 fix - a per-ticket           |
+//      consecutiveInvalidStops counter (ExitExecutionState) widens    |
+//      the required clearance by InpExitBackoffCushionStepPct% of the |
+//      CURRENT PRICE per consecutive failure and exponentially backs  |
+//      off the retry cooldown (both capped), resetting on success.    |
+//      Threaded through all three distance functions plus the pre-    |
+//      filter gate in ManageHybridTrailingPositions().                |
+//      Inputs: InpExitBackoffCushionStepPct, InpExitBackoffMaxSteps,  |
+//      InpExitBackoffCooldownCapMs.                                   |
+//                                                                    |
 //  BASE NOTE: this file descends from the V3.176 line, NOT from the   |
 //  separate V3.180 PARITY_HARDENED branch. It does not contain the    |
 //  V3.180 P01-P13 parity fixes. NowMs() and TradeRetcodePartial()     |
@@ -316,7 +348,7 @@
 //  were never present in this lineage; they were not removed.         |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "2.105"
+#property version   "2.106"
 
 #include <Trade/Trade.mqh>
 
@@ -1324,6 +1356,30 @@ input int    InpExitInvalidStopsCooldownMs       = 500;
 input int    InpExitExtraStopCushionPoints       = 5;
 input bool   InpExitLogFillSlippage              = true;
 
+// EXIT MODIFY BACKOFF - ported from the identical fix on the EzyMap V2.2
+// BTC line (S11 there), where a real live BTCUSD.sc run showed the broker
+// rejecting the SAME trailing-SL modify, on two tickets, roughly once per
+// second, continuously for the whole session ("Invalid stops" every
+// time). None of the cushion inputs above ever escalate on repeated
+// rejection - they are small, fixed POINT counts (2-5 points). This file
+// shares byte-identical RequestSynchronizedPositionModify()/
+// FixedTrailSLBrokerValid()/LatestBrokerValidExitSL()/
+// BrokerTrailMinimumDistance() code with the V2.2 BTC line (confirmed by
+// diff), so the same latent bug applies here too - on XAUUSD a 2-5 point
+// cushion is a more reasonable few-cent-to-dollar buffer than on BTC, but
+// if it is ever still too tight (a fast news spike, a widened broker
+// spread) the retry-forever-with-no-correction failure mode is identical.
+// Added proactively rather than waiting for it to happen live on gold.
+//
+// After each consecutive failure (broker reject OR the pre-send validity
+// check itself failing) for a given ticket, this widens the required
+// clearance by InpExitBackoffCushionStepPct% of the CURRENT price and
+// multiplies the retry cooldown, both capped. Resets to zero the moment a
+// modify is accepted.
+input double InpExitBackoffCushionStepPct  = 0.02;   // % of current price added per consecutive failure
+input int    InpExitBackoffMaxSteps        = 8;       // cap on how many failures keep widening the cushion
+input int    InpExitBackoffCooldownCapMs   = 15000;   // cap on the exponential retry backoff
+
 // Legacy compatibility inputs retained but hard-disabled in V2.009F.
 input bool   InpUseContinuationTrail           = false;
 input double InpTrailStartR                    = 1.50;
@@ -1729,6 +1785,12 @@ struct ExitExecutionState
    double lastRequestedSL;
    uint   lastModifyRetcode;
 
+   // EXIT MODIFY BACKOFF: consecutive rejections (broker or pre-send
+   // validity check) for this ticket's SL modify. Widens the required
+   // broker clearance and the retry cooldown on every failure; reset to 0
+   // the instant a modify is accepted. See InpExitBackoffCushionStepPct.
+   int    consecutiveInvalidStops;
+
    // V3.190 S2: volume requested on the in-flight close. 0.0 means the
    // request was a full close; a positive value marks it as a partial so the
    // deal handler can tell the two apart when the fill arrives.
@@ -1988,13 +2050,14 @@ void ManageHybridTrailingPositions(string context);
 int HybridTrailStateIndex(ulong ticket);
 int EnsureHybridTrailState(ulong ticket,int direction,double entry,double current,datetime positionTime,MqlTick &tick);
 double ReconstructTrailPeak(int direction,double entry,datetime positionTime,MqlTick &tick);
-double BrokerTrailMinimumDistance();
-double BrokerCompatibleTrailSL(int direction,double current,double virtualStop);
+double ExitBackoffCushionPrice(double referencePrice,int backoffSteps);
+double BrokerTrailMinimumDistance(double current,int backoffSteps);
+double BrokerCompatibleTrailSL(int direction,double current,double virtualStop,int backoffSteps);
 int ExitExecutionStateIndexByTicket(ulong ticket);
 int ExitExecutionStateIndexByIdentifier(long positionIdentifier);
 int EnsureExitExecutionState(ulong ticket);
 bool ExitCloseInProgress(ulong ticket);
-double LatestBrokerValidExitSL(int direction,double virtualStop,MqlTick &tick);
+double LatestBrokerValidExitSL(int direction,double virtualStop,MqlTick &tick,int backoffSteps);
 bool RequestSynchronizedPositionModify(ulong ticket,
                                        int direction,
                                        double virtualStop,
@@ -3870,7 +3933,8 @@ double BrokerSafeExecutionTP(int direction,
 
 bool FixedTrailSLBrokerValid(int direction,
                              double currentPrice,
-                             double requestedSL)
+                             double requestedSL,
+                             int backoffSteps)
 {
    if(currentPrice<=0 || requestedSL<=0)
       return false;
@@ -3884,7 +3948,8 @@ bool FixedTrailSLBrokerValid(int direction,
    double minimumDistance=
       MathMax(_Point,
               ((double)MathMax(stopsLevel,freezeLevel)+
-               MathMax(0,InpExecutionStopCushionPoints))*_Point);
+               MathMax(0,InpExecutionStopCushionPoints))*_Point)+
+      ExitBackoffCushionPrice(currentPrice,backoffSteps);
 
    if(direction==1)
       return requestedSL<=currentPrice-minimumDistance+_Point*0.25;
@@ -4252,22 +4317,37 @@ int EnsureHybridTrailState(ulong ticket,
    return index;
 }
 
-double BrokerTrailMinimumDistance()
+// EXIT MODIFY BACKOFF: shared formula for the extra clearance added per
+// consecutive rejected modify on a ticket. Scales with the symbol's own
+// current price (percentage, not a fixed point count). Ported from the
+// identical fix on the EzyMap V2.2 BTC line (S11).
+double ExitBackoffCushionPrice(double referencePrice,int backoffSteps)
+{
+   int steps=MathMin(MathMax(0,backoffSteps),MathMax(0,InpExitBackoffMaxSteps));
+   if(steps<=0 || referencePrice<=0.0)
+      return 0.0;
+   return referencePrice*MathMax(0.0,InpExitBackoffCushionStepPct)/100.0*steps;
+}
+
+double BrokerTrailMinimumDistance(double current,int backoffSteps)
 {
    long stopsLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
    long freezeLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL);
    int cushion=MathMax(MathMax(0,InpExecutionStopCushionPoints),
                        MathMax(0,InpTrailBrokerCushionPoints));
 
-   return MathMax(_Point,
-                  ((double)MathMax(stopsLevel,freezeLevel)+cushion)*_Point);
+   double base=MathMax(_Point,
+                       ((double)MathMax(stopsLevel,freezeLevel)+cushion)*_Point);
+
+   return base+ExitBackoffCushionPrice(current,backoffSteps);
 }
 
 double BrokerCompatibleTrailSL(int direction,
                                double current,
-                               double virtualStop)
+                               double virtualStop,
+                               int backoffSteps)
 {
-   double minDistance=BrokerTrailMinimumDistance();
+   double minDistance=BrokerTrailMinimumDistance(current,backoffSteps);
    double allowed=(direction==1)?current-minDistance:current+minDistance;
    double candidate=(direction==1)
                     ? MathMin(virtualStop,allowed)
@@ -4364,7 +4444,8 @@ bool ExitCloseInProgress(ulong ticket)
 
 double LatestBrokerValidExitSL(int direction,
                                double virtualStop,
-                               MqlTick &tick)
+                               MqlTick &tick,
+                               int backoffSteps)
 {
    if(!SymbolInfoTick(_Symbol,tick))
       return 0.0;
@@ -4392,7 +4473,8 @@ double LatestBrokerValidExitSL(int direction,
       MathMax(
          ProtectionTickSize(),
          ((double)MathMax(stopsLevel,freezeLevel)+
-          cushion)*_Point);
+          cushion)*_Point)+
+      ExitBackoffCushionPrice(current,backoffSteps);
 
    double allowed=
       direction==1
@@ -4458,12 +4540,21 @@ bool RequestSynchronizedPositionModify(ulong ticket,
       (ulong)MathMax(0,InpExitModifyMinimumIntervalMs))
       return false;
 
+   // EXIT MODIFY BACKOFF: how many times IN A ROW has this ticket's modify
+   // been rejected (broker or pre-send check)? Feeds a widening clearance
+   // into both checks below, and an exponential retry cooldown further
+   // down, so a systematically-invalid modify backs off instead of
+   // hammering the server at a fixed rate forever. Ported from the
+   // identical fix on the EzyMap V2.2 BTC line (S11).
+   int backoffSteps=g_exitExecutionStates[stateIndex].consecutiveInvalidStops;
+
    MqlTick latestTick;
    double brokerSL=
       LatestBrokerValidExitSL(
          direction,
          virtualStop,
-         latestTick);
+         latestTick,
+         backoffSteps);
 
    if(brokerSL<=0.0)
       return false;
@@ -4471,13 +4562,25 @@ bool RequestSynchronizedPositionModify(ulong ticket,
    double current=
       direction==1 ? latestTick.bid : latestTick.ask;
 
-   if(!FixedTrailSLBrokerValid(direction,current,brokerSL))
+   if(!FixedTrailSLBrokerValid(direction,current,brokerSL,backoffSteps))
    {
+      int failCount=++g_exitExecutionStates[stateIndex].consecutiveInvalidStops;
+      int backoffCooldown=
+         (int)MathMin(
+            (double)MathMax(0,InpExitBackoffCooldownCapMs),
+            (double)MathMax(0,InpExitInvalidStopsCooldownMs)*
+            (double)(1<<MathMin(failCount,10)));
+
       g_exitExecutionStates[stateIndex].modifyCooldownUntilMs=
-         now+
-         (ulong)MathMax(
-            0,
-            InpExitInvalidStopsCooldownMs);
+         now+(ulong)backoffCooldown;
+
+      Log("V3.176 SYNCHRONIZED SL PRE-SEND REJECTED (backoff) | "+context+
+          " | purpose="+purpose+
+          " | ticket="+(string)ticket+
+          " | consecutive failures="+IntegerToString(failCount)+
+          " | widened clearance="+
+          DoubleToString(ExitBackoffCushionPrice(current,backoffSteps),_Digits)+
+          " | next retry in="+IntegerToString(backoffCooldown)+"ms");
       return false;
    }
 
@@ -4492,6 +4595,8 @@ bool RequestSynchronizedPositionModify(ulong ticket,
 
    if(accepted)
    {
+      g_exitExecutionStates[stateIndex].consecutiveInvalidStops=0;
+
       g_exitExecutionStates[stateIndex].modifyCooldownUntilMs=
          now+
          (ulong)MathMax(
@@ -4510,9 +4615,14 @@ bool RequestSynchronizedPositionModify(ulong ticket,
       return true;
    }
 
+   int failCount=++g_exitExecutionStates[stateIndex].consecutiveInvalidStops;
+
    int cooldown=
       code==TRADE_RETCODE_INVALID_STOPS
-      ? MathMax(0,InpExitInvalidStopsCooldownMs)
+      ? (int)MathMin(
+           (double)MathMax(0,InpExitBackoffCooldownCapMs),
+           (double)MathMax(0,InpExitInvalidStopsCooldownMs)*
+           (double)(1<<MathMin(failCount,10)))
       : MathMax(0,InpExitModifyMinimumIntervalMs);
 
    g_exitExecutionStates[stateIndex].modifyCooldownUntilMs=
@@ -4525,6 +4635,7 @@ bool RequestSynchronizedPositionModify(ulong ticket,
        " | Ask="+DoubleToString(latestTick.ask,_Digits)+
        " | virtualSL="+DoubleToString(virtualStop,_Digits)+
        " | submittedSL="+DoubleToString(brokerSL,_Digits)+
+       " | consecutive failures="+IntegerToString(failCount)+
        " | stopLevel="+
        IntegerToString(
           (int)SymbolInfoInteger(
@@ -5153,7 +5264,17 @@ void ManageHybridTrailingPositions(string context)
       // Push the ratcheted virtual stop out to the broker. The step filter
       // only throttles how often we talk to the server; it never permits a
       // backwards move because virtualStop itself is already monotonic.
-      double desiredSL=BrokerCompatibleTrailSL(direction,current,virtualStop);
+      // EXIT MODIFY BACKOFF: mirror the same widening clearance used inside
+      // RequestSynchronizedPositionModify() here, so this pre-filter agrees
+      // with the authoritative check instead of optimistically offering a
+      // desiredSL that the deeper check (correctly) rejects every time.
+      int exitStateIndex=ExitExecutionStateIndexByTicket(ticket);
+      int trailBackoffSteps=
+         exitStateIndex>=0
+         ? g_exitExecutionStates[exitStateIndex].consecutiveInvalidStops
+         : 0;
+
+      double desiredSL=BrokerCompatibleTrailSL(direction,current,virtualStop,trailBackoffSteps);
 
       bool improves=
          TrailStopImproves(direction,
@@ -5164,7 +5285,7 @@ void ManageHybridTrailingPositions(string context)
                            : _Point*0.25);
 
       if(improves && desiredSL>0.0 &&
-         FixedTrailSLBrokerValid(direction,current,desiredSL))
+         FixedTrailSLBrokerValid(direction,current,desiredSL,trailBackoffSteps))
       {
          double submittedSL=0.0;
          bool accepted=

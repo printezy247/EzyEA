@@ -55,6 +55,21 @@
 //  ATR multiple) are a reasonable first attempt at classic supply/   |
 //  demand zone theory, not a tuned/backtested parameter set - expect |
 //  to need iteration once you see real results.                     |
+//                                                                    |
+//  CORRECTION (proactive - checked after the identical bug was found |
+//  and fixed live on the FRESH V3/V4 BTCUSD siblings and on the      |
+//  EzyMap V2.2 BTC line): ManageHybridTrailingPositions() had NO     |
+//  cooldown between modify attempts at all, so a rejected trailing-  |
+//  SL modify would retry every single tick, forever, with no         |
+//  correction. This file inherited that code unchanged from FRESH V3 |
+//  (only PickDirectionLevels()/level detection was touched for the   |
+//  supply/demand experiment), so the same fix applies here: a per-   |
+//  ticket consecutiveInvalidStops counter (HybridTrailState) widens  |
+//  the required broker clearance and exponentially backs off the     |
+//  retry cooldown on every failure, both capped, resetting on        |
+//  success. Inputs: InpTrailModifyMinimumIntervalMs,                 |
+//  InpTrailBackoffCushionStepPct, InpTrailBackoffMaxSteps,           |
+//  InpTrailBackoffCooldownCapMs.                                     |
 //+------------------------------------------------------------------+
 //                                                                    |
 //  FRESH V3 - recreated verbatim from the user's own V3.116 file per |
@@ -163,7 +178,7 @@
 //     distances are ever wanted instead.                              |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "3.1"
+#property version   "3.1.1"
 
 #include <Trade/Trade.mqh>
 
@@ -715,6 +730,24 @@ input bool   InpReconstructTrailFromM1         = true;
 input int    InpVirtualTrailCloseDeviationPts  = 30;
 input int    InpTrailBrokerCushionPoints       = 2;
 
+// TRAIL MODIFY BACKOFF - checked proactively after the identical bug was
+// found and fixed live on the FRESH V3/V4 BTCUSD siblings and on the
+// EzyMap V2.2 BTC line: ManageHybridTrailingPositions() has NO cooldown
+// between modify attempts at all, so a rejected trailing-SL modify
+// retries every single tick, forever, with no correction. Confirmed
+// byte-identical FixedTrailSLBrokerValid()/BrokerTrailMinimumDistance()/
+// BrokerCompatibleTrailSL()/ManageHybridTrailingPositions() code with
+// FRESH V3's pre-fix state (this file is a copy of FRESH V3 with only
+// the supply/demand level detection changed), so the same latent bug
+// applies here too. InpTrailModifyMinimumIntervalMs adds the missing
+// floor; InpTrailBackoffCushionStepPct/MaxSteps/CooldownCapMs escalate
+// on repeated rejection - percentage of current price, not a fixed
+// point count, so the same setting is meaningful on both XAU and BTC.
+input int    InpTrailModifyMinimumIntervalMs   = 300;
+input double InpTrailBackoffCushionStepPct     = 0.02;
+input int    InpTrailBackoffMaxSteps           = 8;
+input int    InpTrailBackoffCooldownCapMs      = 15000;
+
 // Legacy compatibility inputs retained but hard-disabled in V2.009F.
 input bool   InpUseContinuationTrail           = false;
 input double InpTrailStartR                    = 1.50;
@@ -971,6 +1004,14 @@ struct HybridTrailState
    double   peakPrice;
    double   virtualStop;
    datetime positionTime;
+
+   // TRAIL MODIFY BACKOFF: consecutive rejected SL modifies for this
+   // ticket (initial preset install or trailing update, either counts -
+   // both write the same broker SL). Widens the required broker clearance
+   // and the retry cooldown on every failure; reset to 0 the instant a
+   // modify is accepted. See InpTrailBackoffCushionStepPct.
+   int      consecutiveInvalidStops;
+   ulong    modifyCooldownUntilMs;
 };
 
 // Journal statistics aggregate one completed trade per broker position id,
@@ -1134,8 +1175,9 @@ void ManageHybridTrailingPositions(string context);
 int HybridTrailStateIndex(ulong ticket);
 int EnsureHybridTrailState(ulong ticket,int direction,double entry,double current,datetime positionTime,MqlTick &tick);
 double ReconstructTrailPeak(int direction,double entry,datetime positionTime,MqlTick &tick);
-double BrokerTrailMinimumDistance();
-double BrokerCompatibleTrailSL(int direction,double current,double virtualStop);
+double TrailBackoffCushionPrice(double referencePrice,int backoffSteps);
+double BrokerTrailMinimumDistance(double current,int backoffSteps);
+double BrokerCompatibleTrailSL(int direction,double current,double virtualStop,int backoffSteps);
 bool ClosePositionAtVirtualTrail(ulong ticket,string context,double current,double stop,double peak);
 void PruneHybridTrailStates();
 void ResetDailyFrequencyCounter();
@@ -1923,7 +1965,8 @@ double BrokerSafeExecutionTP(int direction,
 
 bool FixedTrailSLBrokerValid(int direction,
                              double currentPrice,
-                             double requestedSL)
+                             double requestedSL,
+                             int backoffSteps)
 {
    if(currentPrice<=0 || requestedSL<=0)
       return false;
@@ -1937,7 +1980,8 @@ bool FixedTrailSLBrokerValid(int direction,
    double minimumDistance=
       MathMax(_Point,
               ((double)MathMax(stopsLevel,freezeLevel)+
-               MathMax(0,InpExecutionStopCushionPoints))*_Point);
+               MathMax(0,InpExecutionStopCushionPoints))*_Point)+
+      TrailBackoffCushionPrice(currentPrice,backoffSteps);
 
    if(direction==1)
       return requestedSL<=currentPrice-minimumDistance+_Point*0.25;
@@ -2019,6 +2063,8 @@ int EnsureHybridTrailState(ulong ticket,
    g_hybridTrailStates[index].peakPrice=current;
    g_hybridTrailStates[index].virtualStop=0.0;
    g_hybridTrailStates[index].positionTime=positionTime;
+   g_hybridTrailStates[index].consecutiveInvalidStops=0;
+   g_hybridTrailStates[index].modifyCooldownUntilMs=0;
 
    g_hybridTrailStates[index].peakPrice=
       ReconstructTrailPeak(direction,entry,positionTime,tick);
@@ -2026,22 +2072,36 @@ int EnsureHybridTrailState(ulong ticket,
    return index;
 }
 
-double BrokerTrailMinimumDistance()
+// TRAIL MODIFY BACKOFF: shared formula for the extra clearance added per
+// consecutive rejected modify on a ticket. Scales with the symbol's own
+// current price (percentage, not a fixed point count).
+double TrailBackoffCushionPrice(double referencePrice,int backoffSteps)
+{
+   int steps=MathMin(MathMax(0,backoffSteps),MathMax(0,InpTrailBackoffMaxSteps));
+   if(steps<=0 || referencePrice<=0.0)
+      return 0.0;
+   return referencePrice*MathMax(0.0,InpTrailBackoffCushionStepPct)/100.0*steps;
+}
+
+double BrokerTrailMinimumDistance(double current,int backoffSteps)
 {
    long stopsLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
    long freezeLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL);
    int cushion=MathMax(MathMax(0,InpExecutionStopCushionPoints),
                        MathMax(0,InpTrailBrokerCushionPoints));
 
-   return MathMax(_Point,
-                  ((double)MathMax(stopsLevel,freezeLevel)+cushion)*_Point);
+   double base=MathMax(_Point,
+                       ((double)MathMax(stopsLevel,freezeLevel)+cushion)*_Point);
+
+   return base+TrailBackoffCushionPrice(current,backoffSteps);
 }
 
 double BrokerCompatibleTrailSL(int direction,
                                double current,
-                               double virtualStop)
+                               double virtualStop,
+                               int backoffSteps)
 {
-   double minDistance=BrokerTrailMinimumDistance();
+   double minDistance=BrokerTrailMinimumDistance(current,backoffSteps);
    double allowed=(direction==1)?current-minDistance:current+minDistance;
    double candidate=(direction==1)
                     ? MathMin(virtualStop,allowed)
@@ -2173,24 +2233,75 @@ void ManageHybridTrailingPositions(string context)
          continue;
       }
 
-      double initialBrokerSL=BrokerCompatibleTrailSL(direction,current,initialVirtualStop);
+      // TRAIL MODIFY BACKOFF: this block used to call trade.PositionModify()
+      // on every tick with no cooldown at all whenever initialImproves was
+      // true - if the broker kept rejecting the same value, that meant one
+      // request per tick, forever (confirmed live on the BTCUSD sibling:
+      // ~45ms between attempts, i.e. roughly 20/second, sustained all
+      // day). The cooldown gate and backoffSteps below mirror the fix
+      // already applied to the trailing-update block further down, and to
+      // the analogous bug found on the EzyMap V2.2 BTC line.
+      ulong nowMsTrail=GetTickCount64();
+      int backoffSteps=g_hybridTrailStates[stateIndex].consecutiveInvalidStops;
+      double initialBrokerSL=BrokerCompatibleTrailSL(direction,current,initialVirtualStop,backoffSteps);
       bool initialImproves=currentSL<=0.0 ||
          (direction==1 ? initialBrokerSL>currentSL+_Point*0.25
                        : initialBrokerSL<currentSL-_Point*0.25);
-      if(initialImproves && initialBrokerSL>0.0 &&
-         FixedTrailSLBrokerValid(direction,current,initialBrokerSL))
+      bool initialCooldownElapsed=
+         nowMsTrail>=g_hybridTrailStates[stateIndex].modifyCooldownUntilMs;
+
+      if(initialImproves && initialBrokerSL>0.0 && initialCooldownElapsed)
       {
-         bool initialSent=trade.PositionModify(ticket,initialBrokerSL,currentTP);
-         uint initialCode=trade.ResultRetcode();
-         if(!initialSent || !TradeRetcodeAccepted(initialCode))
-            Log("PRESET 30P BROKER SL INSTALL FAILED | "+context+
+         if(!FixedTrailSLBrokerValid(direction,current,initialBrokerSL,backoffSteps))
+         {
+            int preFailCount=++g_hybridTrailStates[stateIndex].consecutiveInvalidStops;
+            int preCooldown=
+               (int)MathMin(
+                  (double)MathMax(0,InpTrailBackoffCooldownCapMs),
+                  (double)MathMax(0,InpTrailModifyMinimumIntervalMs)*
+                  (double)(1<<MathMin(preFailCount,10)));
+            g_hybridTrailStates[stateIndex].modifyCooldownUntilMs=
+               nowMsTrail+(ulong)preCooldown;
+
+            Log("PRESET 30P BROKER SL PRE-SEND REJECTED (backoff) | "+context+
                 " | ticket="+(string)ticket+
-                " | virtualSL="+DoubleToString(initialVirtualStop,_Digits)+
-                " | brokerSL="+DoubleToString(initialBrokerSL,_Digits)+
-                " | retcode="+IntegerToString((int)initialCode)+
-                " | "+trade.ResultRetcodeDescription());
+                " | consecutive failures="+IntegerToString(preFailCount)+
+                " | next retry in="+IntegerToString(preCooldown)+"ms");
+         }
          else
-            currentSL=initialBrokerSL;
+         {
+            bool initialSent=trade.PositionModify(ticket,initialBrokerSL,currentTP);
+            uint initialCode=trade.ResultRetcode();
+            bool initialAccepted=initialSent && TradeRetcodeAccepted(initialCode);
+
+            if(initialAccepted)
+            {
+               g_hybridTrailStates[stateIndex].consecutiveInvalidStops=0;
+               g_hybridTrailStates[stateIndex].modifyCooldownUntilMs=
+                  nowMsTrail+(ulong)MathMax(0,InpTrailModifyMinimumIntervalMs);
+               currentSL=initialBrokerSL;
+            }
+            else
+            {
+               int initialFailCount=++g_hybridTrailStates[stateIndex].consecutiveInvalidStops;
+               int initialCooldown=
+                  (int)MathMin(
+                     (double)MathMax(0,InpTrailBackoffCooldownCapMs),
+                     (double)MathMax(0,InpTrailModifyMinimumIntervalMs)*
+                     (double)(1<<MathMin(initialFailCount,10)));
+               g_hybridTrailStates[stateIndex].modifyCooldownUntilMs=
+                  nowMsTrail+(ulong)initialCooldown;
+
+               Log("PRESET 30P BROKER SL INSTALL FAILED | "+context+
+                   " | ticket="+(string)ticket+
+                   " | virtualSL="+DoubleToString(initialVirtualStop,_Digits)+
+                   " | brokerSL="+DoubleToString(initialBrokerSL,_Digits)+
+                   " | consecutive failures="+IntegerToString(initialFailCount)+
+                   " | next retry in="+IntegerToString(initialCooldown)+"ms"+
+                   " | retcode="+IntegerToString((int)initialCode)+
+                   " | "+trade.ResultRetcodeDescription());
+            }
+         }
       }
 
       if(InpEnableTrailingAfterEntry &&
@@ -2222,36 +2333,79 @@ void ManageHybridTrailingPositions(string context)
             continue;
          }
 
-         double desiredSL=BrokerCompatibleTrailSL(direction,current,virtualStop);
+         // TRAIL MODIFY BACKOFF: see the identical fix on the initial-preset
+         // block above for the full reasoning (confirmed live on the
+         // BTCUSD sibling: ~45ms between repeated "Invalid stops"
+         // rejections, sustained for a whole session with no cooldown at
+         // all).
+         ulong nowMsTrailUpdate=GetTickCount64();
+         int trailBackoffSteps=g_hybridTrailStates[stateIndex].consecutiveInvalidStops;
+         double desiredSL=BrokerCompatibleTrailSL(direction,current,virtualStop,trailBackoffSteps);
          bool improves=currentSL<=0.0 ||
             (direction==1
              ? desiredSL>currentSL+minimumStep-_Point*0.25
              : desiredSL<currentSL-minimumStep+_Point*0.25);
+         bool trailCooldownElapsed=
+            nowMsTrailUpdate>=g_hybridTrailStates[stateIndex].modifyCooldownUntilMs;
 
-         if(improves && desiredSL>0.0 && FixedTrailSLBrokerValid(direction,current,desiredSL))
+         if(improves && desiredSL>0.0 && trailCooldownElapsed)
          {
-            bool sent=trade.PositionModify(ticket,desiredSL,currentTP);
-            uint code=trade.ResultRetcode();
-            bool accepted=sent && TradeRetcodeAccepted(code);
-
-            if(!accepted)
+            if(!FixedTrailSLBrokerValid(direction,current,desiredSL,trailBackoffSteps))
             {
-               Log("HYBRID BROKER SL MODIFY FAILED | "+context+
+               int preFailCount2=++g_hybridTrailStates[stateIndex].consecutiveInvalidStops;
+               int preCooldown2=
+                  (int)MathMin(
+                     (double)MathMax(0,InpTrailBackoffCooldownCapMs),
+                     (double)MathMax(0,InpTrailModifyMinimumIntervalMs)*
+                     (double)(1<<MathMin(preFailCount2,10)));
+               g_hybridTrailStates[stateIndex].modifyCooldownUntilMs=
+                  nowMsTrailUpdate+(ulong)preCooldown2;
+
+               Log("HYBRID BROKER SL PRE-SEND REJECTED (backoff) | "+context+
                    " | ticket="+(string)ticket+
-                   " | virtualSL="+DoubleToString(virtualStop,_Digits)+
-                   " | brokerSL="+DoubleToString(desiredSL,_Digits)+
-                   " | stopLevel="+IntegerToString((int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL))+
-                   " | freezeLevel="+IntegerToString((int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL))+
-                   " | retcode="+IntegerToString((int)code)+
-                   " | "+trade.ResultRetcodeDescription());
+                   " | consecutive failures="+IntegerToString(preFailCount2)+
+                   " | next retry in="+IntegerToString(preCooldown2)+"ms");
             }
             else
             {
-               Log("HYBRID BROKER SL MOVED | "+context+
-                   " | ticket="+(string)ticket+
-                   " | peak="+DoubleToString(peak,_Digits)+
-                   " | virtualSL="+DoubleToString(virtualStop,_Digits)+
-                   " | brokerSL="+DoubleToString(desiredSL,_Digits));
+               bool sent=trade.PositionModify(ticket,desiredSL,currentTP);
+               uint code=trade.ResultRetcode();
+               bool accepted=sent && TradeRetcodeAccepted(code);
+
+               if(!accepted)
+               {
+                  int failCount=++g_hybridTrailStates[stateIndex].consecutiveInvalidStops;
+                  int cooldown=
+                     (int)MathMin(
+                        (double)MathMax(0,InpTrailBackoffCooldownCapMs),
+                        (double)MathMax(0,InpTrailModifyMinimumIntervalMs)*
+                        (double)(1<<MathMin(failCount,10)));
+                  g_hybridTrailStates[stateIndex].modifyCooldownUntilMs=
+                     nowMsTrailUpdate+(ulong)cooldown;
+
+                  Log("HYBRID BROKER SL MODIFY FAILED | "+context+
+                      " | ticket="+(string)ticket+
+                      " | virtualSL="+DoubleToString(virtualStop,_Digits)+
+                      " | brokerSL="+DoubleToString(desiredSL,_Digits)+
+                      " | stopLevel="+IntegerToString((int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL))+
+                      " | freezeLevel="+IntegerToString((int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL))+
+                      " | consecutive failures="+IntegerToString(failCount)+
+                      " | next retry in="+IntegerToString(cooldown)+"ms"+
+                      " | retcode="+IntegerToString((int)code)+
+                      " | "+trade.ResultRetcodeDescription());
+               }
+               else
+               {
+                  g_hybridTrailStates[stateIndex].consecutiveInvalidStops=0;
+                  g_hybridTrailStates[stateIndex].modifyCooldownUntilMs=
+                     nowMsTrailUpdate+(ulong)MathMax(0,InpTrailModifyMinimumIntervalMs);
+
+                  Log("HYBRID BROKER SL MOVED | "+context+
+                      " | ticket="+(string)ticket+
+                      " | peak="+DoubleToString(peak,_Digits)+
+                      " | virtualSL="+DoubleToString(virtualStop,_Digits)+
+                      " | brokerSL="+DoubleToString(desiredSL,_Digits));
+               }
             }
          }
       }
