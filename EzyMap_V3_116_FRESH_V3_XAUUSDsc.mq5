@@ -46,9 +46,36 @@
 //  existing line was modified except the single StrategyPipSize()    |
 //  branch for gold. NOT verified: compiles in MetaEditor - no MQL5   |
 //  toolchain in this environment.                                    |
+//                                                                    |
+//  CORRECTIONS (found from a same-day test: original V3.116 = 94.50  |
+//  lots real, first FRESH V3 = 6.18 lots - a 15x gap):                |
+//   - InpAutoCalibrateSpreadCap default TRUE -> FALSE. The original   |
+//     ran with NO spread gate at all (InpMaxSpreadPoints=0 is a       |
+//     genuine off switch); defaulting the new gate ON was an active  |
+//     behaviour change, not just a calculation fix. The mechanism is |
+//     still correct and available, just off by default now, matching|
+//     the original's true behaviour.                                 |
+//   - InpMinMsBetweenOrderRequests 250ms -> 50ms. This file's three   |
+//     order-send paths have only ONE active state each (not 64 like  |
+//     the incident file), so worst case is ~6 requests/second - 250ms|
+//     was tighter than needed and could delay one path's legitimate  |
+//     send because an unrelated path just sent moments earlier.      |
+//   - TOTAL ENTRY LOTS report fix: ParsePersistentComment() only      |
+//     recognises "EZR..." comments (the persistent-setup path).      |
+//     The direct zero-conf and legacy/aggressive-arm layer paths use |
+//     different comment formats and were silently excluded from      |
+//     this report's totals - confirmed live (PERFORMANCE FINAL       |
+//     showed 63 real trades/6.18 lots the same run this report       |
+//     showed only 18 setups/1.80 lots). Entries that don't parse now |
+//     fall back to being grouped by their own position ID instead of |
+//     being dropped, so every real entry is counted.                 |
+//   - "ZERO-CONFLUENCE FORCE PASS ... BYPASSED" is ORIGINAL, UNALTERED|
+//     behaviour: V3116_FORCE_ZERO_CONF_MARKET_EXECUTION=true is a     |
+//     hardcoded const in the file the user uploaded, not something    |
+//     introduced by this port. Left exactly as-is per "no alteration".|
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "3.117"
+#property version   "3.118"
 
 #include <Trade/Trade.mqh>
 
@@ -359,29 +386,43 @@ input int    InpMaxSpreadPoints          = 0;     // 0 = filter disabled
 // static cap (disabled by default, InpMaxSpreadPoints=0) - no protection
 // at all against a spread blowout unless someone hand-guesses a point
 // value for this specific broker/symbol first. Ported the auto-
-// calibrating spread guard proven on the EzyMap V2.2 BTC line instead:
-// measures THIS symbol's own real spread for InpSpreadCalibrationTicks
-// ticks after attach (filter INACTIVE / fail-open while collecting, so a
-// slow calibration can never itself block every trade), then enforces
-// median(observed) * InpSpreadCalibrationMultiplier, optionally capped by
-// InpMaxSpreadPoints as a safety ceiling when that input is > 0 (still
-// disabled/uncapped by its own default of 0, matching this file's
-// original default behaviour on that specific input).
-input bool   InpAutoCalibrateSpreadCap      = true;
+// calibrating spread guard proven on the EzyMap V2.2 BTC line: measures
+// THIS symbol's own real spread for InpSpreadCalibrationTicks ticks after
+// attach (filter INACTIVE / fail-open while collecting), then enforces
+// median(observed) * InpSpreadCalibrationMultiplier.
+//
+// CORRECTION: this defaulted TRUE in the first FRESH V3 delivery, and a
+// same-day test came back trading 6.18 lots against the original V3.116's
+// real 94.50 lots on that date - a 15x gap. Root cause: the original ran
+// with NO spread gate active at all (InpMaxSpreadPoints=0 is a genuine
+// off switch, not a placeholder), so defaulting the new gate ON was an
+// active behaviour change, not just a calculation fix - exactly what "no
+// alteration" was meant to prevent. Default is now FALSE, reproducing the
+// original's true behaviour (no spread gate at all). The mechanism is
+// still here, correct, and one input away if ever wanted.
+input bool   InpAutoCalibrateSpreadCap      = false;
 input int    InpSpreadCalibrationTicks      = 100;
 input double InpSpreadCalibrationMultiplier = 3.0;
 
 // FRESH V3 stability pass: this file's three order-send paths
 // (SubmitDirectZeroConfMarket, SubmitPersistentLayerOrder, PlaceOneLayer)
-// each retry independently on their own InpDeploymentRetryIntervalMs timer
-// with no shared cap on aggregate REQUEST RATE across all three. A
-// different EzyMap build with a much more aggressive version of this same
-// pattern (a 100ms retry across up to 64 parallel signal states) triggered
-// a real broker "server problem" alert from entry spamming, confirmed by
-// the user, and cost real capital. This file's single-state retry loops
-// are far less aggressive on their own, but a global floor across all
-// three costs nothing and closes the door on this failure mode for good.
-input int    InpMinMsBetweenOrderRequests = 250;
+// each retry independently on their own InpDeploymentRetryIntervalMs
+// (default 500ms) timer with no shared cap on aggregate REQUEST RATE
+// across all three. A different EzyMap build with a much more aggressive
+// version of this same pattern (a 100ms retry across up to 64 parallel
+// signal states) triggered a real broker "server problem" alert from
+// entry spamming, confirmed by the user, and cost real capital.
+//
+// CORRECTION: this file has only ONE active state per path (not 64), so
+// three independent 500ms timers can produce at most ~6 requests/second
+// in the worst case - nowhere near the volume that caused the actual
+// incident. The first FRESH V3 delivery set this to 250ms, which is
+// tighter than necessary and can itself delay a legitimate send from one
+// path because a different, unrelated path just sent moments earlier.
+// Loosened to 50ms - low enough to never bind under this file's real
+// worst-case cadence, while still capping any future pathological case
+// (e.g. if a fourth order-send path is ever added) well below spam levels.
+input int    InpMinMsBetweenOrderRequests = 50;
 
 input int    InpDeviationPoints          = 20;
 input bool   InpUseAsyncMode             = false;
@@ -6365,13 +6406,32 @@ void WriteEzyMapBacktestReport()
 
       long setupId=0;
       int layerIndex=0,totalLayers=0;
+      long positionId=(long)HistoryDealGetInteger(ticket,DEAL_POSITION_ID);
 
+      // FRESH V3 report fix: ParsePersistentComment() only recognises the
+      // "EZR..." comment format used by the persistent-setup deployment
+      // path. The direct zero-conf market path (PREFIX+"DIRECT_ZC_...") and
+      // the legacy/aggressive-arm layer path ("EZP2 ...") use entirely
+      // different comment formats, so every real entry placed through
+      // either of those two paths used to fail this parse and hit the old
+      // "continue" below - silently excluded from TOTAL ENTRY LOTS and
+      // every other figure in this report, even though the trade genuinely
+      // executed and shows up in the broker's own trade history (confirmed
+      // live: PERFORMANCE FINAL reported 63 real trades/6.18 lots the same
+      // run this report showed only 18 setups/1.80 lots). Falling back to
+      // the deal's own position ID (negated, so it can never collide with
+      // a real positive EZR setup ID) means every real entry is still
+      // counted - it just cannot be grouped by persistent-setup layer
+      // attribution the way an EZR-commented entry can, since that
+      // information was never in a comment to parse in the first place.
       if(!ParsePersistentComment(
             HistoryDealGetString(ticket,DEAL_COMMENT),
             setupId,layerIndex,totalLayers))
-         continue;
-
-      long positionId=(long)HistoryDealGetInteger(ticket,DEAL_POSITION_ID);
+      {
+         setupId=-positionId;
+         layerIndex=1;
+         totalLayers=1;
+      }
 
       if(FindReportPositionMap(maps,positionId)<0)
       {
