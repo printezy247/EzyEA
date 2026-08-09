@@ -1,5 +1,29 @@
 # EzyScalp XAUUSD FRESH V1 — Phase 1
 
+## v1.01 update
+
+First test run (compiled clean, ran on the tester) came back with two issues:
+
+1. **No reporting.** Fixed — `OnDeinit()` now prints a `PERFORMANCE REPORT` line
+   (closed trades, wins/losses/flat, win rate, lots traded, net profit),
+   built from the EA's own deal history (`HistorySelect` scoped to when the
+   EA attached, so it never mixes in unrelated trades and stays fast even on
+   a long-running account).
+2. **Trade frequency too low.** Three entry-frequency levers were tightened
+   toward "quality over quantity" in v1.00; loosened toward "quantity" now,
+   per the stated objective (maximum daily lot volume):
+   - `InpSignalTimeframe`: M5 → **M1** (5x more bars/day)
+   - `InpChannelLookbackBars`: 20 → **10** (a shorter channel clears far more often — the single biggest lever on signal count)
+   - `InpBreakoutATRFraction`: 0.15 → **0.05** (more marginal breaks now qualify)
+   - `InpMaxConcurrentPositions`: 3 → **5** (so more concurrent signals can actually be acted on)
+
+   **Understood tradeoff:** more signals from a shorter, looser channel means
+   more of them will be noise rather than a genuine sustained move — expect
+   win rate per trade to come down some in exchange for materially higher
+   trade count and lot volume. That's the explicit priority you set, not an
+   oversight.
+
+
 A clean-slate rebuild for XAUUSD, started after two weeks of patching
 `EzyMap_V2_1b`/`V2_2` revealed the old file's accumulated complexity
 (confidence-tier lot scaling, three separate layer-builders, a

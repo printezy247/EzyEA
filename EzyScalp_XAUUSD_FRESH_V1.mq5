@@ -37,7 +37,7 @@
 //| can be tested and trusted on its own before adding it.            |
 //+------------------------------------------------------------------+
 #property copyright "EzyScalp"
-#property version   "1.00"
+#property version   "1.01"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -98,15 +98,30 @@ input int    InpSpreadCeilingPoints         = 0;
 
 //====================== ENTRY - DONCHIAN BREAKOUT MOMENTUM =============
 input group "=== Entry: Momentum Breakout ==="
-input ENUM_TIMEFRAMES InpSignalTimeframe = PERIOD_M5;
-input int    InpChannelLookbackBars = 20;
+// FREQUENCY TUNING (v1.01): the first test run came back with very low
+// trade frequency, which directly conflicts with the stated objective of
+// maximum daily lot volume. Three levers control how often a breakout
+// signal can fire, and all three were tightened toward "quality over
+// quantity" by the v1.00 defaults - loosened here toward "quantity":
+//   - InpSignalTimeframe: M5 -> M1. 5x more bars/day means 5x more chances
+//     for price to clear a channel edge.
+//   - InpChannelLookbackBars: 20 -> 10. A shorter channel is cleared far
+//     more often - this is the single biggest lever on signal count.
+//   - InpBreakoutATRFraction: 0.15 -> 0.05. A smaller required clearance
+//     lets more marginal breaks qualify instead of being filtered out.
+// Understood tradeoff: more signals from a shorter/looser channel means
+// more of them will be noise rather than a genuine sustained move, which
+// should show up as a lower win rate per trade in exchange for materially
+// higher trade count and lot volume - the explicit priority you set.
+input ENUM_TIMEFRAMES InpSignalTimeframe = PERIOD_M1;
+input int    InpChannelLookbackBars = 10;
 // Minimum breakout distance beyond the channel, expressed as a fraction of
 // live ATR, so the filter self-scales with volatility instead of using a
-// fixed price/point distance. 0.15 means the break must clear the channel
-// edge by at least 15% of one ATR - enough to reject a one-tick poke
-// through the level without demanding a large move.
-input double InpBreakoutATRFraction = 0.15;
-input int    InpMaxConcurrentPositions = 3;
+// fixed price/point distance.
+input double InpBreakoutATRFraction = 0.05;
+// Raised 3 -> 5 alongside the frequency changes above so more concurrent
+// signals can actually be acted on instead of being blocked by this cap.
+input int    InpMaxConcurrentPositions = 5;
 input int    InpMagicNumber = 20260809;
 
 //====================== TREND FILTER (optional, default ON) ===========
@@ -148,6 +163,7 @@ double   g_dayLossFloor    = 0.0;
 bool     g_dayTradingLocked = false;
 
 datetime g_lastSignalBarTime = 0;
+datetime g_eaStartTime       = 0;
 
 //====================== ACCOUNT / CENT HELPERS =========================
 string Upper(string s) { StringToUpper(s); return s; }
@@ -636,6 +652,72 @@ void ManagePositions()
    }
 }
 
+//====================== PERFORMANCE REPORT ================================
+// The user's first test run came back "no reporting" - this pulls the
+// EA's own deal history (scoped to g_eaStartTime, not the whole account
+// history, so it stays fast and never mixes in a different EA's trades)
+// and prints exactly the three numbers asked for: lot traded, win rate,
+// net profit. Runs once at OnDeinit, same point the old EA printed its
+// final summary.
+void PrintPerformanceReport()
+{
+   if(!HistorySelect(g_eaStartTime,TimeCurrent()))
+   {
+      Log("PERFORMANCE REPORT | HistorySelect failed - no report available");
+      return;
+   }
+
+   int totalDeals=HistoryDealsTotal();
+
+   double lotsTraded=0.0;   // sum of ENTRY deal volumes - capital actually put to work
+   double netProfit=0.0;    // profit + swap + commission across all deals
+   int wins=0,losses=0,flat=0;
+   int roundTrips=0;
+
+   for(int i=0;i<totalDeals;i++)
+   {
+      ulong dealTicket=HistoryDealGetTicket(i);
+      if(dealTicket==0) continue;
+
+      if(HistoryDealGetString(dealTicket,DEAL_SYMBOL)!=_Symbol) continue;
+      if((ulong)HistoryDealGetInteger(dealTicket,DEAL_MAGIC)!=(ulong)InpMagicNumber) continue;
+
+      ENUM_DEAL_ENTRY entry=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket,DEAL_ENTRY);
+      double volume=HistoryDealGetDouble(dealTicket,DEAL_VOLUME);
+      double profit=HistoryDealGetDouble(dealTicket,DEAL_PROFIT)+
+                    HistoryDealGetDouble(dealTicket,DEAL_SWAP)+
+                    HistoryDealGetDouble(dealTicket,DEAL_COMMISSION);
+
+      netProfit+=profit;
+
+      if(entry==DEAL_ENTRY_IN)
+      {
+         lotsTraded+=volume;
+      }
+      else if(entry==DEAL_ENTRY_OUT || entry==DEAL_ENTRY_OUT_BY)
+      {
+         roundTrips++;
+         if(profit>0.01)      wins++;
+         else if(profit<-0.01) losses++;
+         else                  flat++;
+      }
+   }
+
+   double winRatePct=(roundTrips>0)?(100.0*wins/(double)roundTrips):0.0;
+
+   Log("=============== PERFORMANCE REPORT ===============");
+   Log("PERFORMANCE REPORT"+
+       " | closed trades="+IntegerToString(roundTrips)+
+       " | wins="+IntegerToString(wins)+
+       " | losses="+IntegerToString(losses)+
+       " | flat="+IntegerToString(flat)+
+       " | win rate="+DoubleToString(winRatePct,1)+"%"+
+       " | lots traded="+DoubleToString(lotsTraded,2)+
+       " | net profit="+DoubleToString(netProfit,2)+" "+
+       AccountInfoString(ACCOUNT_CURRENCY));
+   Log("====================================================");
+}
+
 //====================== LIFECYCLE ========================================
 int OnInit()
 {
@@ -670,6 +752,7 @@ int OnInit()
    ResetCampaignDay(true);
 
    g_lastSignalBarTime=0;
+   g_eaStartTime=TimeCurrent();
 
    trade.SetExpertMagicNumber(InpMagicNumber);
 
@@ -699,6 +782,8 @@ void OnTick()
 
 void OnDeinit(const int reason)
 {
+   PrintPerformanceReport();
+
    if(g_atrHandle!=INVALID_HANDLE)
    {
       IndicatorRelease(g_atrHandle);
