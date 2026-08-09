@@ -37,7 +37,7 @@
 //| can be tested and trusted on its own before adding it.            |
 //+------------------------------------------------------------------+
 #property copyright "EzyScalp"
-#property version   "1.01"
+#property version   "1.02"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -98,40 +98,58 @@ input int    InpSpreadCeilingPoints         = 0;
 
 //====================== ENTRY - DONCHIAN BREAKOUT MOMENTUM =============
 input group "=== Entry: Momentum Breakout ==="
-// FREQUENCY TUNING (v1.01): the first test run came back with very low
-// trade frequency, which directly conflicts with the stated objective of
-// maximum daily lot volume. Three levers control how often a breakout
-// signal can fire, and all three were tightened toward "quality over
-// quantity" by the v1.00 defaults - loosened here toward "quantity":
-//   - InpSignalTimeframe: M5 -> M1. 5x more bars/day means 5x more chances
-//     for price to clear a channel edge.
-//   - InpChannelLookbackBars: 20 -> 10. A shorter channel is cleared far
-//     more often - this is the single biggest lever on signal count.
-//   - InpBreakoutATRFraction: 0.15 -> 0.05. A smaller required clearance
-//     lets more marginal breaks qualify instead of being filtered out.
-// Understood tradeoff: more signals from a shorter/looser channel means
-// more of them will be noise rather than a genuine sustained move, which
-// should show up as a lower win rate per trade in exchange for materially
-// higher trade count and lot volume - the explicit priority you set.
+// FREQUENCY TUNING v1.02: v1.01's tuning (M1, 10-bar channel, 0.05 ATR
+// fraction) still only produced 12 trades / 1.14 lots on a $1000 test day,
+// against the old EA's 80 lots on the same date - a ~70x gap. That gap is
+// NOT primarily about per-trade lot size (both EAs size roughly the same
+// ~0.10 lot at $1000 equity); it is about SIGNAL COUNT. The old EA has
+// several parallel signal-generation paths (zone touches across H4/D1/W1
+// levels, a zero-confluence low-exposure fallback, persistent setups,
+// direct market triggers) feeding the same position stream - a single
+// N-bar-extreme channel breakout is inherently a "sometimes" event next to
+// that. Loosened further, and given a second, much more frequent trigger:
+//   - InpChannelLookbackBars: 10 -> 5 (clears even more often)
+//   - InpBreakoutATRFraction: 0.05 -> 0.0 (any close beyond the channel
+//     counts - no minimum clearance at all)
+//   - InpMaxConcurrentPositions: 5 -> 15 (at ~0.10 lot/position on $1000
+//     equity, 15 concurrent is ~1.5 lots of exposure - still small
+//     relative to equity, and the 75% daily circuit breaker is the real
+//     backstop, not this cap)
+// Same understood tradeoff as v1.01, more so: expect win rate to keep
+// softening as trade count rises - that is the explicit priority you set.
 input ENUM_TIMEFRAMES InpSignalTimeframe = PERIOD_M1;
-input int    InpChannelLookbackBars = 10;
+input int    InpChannelLookbackBars = 5;
 // Minimum breakout distance beyond the channel, expressed as a fraction of
 // live ATR, so the filter self-scales with volatility instead of using a
-// fixed price/point distance.
-input double InpBreakoutATRFraction = 0.05;
-// Raised 3 -> 5 alongside the frequency changes above so more concurrent
-// signals can actually be acted on instead of being blocked by this cap.
-input int    InpMaxConcurrentPositions = 5;
+// fixed price/point distance. 0 = any close beyond the channel counts.
+input double InpBreakoutATRFraction = 0.0;
+input int    InpMaxConcurrentPositions = 15;
 input int    InpMagicNumber = 20260809;
 
-//====================== TREND FILTER (optional, default ON) ===========
+// v1.02: a SECOND, independent, much higher-frequency entry path. The
+// Donchian breakout above requires a genuine N-bar extreme; this fires on
+// ANY single M1 candle whose directional move (close vs open) is at least
+// InpMomentumCandleATRFraction of live ATR - which happens far more often
+// per day than a 5-bar extreme, without requiring price to make new ground
+// at all. Runs alongside the breakout check every bar; either one can
+// produce a signal. Default ON, since raising trade count is the explicit
+// objective driving this whole redesign.
+input group "=== Entry: Momentum Candle (higher frequency) ==="
+input bool   InpUseMomentumCandleTrigger  = true;
+input double InpMomentumCandleATRFraction = 0.25;
+
+//====================== TREND FILTER (optional, default OFF in v1.02) =
 // Gold has been a choppy, news-driven correction inside a longer bull
 // structure through 2026 (Fed-leadership uncertainty, geopolitical spikes) -
 // a pure breakout scalper with no trend filter will get chopped up trading
-// both directions through that noise. This refuses counter-trend breakouts
-// outright rather than trying to score or weight them.
+// both directions through that noise, which is why this defaulted ON in
+// v1.00/v1.01. v1.02 turns it OFF by default: it was refusing roughly half
+// of every candidate signal (whichever direction disagreed with the H1
+// trend), which is a direct, quantifiable tax on the volume-maximization
+// objective. Re-enable it if the wider trade count trades win rate away
+// faster than is acceptable - it is a one-input toggle, not removed code.
 input group "=== Trend Filter ==="
-input bool   InpUseTrendFilter = true;
+input bool   InpUseTrendFilter = false;
 input ENUM_TIMEFRAMES InpTrendTimeframe = PERIOD_H1;
 input int    InpTrendEMAPeriod = 50;
 
@@ -470,6 +488,17 @@ int TrendDirection()
 }
 
 //====================== ENTRY - DONCHIAN BREAKOUT ========================
+// v1.02: two independent triggers evaluated together, once per bar. Either
+// one firing produces a signal - this is what closed most of the ~70x
+// trade-count gap against the old EA's several parallel signal paths.
+//   1. Channel breakout - price clears the InpChannelLookbackBars extreme.
+//      Requires a genuine new high/low; fires less often but on cleaner
+//      moves.
+//   2. Momentum candle - the last CLOSED bar's body alone is a large
+//      enough fraction of ATR, with no requirement to clear any extreme.
+//      Fires far more often; this is the main volume driver in v1.02.
+// Both respect the same optional trend filter (off by default in v1.02)
+// and the same one-decision-per-bar gate.
 bool DetectMomentumBreakout(int &direction)
 {
    direction=0;
@@ -478,7 +507,23 @@ bool DetectMomentumBreakout(int &direction)
    if(barTime<=0 || barTime==g_lastSignalBarTime)
       return false; // already evaluated this bar
 
-   int lookback=MathMax(5,InpChannelLookbackBars);
+   double atr=CurrentATR();
+   if(atr<=0.0)
+      return false; // no live volatility reading yet - do not guess
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol,tick))
+      return false;
+
+   int trend=TrendDirection();
+   bool trendAllowsBuy =(!InpUseTrendFilter || trend>=0);
+   bool trendAllowsSell=(!InpUseTrendFilter || trend<=0);
+
+   bool buySignal=false;
+   bool sellSignal=false;
+
+   // ---- Trigger 1: channel breakout ----
+   int lookback=MathMax(3,InpChannelLookbackBars);
 
    MqlRates rates[];
    ArraySetAsSeries(rates,true);
@@ -486,45 +531,49 @@ bool DetectMomentumBreakout(int &direction)
    // breakout is measured against a range the still-forming bar cannot
    // itself have widened.
    int copied=CopyRates(_Symbol,InpSignalTimeframe,1,lookback,rates);
-   if(copied<lookback)
-      return false;
 
-   double channelHigh=rates[0].high;
-   double channelLow=rates[0].low;
-   for(int i=1;i<copied;i++)
+   if(copied>=lookback)
    {
-      channelHigh=MathMax(channelHigh,rates[i].high);
-      channelLow=MathMin(channelLow,rates[i].low);
+      double channelHigh=rates[0].high;
+      double channelLow=rates[0].low;
+      for(int i=1;i<copied;i++)
+      {
+         channelHigh=MathMax(channelHigh,rates[i].high);
+         channelLow=MathMin(channelLow,rates[i].low);
+      }
+
+      double breakoutBuffer=MathMax(0.0,InpBreakoutATRFraction)*atr;
+
+      if(tick.ask>=channelHigh+breakoutBuffer && trendAllowsBuy)
+         buySignal=true;
+      if(tick.bid<=channelLow-breakoutBuffer && trendAllowsSell)
+         sellSignal=true;
    }
 
-   double atr=CurrentATR();
-   if(atr<=0.0)
-      return false; // no live volatility reading yet - do not guess
+   // ---- Trigger 2: single-candle momentum burst ----
+   if(InpUseMomentumCandleTrigger && copied>=1)
+   {
+      double body=rates[0].close-rates[0].open;
+      double threshold=MathMax(0.0,InpMomentumCandleATRFraction)*atr;
 
-   double breakoutBuffer=MathMax(0.0,InpBreakoutATRFraction)*atr;
+      if(body>=threshold && trendAllowsBuy)
+         buySignal=true;
+      else if(-body>=threshold && trendAllowsSell)
+         sellSignal=true;
+   }
 
-   MqlTick tick;
-   if(!SymbolInfoTick(_Symbol,tick))
+   // A bar that signals both directions at once (a wide-range whipsaw bar,
+   // or a breakout in one direction alongside a momentum candle in the
+   // other) is not a clean signal in either direction - skip it.
+   if(buySignal && sellSignal)
       return false;
 
-   int trend=TrendDirection();
-
-   bool buyBreak = (tick.ask>=channelHigh+breakoutBuffer) &&
-                   (!InpUseTrendFilter || trend>=0);
-   bool sellBreak= (tick.bid<=channelLow-breakoutBuffer) &&
-                   (!InpUseTrendFilter || trend<=0);
-
-   // A bar that breaks both sides (a wide-range whipsaw bar) is not a clean
-   // breakout in either direction - skip it rather than guess.
-   if(buyBreak && sellBreak)
-      return false;
-
-   if(!buyBreak && !sellBreak)
+   if(!buySignal && !sellSignal)
       return false;
 
    g_lastSignalBarTime=barTime; // one decision per bar, win or lose
 
-   direction=buyBreak?1:-1;
+   direction=buySignal?1:-1;
    return true;
 }
 

@@ -1,5 +1,41 @@
 # EzyScalp XAUUSD FRESH V1 — Phase 1
 
+## v1.02 update
+
+v1.01's report came back: 12 closed trades, 1.14 lots traded on a $1000
+test day, against the old V2.1b EA's 80 lots on the **same date** — a
+~70x gap. That gap is not about per-trade size (both EAs size roughly
+0.10 lot at $1000 equity) — it's about **signal count**. The old EA has
+several parallel signal-generation paths (zone touches across H4/D1/W1
+levels, a zero-confluence low-exposure fallback, persistent setups, direct
+market triggers) all feeding the same position stream; a single N-bar
+channel breakout is inherently a "sometimes" event next to that.
+
+Changes:
+
+- **New second entry trigger, `InpUseMomentumCandleTrigger` (default ON)**:
+  fires on any single M1 candle whose body alone is a large-enough fraction
+  of ATR (`InpMomentumCandleATRFraction`, default 0.25) — no requirement to
+  clear any N-bar extreme at all. This runs *alongside* the channel
+  breakout, not instead of it; either one can produce a signal. This is the
+  main volume lever in v1.02.
+- `InpChannelLookbackBars`: 10 → **5**.
+- `InpBreakoutATRFraction`: 0.05 → **0.0** (any close beyond the channel
+  now counts, no minimum clearance).
+- `InpMaxConcurrentPositions`: 5 → **15**.
+- `InpUseTrendFilter`: **OFF by default now** (was ON) — it was refusing
+  roughly half of every candidate signal, a direct tax on the volume
+  objective. Still there as a one-input toggle if the wider trade count
+  trades away more win rate than you want.
+
+**Worth knowing**: at $1000 equity and ~0.10 lot/position, 15 concurrent
+positions would need roughly $1,300 of margin at 1:500 leverage — more
+than the account has. In practice you likely won't see all 15 filled at
+once; orders will start failing on insufficient margin before that, logged
+as `ENTRY FAILED`. That's expected, not a bug — margin becomes the real
+ceiling on concurrent exposure at this equity level, not the input.
+
+
 ## v1.01 update
 
 First test run (compiled clean, ran on the tester) came back with two issues:
