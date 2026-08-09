@@ -1,5 +1,29 @@
 # EzyScalp XAUUSD FRESH V1 — Phase 1
 
+## v1.03 update
+
+v1.02 produced 84 closed trades / 7.73 lots on the $1000 test day, against
+a stated target of **20+ lots/day** — roughly 2.6x more volume needed. The
+daily-loss floor still had enormous headroom (-$7.87 against a 75%/$750
+floor on that run), so there's plenty of room to push before the real
+safety limit engages.
+
+- `InpMomentumCandleATRFraction`: 0.25 → **0.08** — a much smaller candle
+  body now qualifies. This is the single biggest lever on how many of the
+  day's ~1,440 M1 bars produce a signal.
+- `InpChannelLookbackBars`: 5 → **3** — same reasoning for the breakout
+  trigger.
+- **Sizing is untouched.** The extra volume comes from *more trades at the
+  same per-trade size* you specified (100 equity = 0.01 lot), not from
+  bigger positions — risk-per-trade character doesn't change even as trade
+  count rises toward the 20-lot target.
+
+If 20 lots still isn't reached after this, the next lever would be
+loosening the one-signal-per-M1-bar cap itself (currently the hard
+ceiling is ~1,440 signals/day) — say so and I'll look at that next rather
+than guessing further on this round.
+
+
 ## v1.02 update
 
 v1.01's report came back: 12 closed trades, 1.14 lots traded on a $1000

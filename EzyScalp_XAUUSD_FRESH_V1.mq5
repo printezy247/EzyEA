@@ -37,7 +37,7 @@
 //| can be tested and trusted on its own before adding it.            |
 //+------------------------------------------------------------------+
 #property copyright "EzyScalp"
-#property version   "1.02"
+#property version   "1.03"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -118,7 +118,7 @@ input group "=== Entry: Momentum Breakout ==="
 // Same understood tradeoff as v1.01, more so: expect win rate to keep
 // softening as trade count rises - that is the explicit priority you set.
 input ENUM_TIMEFRAMES InpSignalTimeframe = PERIOD_M1;
-input int    InpChannelLookbackBars = 5;
+input int    InpChannelLookbackBars = 3;
 // Minimum breakout distance beyond the channel, expressed as a fraction of
 // live ATR, so the filter self-scales with volatility instead of using a
 // fixed price/point distance. 0 = any close beyond the channel counts.
@@ -134,9 +134,22 @@ input int    InpMagicNumber = 20260809;
 // at all. Runs alongside the breakout check every bar; either one can
 // produce a signal. Default ON, since raising trade count is the explicit
 // objective driving this whole redesign.
+//
+// FREQUENCY TUNING v1.03: v1.02 produced 84 closed trades / 7.73 lots on
+// the $1000 test day, against a stated target of 20+ lots/day - roughly
+// 2.6x more volume needed. The daily-loss floor had enormous headroom left
+// (-$7.87 against a 75%/$750 floor), so there is plenty of room to push
+// harder before the real safety limit engages. Lowered the ATR fraction
+// 0.25 -> 0.08 (a much smaller candle body now qualifies - this is the
+// single biggest lever on how many of the day's ~1440 M1 bars produce a
+// signal) and shortened the channel lookback 5 -> 3 bars for the same
+// reason on the breakout trigger. Sizing (LotForEquity()) is untouched -
+// the extra volume comes from MORE trades at the same per-trade size you
+// specified, not from bigger positions, so risk-per-trade character does
+// not change even as trade count rises.
 input group "=== Entry: Momentum Candle (higher frequency) ==="
 input bool   InpUseMomentumCandleTrigger  = true;
-input double InpMomentumCandleATRFraction = 0.25;
+input double InpMomentumCandleATRFraction = 0.08;
 
 //====================== TREND FILTER (optional, default OFF in v1.02) =
 // Gold has been a choppy, news-driven correction inside a longer bull
