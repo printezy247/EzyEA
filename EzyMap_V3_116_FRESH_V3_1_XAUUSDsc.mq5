@@ -178,7 +178,7 @@
 //     distances are ever wanted instead.                              |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "3.1.1"
+#property version   "3.101"
 
 #include <Trade/Trade.mqh>
 
