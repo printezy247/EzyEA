@@ -1348,3 +1348,50 @@ result of "more layers" replacing "bigger layers," not an oversight.
 order (not the setup total) is now the same size as a Standard order's single layer — e.g. if
 Standard places one 0.09-lot order, a Good setup should place two 0.09-lot orders (one
 instant, one limit), not one 0.18-lot order.
+
+---
+
+## FIXEDEXIT TEST BUILD — separate file, not part of the S01-S10 stage sequence
+
+A new file, `EzyMap_V2_2_BTCUSD_FIXEDEXIT_TEST.mq5`, forked from the S10 build so the user's
+live-running S10 file is not disturbed. Requested to isolate the effect of a fixed
+(non-ATR) preset stop and a trail that never touches the stop until the trade is genuinely
+profitable — a different question from S08/S09 and worth testing in isolation rather than
+folding into the main build.
+
+**Input default changes from S10 (BTC pip = $1, per `StrategyPipSize()`):**
+
+| Input | S10 build | FIXEDEXIT_TEST |
+|---|---|---|
+| `InpUseATRGeometry` | `true` | `false` — a fixed preset must not be overwritten by a live ATR figure |
+| `InpPresetStopLossPips` | `21.0` | `39.0` ($39 flat stop) |
+| `InpTrailInitialDistancePips` | `7.0` | `25.0` ($25 trail) |
+| `InpTrailTightDistancePips` | `7.0` | `25.0` (kept equal to Initial — `InpTrailTightenAtPips` stays `999.0`/unreachable, so there is only ever one trail phase) |
+| `InpTrailingDistancePips` | `7.0` | `25.0` (cosmetic only — `FixedTrailCandidateSL()` is dead code, never called; kept in sync purely so log lines don't contradict the real trail distance) |
+| `InpUseTakeProfit`, `InpUsePartialTakeProfit`, `InpUseBreakevenLock` | all `false` | unchanged (`false`) — no TP, no partial, no breakeven-floor complexity, so nothing can close or lock in profit early besides the single trail phase |
+
+**New behaviour — `InpTrailArmRequiresPositiveProfit` (default `true` in this build, `false`
+everywhere else):** the existing PHASE 1 arm check in `ManageHybridTrailingPositions()`
+(`peakFavourable>=activationDistance`, a raw price-distance test) is replaced by
+`PositionGetDouble(POSITION_PROFIT)>0.0` when this input is true. This is a deliberately
+different and stricter question than "has price moved N pips in my favour" — a favourable
+pip move can still be a net loss once spread is subtracted (`POSITION_PROFIT` already nets
+this out, since a BUY closes at bid and a SELL at ask). The trail cannot touch the stop at
+all until the position is genuinely, not just directionally, in profit, which is the direct
+answer to "avoid premature profit-taking or loss-cutting by the EA."
+
+Ported identically to `EzyMap_V2_1b_FIXEDEXIT_TEST.mq5` for gold — there every other
+exit-geometry value already matched what was requested (`InpPresetStopLossPips=21`,
+`InpTrailInitialDistancePips=7`, `InpUseATRGeometry=false` were already the S05 defaults), so
+only the new arm-gate input and its wiring were added.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Brace / paren / bracket balance | ✅ V2.2 FIXEDEXIT_TEST: `{}` 933/933 · `()` 6377/6377 · `[]` 1187/1187, residual 0. V2.1b FIXEDEXIT_TEST: `{}` 930/930 · `()` 6270/6270 · `[]` 1187/1187, residual 0 |
+| Arm-check edit identical between both new files | ✅ script-diffed the non-comment lines — zero differences |
+| S10/S05 shipped files untouched | ✅ these are new, separately-named files; `EzyMap_V2_2_BTCUSD_ADAPTATION.mq5` and `EzyMap_V2_1b_TRIGGER_REFINED.mq5` have no changes from this build |
+| `currentProfit` read before any position-selection could change | ✅ captured immediately alongside `currentSL`/`currentTP` in the same position loop iteration |
+| **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
+| **Fix validated by a real run** | ❌ **no — this is a fresh test build by design, not yet run** |
