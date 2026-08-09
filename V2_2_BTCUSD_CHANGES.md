@@ -1395,3 +1395,83 @@ only the new arm-gate input and its wiring were added.
 | `currentProfit` read before any position-selection could change | ✅ captured immediately alongside `currentSL`/`currentTP` in the same position loop iteration |
 | **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
 | **Fix validated by a real run** | ❌ **no — this is a fresh test build by design, not yet run** |
+
+---
+
+## S11 — exit-modify backoff (`EzyMap_V2_2_BTCUSD_ADAPTATION.mq5` only, real bug found live)
+
+A full-day live run on BTCUSD.sc ended at 881.71 from a 930 USC start, and the user flagged
+the Trades journal: the terminal showed `modify` immediately followed by `failed modify
+... [Invalid stops]` for the same ticket, over and over, roughly once per second, for two
+open positions simultaneously, continuously for the whole session.
+
+### Root cause
+
+Three separate functions each gate whether/where a trailing-stop modify can be sent —
+`FixedTrailSLBrokerValid()`, `LatestBrokerValidExitSL()`, and `BrokerTrailMinimumDistance()`
+(via `BrokerCompatibleTrailSL()`) — and all three compute the same shape of minimum distance:
+`SYMBOL_TRADE_STOPS_LEVEL`/`SYMBOL_TRADE_FREEZE_LEVEL` (broker-reported) plus a small fixed
+cushion of 2-5 **points** (`InpExecutionStopCushionPoints`, `InpTrailBrokerCushionPoints`,
+`InpExitExtraStopCushionPoints`). On XAUUSD, where 1 point is $0.01 and typical distances are
+dollars, that cushion is a meaningful few-cent-to-few-dollar buffer. On BTCUSD.sc, where 1
+point is still $0.01 but the instrument routinely moves by tens or hundreds of dollars, the
+same 2-5 points is a few **cents** — functionally nothing. If the broker's real enforced
+minimum stop distance for this symbol is wider than what those two symbol properties report
+(a known real-world quirk on crypto CFDs, whose reported stops/freeze level can understate
+the server's actual rule), the code computes a value it believes is valid, the broker
+rejects it anyway, and — critically — nothing in the retry path ever adapts: it just tries
+again a fixed cooldown later with the same undersized cushion, forever. This is the same
+risk category as the confirmed entry-spam incident that cost real capital on a different EA
+(unthrottled retries hitting the broker), just applied to modifies instead of new orders and
+throttled to roughly 1/sec instead of 100+/sec — still a sustained, forever-failing,
+broker-facing request pattern with no self-correction, over an entire trading day.
+
+### Fix
+
+- Added `consecutiveInvalidStops` to `ExitExecutionState`, incremented on every rejection
+  (the pre-send validity check failing, or the broker rejecting the actual `PositionModify`
+  request) and reset to 0 the instant a modify is accepted.
+- Added `ExitBackoffCushionPrice(referencePrice, backoffSteps)`: a shared formula that adds
+  `InpExitBackoffCushionStepPct`% of the **current price** per consecutive failure, capped at
+  `InpExitBackoffMaxSteps` steps. Percentage-of-price, not a fixed point count, so the same
+  setting is meaningful on BTC's ~$65,000 print and XAU's ~$2,000 print alike, instead of
+  needing a different point value hand-tuned per symbol.
+- Threaded a `backoffSteps` parameter through `FixedTrailSLBrokerValid()`,
+  `LatestBrokerValidExitSL()`, `BrokerTrailMinimumDistance()`, and `BrokerCompatibleTrailSL()`
+  so every one of the four distance checks - including the pre-filter gate in
+  `ManageHybridTrailingPositions()`, which used to call these with no backoff awareness at
+  all - agrees on the same widening clearance.
+- The retry cooldown itself now backs off exponentially on repeated failure
+  (`InpExitInvalidStopsCooldownMs * 2^consecutiveFailures`, capped at
+  `InpExitBackoffCooldownCapMs`), so even if the widened cushion doesn't immediately clear
+  whatever the broker's real rule is, the request RATE drops off sharply instead of
+  sustaining a fixed once-per-second hammer for the rest of the session.
+- New log line `V3.176 SYNCHRONIZED SL PRE-SEND REJECTED (backoff)` and an extra
+  `consecutive failures=` field on the existing `SYNCHRONIZED SL REJECTED` line, so the next
+  live run's journal shows directly whether backoff is escalating and whether it eventually
+  clears.
+
+### What did NOT change
+
+- The three cushion inputs (`InpExecutionStopCushionPoints`, `InpTrailBrokerCushionPoints`,
+  `InpExitExtraStopCushionPoints`) keep their original meaning and defaults for the FIRST
+  attempt on any ticket (`consecutiveInvalidStops==0` → zero backoff cushion, byte-identical
+  distance to before this stage). Backoff only ever adds on top, after at least one real
+  rejection.
+- Entry logic, confluence gating, sizing, and every other exit mechanism (breakeven lock,
+  virtual-trail fallback, close-on-hit) are untouched.
+
+**Not yet known:** whether the widened cushion actually clears the broker's real minimum, or
+whether BTCUSD.sc's true rule is wider still and this only reduces the request rate without
+ever succeeding. The defaults (0.02% per step, 8-step cap, 15s cooldown cap) are a reasoned
+first attempt, not backtested or live-validated — the next run's journal is the real test.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Brace / paren / bracket balance | ✅ `{}` 934/934 · `()` 6406/6406 · `[]` 1192/1192, residual 0 |
+| Every call site of the four modified functions passes `backoffSteps` | ✅ grep-confirmed: all 2 `FixedTrailSLBrokerValid` sites, 1 `LatestBrokerValidExitSL` site, 1 `BrokerCompatibleTrailSL` site (which itself calls `BrokerTrailMinimumDistance`) updated |
+| Diffed against the pre-S11 committed file | ✅ scoped to the additions described above — no other line touched |
+| **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
+| **Fix validated by a real run** | ❌ **no — diagnosed from the journal screenshot and code trace, not yet re-tested live** |
