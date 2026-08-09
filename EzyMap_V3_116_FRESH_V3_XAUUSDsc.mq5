@@ -14,11 +14,14 @@
 //     returned a flat 0.10 for every gold symbol. On the user's .sc  |
 //     broker one displayed pip is actually 0.01 (one broker point),  |
 //     not 0.10 - ported from the later V3.140 file's own fix.        |
-//     Uncorrected, every "...Pips" distance (preset SL, trailing,    |
-//     zone width, confluence tolerance) would resolve 10x too wide   |
-//     on XAUUSD.sc. Inputs: InpUseXAUUSDscBrokerPointPips (default   |
-//     TRUE), InpXAUUSDscStrategyPipPrice, InpStandardXAUUSDStrategy  |
-//     PipPrice.                                                      |
+//     Affects the small set of call sites that call StrategyPipSize()|
+//     directly: preset SL, trailing distance/activation, live-limit  |
+//     geometry extension, zone-duplicate tolerance, H1 EMA neutral   |
+//     band. (Confluence tolerance and other distances that read the  |
+//     cached g_pipSize are NOT affected - see correction #2 below.)  |
+//     Inputs: InpUseXAUUSDscBrokerPointPips (default TRUE),          |
+//     InpXAUUSDscStrategyPipPrice, InpStandardXAUUSDStrategyPipPrice,|
+//     InpPreserveLegacyPipDistances (default TRUE - see #2 below).   |
 //                                                                    |
 //  2. AUTO-CALIBRATING SPREAD GUARD. SpreadAllowed() was a plain     |
 //     static cap, disabled by default (InpMaxSpreadPoints=0) - no    |
@@ -73,9 +76,41 @@
 //     behaviour: V3116_FORCE_ZERO_CONF_MARKET_EXECUTION=true is a     |
 //     hardcoded const in the file the user uploaded, not something    |
 //     introduced by this port. Left exactly as-is per "no alteration".|
+//                                                                      |
+//  CORRECTION #2 (found from a same-day test after the above fixes:   |
+//  original V3.116 = 94.50 lots real/981.84 final balance, refined    |
+//  FRESH V3 = 22.30 lots/1001.24 final balance - gap narrowed but     |
+//  still large):                                                      |
+//   - Traced every consumer of pip size. CalculateMapAndMaybeReady()  |
+//     resets the CACHED g_pipSize global to a hardcoded flat 0.10 on  |
+//     every tick (line ~3800s, ORIGINAL code, present in the user's   |
+//     own upload, not touched by this port) - so confluence           |
+//     tolerance and everything else that reads g_pipSize was NEVER    |
+//     actually affected by fix #1. The earlier version of this header |
+//     claimed confluence tolerance shrank 10x; that was wrong and is  |
+//     corrected here.                                                 |
+//   - Fix #1 only ever reached the handful of sites calling            |
+//     StrategyPipSize() directly: preset stop-loss, trailing          |
+//     distance/activation, live-limit-geometry extension, zone-       |
+//     duplicate tolerance, H1 EMA neutral band. Tightening SL/        |
+//     trailing 10x (e.g. a 20-pip stop: $2.00 -> $0.20) made most     |
+//     positions stop out almost immediately on ordinary gold          |
+//     noise/spread, very plausibly tripping InpDailyLossStopPct's     |
+//     daily-loss floor much earlier in the session and cutting the    |
+//     trading day short - a narrower, corrected explanation for the   |
+//     remaining volume gap than the original confluence theory.       |
+//   - Added InpPreserveLegacyPipDistances (default TRUE, per explicit |
+//     instruction to match the original's real-dollar volume while    |
+//     keeping the .sc broker-point detection inputs available/        |
+//     documented for later use). StrategyPipSize() now returns the    |
+//     same numeric value on XAUUSD.sc as the standard branch when     |
+//     this is true, so every SL/trailing/tolerance distance is        |
+//     byte-identical to the original file's real-world behaviour      |
+//     again. Set to FALSE later if genuine broker-point-tight         |
+//     distances are ever wanted instead.                              |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "3.118"
+#property version   "3.119"
 
 #include <Trade/Trade.mqh>
 
@@ -174,16 +209,39 @@ input ulong  InpMagicNumber              = 2475116;
 // StrategyPipSize() below returned a flat 0.10 for every gold symbol,
 // cent-suffixed or not. On the user's .sc broker, one displayed gold pip is
 // actually ONE BROKER POINT (0.01 price), not ten (0.10) - the standard XAU
-// convention only holds on a non-cent-suffixed symbol. Left uncorrected,
-// every "...Pips" distance in this file (preset SL, trailing, zone width,
-// confluence tolerance) would be computed 10x too wide on XAUUSD.sc: e.g.
-// InpScalpStopPips=20 would resolve to a $2.00 stop instead of the intended
-// $0.20. This is a calculation correction, not a strategy change - the
-// number of pips each input asks for is unchanged, only what one pip is
-// worth in price on THIS symbol is fixed.
+// convention only holds on a non-cent-suffixed symbol. This is a
+// calculation correction, not a strategy change - the number of pips each
+// input asks for is unchanged, only what one pip is worth in price on THIS
+// symbol is fixed.
+//
+// CORRECTION (found tracing the same-day 94.50 -> 22.30 lot regression):
+// this file's own CalculateMapAndMaybeReady() resets the CACHED g_pipSize
+// variable to a hardcoded flat 0.10 on every tick (line ~3776, original,
+// unaltered code) - so confluence tolerance and every other distance that
+// reads g_pipSize was NEVER actually affected by this fix; the earlier
+// FRESH V3 header's claim that confluence tolerance shrank 10x was wrong.
+// The fix only ever reached the handful of call sites that call
+// StrategyPipSize() DIRECTLY: preset stop-loss, trailing distance/
+// activation, live-limit-geometry extension, zone-duplicate tolerance, and
+// the H1 EMA neutral band. Tightening the STOP/TRAIL distances 10x (e.g.
+// a 20-pip stop: $2.00 -> $0.20) made most positions stop out almost
+// immediately on ordinary gold noise/spread, which very plausibly tripped
+// this file's InpDailyLossStopPct daily-loss floor much earlier in the
+// session and cut the trading day short - a coherent, narrower explanation
+// for the volume gap than the original (incorrect) confluence theory.
+//
+// InpPreserveLegacyPipDistances (new, default TRUE per explicit
+// instruction to match the original's real-dollar SL/trailing/tolerance
+// distances) makes StrategyPipSize() return the same numeric value for
+// XAUUSD.sc as the standard branch, so every one of those distances is
+// byte-identical to the original file's real-world behaviour again. The
+// broker-point/.sc detection inputs above stay in place, documented and
+// available, in case genuine broker-point-tight distances are ever wanted
+// later - just set this to false.
 input bool   InpUseXAUUSDscBrokerPointPips      = true;
 input double InpXAUUSDscStrategyPipPrice        = 0.01;
 input double InpStandardXAUUSDStrategyPipPrice  = 0.10;
+input bool   InpPreserveLegacyPipDistances      = true;
 
 // Cent-account interpretation and hard exposure guards. AUTO detects
 // common cent currency/server labels; live .sc suffix detection is optional.
@@ -1152,11 +1210,16 @@ bool IsCentSuffixSymbol()
 
 // FRESH V3: XAUUSD.sc broker-point pip correction (see the input block
 // above for the full reasoning). Every other symbol/branch is unchanged.
+// InpPreserveLegacyPipDistances (default true) keeps the resolved value
+// identical to the original file's flat 0.10 so every SL/trailing/
+// tolerance distance that multiplies by this function matches the
+// original's real-dollar behaviour exactly.
 double StrategyPipSize()
 {
    if(IsGold())
    {
-      if(InpUseXAUUSDscBrokerPointPips && IsCentSuffixSymbol())
+      if(InpUseXAUUSDscBrokerPointPips && IsCentSuffixSymbol() &&
+         !InpPreserveLegacyPipDistances)
          return MathMax(InpXAUUSDscStrategyPipPrice,_Point);
       return MathMax(InpStandardXAUUSDStrategyPipPrice,_Point);
    }
@@ -9928,6 +9991,7 @@ int OnInit()
        " | IsGold="+string(IsGold()?"YES":"NO")+
        " | cent-suffix="+string(IsCentSuffixSymbol()?"YES":"NO")+
        " | InpUseXAUUSDscBrokerPointPips="+string(InpUseXAUUSDscBrokerPointPips?"ON":"OFF")+
+       " | InpPreserveLegacyPipDistances="+string(InpPreserveLegacyPipDistances?"ON (matches original volume)":"OFF (true broker-point distances)")+
        " | resolved strategy pip price="+DoubleToString(StrategyPipSize(),_Digits));
 
    ApplyPremiumChartTheme();
