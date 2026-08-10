@@ -52,9 +52,33 @@
 //      missing from EVERY EA in this codebase and was confirmed live   |
 //      via a user journal screenshot showing repeated "[Market closed]"|
 //      entry rejections on XAUUSD.sc around a session boundary.        |
-//    - The global order-request throttle pattern (OrderRequestThrottleOK()), |
-//      originally added after a confirmed live entry-spam incident on  |
-//      a different EzyMap build that cost real capital.                |
+//                                                                    |
+//  CORRECTION (v5.1, first tester run: XAUUSD.sc M5, 2026.08.10-11):  |
+//  a full day of "every tick based on real ticks" testing produced     |
+//  ZERO trades - positions stayed 0/6 the whole run while COOLDOWN     |
+//  REJECTED climbed to 33803 with SPREAD/CONCURRENCY both at 0.        |
+//  ROOT CAUSE: the per-level cooldown AND a since-removed global       |
+//  order-request throttle both timestamped themselves with             |
+//  GetTickCount64() (real OS milliseconds). That is correct for live   |
+//  trading, but in the Strategy Tester GetTickCount64() reflects the   |
+//  tester's actual CPU processing speed, not simulated market time -   |
+//  this run compressed a full day of ticks into ~6.6 REAL seconds      |
+//  (see the journal's "Test passed in 0:00:06.603"), so a "2 second"   |
+//  cooldown consumed roughly a third of the ENTIRE test's real         |
+//  duration on a single touch, and the global throttle (250ms,         |
+//  shared across all 2719 levels) effectively latched closed after     |
+//  its first-ever call and never reopened for the rest of the run.     |
+//  FIX: every cooldown/backoff timestamp in this file now uses         |
+//  TimeCurrent() (the simulated market clock, correct in both live     |
+//  and tester) instead of GetTickCount64(), at whole-second            |
+//  granularity - InpLevelReTouchCooldownMs/InpEntryRetryMinimumIntervalMs/ |
+//  InpEntryBackoffCooldownCapMs became ...Sec inputs. The global        |
+//  order-request throttle was removed outright rather than just        |
+//  re-timed: each level already has its own cooldown, and a shared     |
+//  global throttle would incorrectly suppress two DIFFERENT levels     |
+//  legitimately touching in the same tick, which this design wants     |
+//  to allow (no confluence filter, by spec).                           |
+//+------------------------------------------------------------------+ |
 //                                                                    |
 //  NEW FOR V5 (not present in any prior file):                       |
 //    - Flat multi-timeframe level store with dedup, seeded from       |
@@ -65,12 +89,13 @@
 //      freshly enters the touch tolerance band from a known side, not |
 //      on every tick it happens to linger there, which by itself      |
 //      already prevents a stationary whipsaw from firing every tick.  |
-//    - A per-level cooldown (InpLevelReTouchCooldownMs) applied on     |
+//    - A per-level cooldown (InpLevelReTouchCooldownSec) applied on    |
 //      EVERY fire attempt, win or lose, plus an additional exponential |
-//      backoff on genuine rejections (InpEntryRetryMinimumIntervalMs / |
-//      InpEntryBackoffCooldownCapMs) - the same shape of fix already   |
+//      backoff on genuine rejections (InpEntryRetryMinimumIntervalSec /|
+//      InpEntryBackoffCooldownCapSec) - the same shape of fix already  |
 //      proven for the exit-close retry storm, applied here on the      |
-//      entry side before it has a chance to become one.                |
+//      entry side before it has a chance to become one. Timed off      |
+//      TimeCurrent(), not GetTickCount64() - see the v5.1 CORRECTION.  |
 //    - Position-to-level binding via order comment ("V5@<price>"),     |
 //      reconciled every tick by scanning open positions rather than    |
 //      trusting CTrade's post-send ticket resolution (which is not     |
@@ -103,7 +128,7 @@
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
 #property link      ""
-#property version   "5.0"
+#property version   "5.1"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -186,22 +211,20 @@ input bool   InpAutoCalibrateSpreadCap   = true;
 input int    InpSpreadCalibrationTicks   = 100;
 input double InpSpreadCalibrationMultiplier = 3.0;
 
-// Global floor on time between ANY two order-send requests, regardless of
-// which level triggered them - the same single-choke-point pattern used
-// in FRESH V3 after a confirmed live entry-spam incident.
-input int    InpMinMsBetweenOrderRequests = 250;
-
 // Per-level cooldown applied on EVERY fire attempt (win or lose), so a
 // level whipsawing right at its price cannot re-fire faster than this,
 // independent of the exponential backoff below which only engages on
-// genuine broker rejections.
-input int    InpLevelReTouchCooldownMs = 2000;
+// genuine broker rejections. Whole-second granularity, timed off
+// TimeCurrent() (the simulated market clock) rather than GetTickCount64()
+// (real CPU time) - see the v5.1 CORRECTION note in the header for why
+// that distinction matters and broke the first tester run outright.
+input int    InpLevelReTouchCooldownSec = 2;
 
 // Entry-side retry backoff on genuine rejections (mirrors this session's
 // exit-close retry-storm fix, applied here on the entry side before it
-// has a chance to become one).
-input int    InpEntryRetryMinimumIntervalMs = 500;
-input int    InpEntryBackoffCooldownCapMs   = 15000;
+// has a chance to become one). Also TimeCurrent()-based, whole seconds.
+input int    InpEntryRetryMinimumIntervalSec = 1;
+input int    InpEntryBackoffCooldownCapSec   = 15;
 
 // Execution-distance safety for the fixed entry bracket.
 input int    InpExecutionStopCushionPoints = 2;
@@ -220,7 +243,7 @@ struct LevelState
    int            lastSide;              // +1 above, -1 below, 0 = touching/unknown
    ulong          openTicket;            // 0 = no live trade bound to this level
    int            entryConsecutiveFailures;
-   ulong          entryCooldownUntilMs;
+   datetime       entryCooldownUntil;
 };
 
 LevelState g_levels[];
@@ -232,8 +255,6 @@ double g_pipSize            = 0.10;
 double g_spreadCalSamples[];
 int    g_spreadCalCount        = 0;
 double g_spreadCalEffectiveCap = -1.0;
-
-double g_lastOrderRequestMs = 0;
 
 datetime g_lastH1BarTime = 0;
 datetime g_lastH4BarTime = 0;
@@ -266,7 +287,6 @@ double OneLotLoss(int direction,double entry,double sl);
 double ComputeRiskLot(int direction,double entry,double sl);
 double MedianOfSpreadSamples(double &values[],int count);
 bool   SpreadAllowed();
-bool   OrderRequestThrottleOK();
 double ZeroStopsLevelFallbackPrice(double referencePrice,long stopsLevel,long freezeLevel);
 bool   ExecutionDistanceValid(int direction,double entryPrice,double sl,double tp);
 bool   TradeRetcodeAccepted(uint code);
@@ -530,17 +550,6 @@ bool SpreadAllowed()
    return true; // fail open while calibrating
 }
 
-bool OrderRequestThrottleOK()
-{
-   double nowMs=(double)GetTickCount64();
-   if(g_lastOrderRequestMs>0.0 &&
-      nowMs-g_lastOrderRequestMs<(double)MathMax(0,InpMinMsBetweenOrderRequests))
-      return false;
-
-   g_lastOrderRequestMs=nowMs;
-   return true;
-}
-
 //------------------------------ Execution-distance safety ----------------
 double ZeroStopsLevelFallbackPrice(double referencePrice,long stopsLevel,long freezeLevel)
 {
@@ -665,7 +674,7 @@ void AddLevel(double price,datetime barTime,ENUM_TIMEFRAMES tf)
    g_levels[n].lastSide=0;
    g_levels[n].openTicket=0;
    g_levels[n].entryConsecutiveFailures=0;
-   g_levels[n].entryCooldownUntilMs=0;
+   g_levels[n].entryCooldownUntil=0;
 }
 
 // Seeds the historical lookback window the first time it is called for a
@@ -758,9 +767,14 @@ void ReconcileLevelBindings()
 //------------------------------ Touch detection / entry -------------------
 bool TryFireLevel(int levelIndex,int direction)
 {
-   ulong nowMs=GetTickCount64();
+   // TimeCurrent() (the simulated market clock) rather than GetTickCount64()
+   // (real CPU time) - see the v5.1 CORRECTION note in the header. Using
+   // GetTickCount64() here made every cooldown meaningless in the Strategy
+   // Tester, which can compress a full day of ticks into single-digit real
+   // seconds.
+   datetime nowTime=TimeCurrent();
 
-   if(nowMs<g_levels[levelIndex].entryCooldownUntilMs)
+   if(nowTime<g_levels[levelIndex].entryCooldownUntil)
    {
       g_gateCooldownRejects++;
       return false;
@@ -769,12 +783,6 @@ bool TryFireLevel(int levelIndex,int direction)
    if(CountOurPositions()>=InpMaxConcurrentPositions)
    {
       g_gateConcurrencyRejects++;
-      return false;
-   }
-
-   if(!OrderRequestThrottleOK())
-   {
-      g_gateCooldownRejects++;
       return false;
    }
 
@@ -807,10 +815,10 @@ bool TryFireLevel(int levelIndex,int direction)
 
    // Baseline cooldown applied on EVERY attempt, win or lose, so a
    // whipsaw at the exact level price cannot re-fire faster than
-   // InpLevelReTouchCooldownMs - independent of the exponential backoff
+   // InpLevelReTouchCooldownSec - independent of the exponential backoff
    // below, which only extends this further on genuine rejections.
-   g_levels[levelIndex].entryCooldownUntilMs=
-      nowMs+(ulong)MathMax(0,InpLevelReTouchCooldownMs);
+   g_levels[levelIndex].entryCooldownUntil=
+      nowTime+(datetime)MathMax(0,InpLevelReTouchCooldownSec);
 
    string comment="V5@"+DoubleToString(g_levels[levelIndex].price,_Digits);
 
@@ -846,20 +854,20 @@ bool TryFireLevel(int levelIndex,int direction)
    bool temporary=TemporaryTradeRetcode(code);
    int failCount=++g_levels[levelIndex].entryConsecutiveFailures;
 
-   int backoff=(int)MathMin(
-      (double)MathMax(0,InpEntryBackoffCooldownCapMs),
-      (double)MathMax(0,InpEntryRetryMinimumIntervalMs)*
+   int backoffSec=(int)MathMin(
+      (double)MathMax(0,InpEntryBackoffCooldownCapSec),
+      (double)MathMax(0,InpEntryRetryMinimumIntervalSec)*
       (double)(1<<MathMin(failCount,10)));
 
-   ulong cooldownUntil=nowMs+
-      (ulong)MathMax(MathMax(0,InpLevelReTouchCooldownMs),backoff);
-   g_levels[levelIndex].entryCooldownUntilMs=cooldownUntil;
+   datetime cooldownUntil=nowTime+
+      (datetime)MathMax(MathMax(0,InpLevelReTouchCooldownSec),backoffSec);
+   g_levels[levelIndex].entryCooldownUntil=cooldownUntil;
 
    Log("V5 ENTRY FAILED | "+(direction==1?"BUY":"SELL")+
        " | level="+DoubleToString(g_levels[levelIndex].price,_Digits)+
        " | temporary="+string(temporary?"YES":"NO")+
        " | consecutive failures="+IntegerToString(failCount)+
-       " | next retry in="+IntegerToString((int)(cooldownUntil-nowMs))+"ms"+
+       " | next retry in="+IntegerToString((int)(cooldownUntil-nowTime))+"s"+
        " | retcode="+IntegerToString((int)code)+
        " | "+trade.ResultRetcodeDescription());
 
@@ -971,7 +979,6 @@ int OnInit()
    g_spreadCalCount=0;
    g_spreadCalEffectiveCap=-1.0;
    ArrayResize(g_spreadCalSamples,MathMax(20,InpSpreadCalibrationTicks));
-   g_lastOrderRequestMs=0;
 
    g_gateConcurrencyRejects=0;
    g_gateCooldownRejects=0;
