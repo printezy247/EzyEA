@@ -348,7 +348,7 @@
 //  were never present in this lineage; they were not removed.         |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "2.106"
+#property version   "2.107"
 
 #include <Trade/Trade.mqh>
 
@@ -1380,6 +1380,31 @@ input double InpExitBackoffCushionStepPct  = 0.02;   // % of current price added
 input int    InpExitBackoffMaxSteps        = 8;       // cap on how many failures keep widening the cushion
 input int    InpExitBackoffCooldownCapMs   = 15000;   // cap on the exponential retry backoff
 
+// ZERO STOPS-LEVEL FALLBACK - ported after a real BTCUSD.sc log (analysed
+// 2026-08-10) showed "stopLevel=0 | freezeLevel=0" logged alongside every
+// single INVALID_STOPS rejection on the FRESH V3 BTCUSD line, including on
+// the very first attempt, before any backoff cushion had accumulated -
+// strong evidence that broker-reported zero does not reliably mean "no
+// minimum distance" on this account. When both SYMBOL_TRADE_STOPS_LEVEL
+// and SYMBOL_TRADE_FREEZE_LEVEL report zero, this adds a percentage-of-
+// price floor to the required clearance from the FIRST attempt, instead
+// of only widening after failures accumulate.
+input double InpZeroStopsLevelFallbackPct = 0.05;
+
+// VIRTUAL TRAIL CLOSE BACKOFF - ported after the same real BTCUSD.sc log
+// showed 547 combined FROZEN(10029)/POSITION_CLOSED(10036) failures on
+// "HYBRID VIRTUAL TRAIL CLOSE FAILED" on the FRESH V3 BTCUSD line, the
+// single largest failure category, with the same tickets failing
+// repeatedly back-to-back. ClosePositionAtVirtualTrail() here has the
+// identical latent gap - unlike the modify path above, it carries NO
+// cooldown or retry-state at all, so it retries RequestSynchronizedPositionClose()
+// on every single tick for as long as the virtual trail stays hit, hammering
+// the broker with close requests for a position that is either temporarily
+// FROZEN or has ALREADY closed by other means. Reuses
+// InpExitModifyMinimumIntervalMs/InpExitBackoffCooldownCapMs above for its
+// retry cadence rather than adding yet more inputs for the same underlying
+// policy.
+
 // Legacy compatibility inputs retained but hard-disabled in V2.009F.
 input bool   InpUseContinuationTrail           = false;
 input double InpTrailStartR                    = 1.50;
@@ -1791,6 +1816,17 @@ struct ExitExecutionState
    // the instant a modify is accepted. See InpExitBackoffCushionStepPct.
    int    consecutiveInvalidStops;
 
+   // VIRTUAL TRAIL CLOSE BACKOFF: separate from the modify counters above
+   // - a close attempt and a modify attempt are different operations on
+   // the same ticket, and coupling their retry state would let a recent
+   // modify failure delay a legitimate close (or vice versa). Consecutive
+   // rejected close attempts at the virtual trail; reset to 0 on
+   // acceptance OR when the broker reports the position is already closed
+   // (POSITION_CLOSED means the goal is already achieved, not a failure).
+   int    closeConsecutiveFailures;
+   ulong  closeCooldownUntilMs;
+   uint   lastCloseRetcode;
+
    // V3.190 S2: volume requested on the in-flight close. 0.0 means the
    // request was a full close; a positive value marks it as a partial so the
    // deal handler can tell the two apart when the fill arrives.
@@ -2051,6 +2087,7 @@ int HybridTrailStateIndex(ulong ticket);
 int EnsureHybridTrailState(ulong ticket,int direction,double entry,double current,datetime positionTime,MqlTick &tick);
 double ReconstructTrailPeak(int direction,double entry,datetime positionTime,MqlTick &tick);
 double ExitBackoffCushionPrice(double referencePrice,int backoffSteps);
+double ZeroStopsLevelFallbackPrice(double referencePrice,long stopsLevel,long freezeLevel);
 double BrokerTrailMinimumDistance(double current,int backoffSteps);
 double BrokerCompatibleTrailSL(int direction,double current,double virtualStop,int backoffSteps);
 int ExitExecutionStateIndexByTicket(ulong ticket);
@@ -3949,7 +3986,8 @@ bool FixedTrailSLBrokerValid(int direction,
       MathMax(_Point,
               ((double)MathMax(stopsLevel,freezeLevel)+
                MathMax(0,InpExecutionStopCushionPoints))*_Point)+
-      ExitBackoffCushionPrice(currentPrice,backoffSteps);
+      ExitBackoffCushionPrice(currentPrice,backoffSteps)+
+      ZeroStopsLevelFallbackPrice(currentPrice,stopsLevel,freezeLevel);
 
    if(direction==1)
       return requestedSL<=currentPrice-minimumDistance+_Point*0.25;
@@ -4329,6 +4367,13 @@ double ExitBackoffCushionPrice(double referencePrice,int backoffSteps)
    return referencePrice*MathMax(0.0,InpExitBackoffCushionStepPct)/100.0*steps;
 }
 
+double ZeroStopsLevelFallbackPrice(double referencePrice,long stopsLevel,long freezeLevel)
+{
+   if(stopsLevel>0 || freezeLevel>0 || referencePrice<=0.0)
+      return 0.0;
+   return referencePrice*MathMax(0.0,InpZeroStopsLevelFallbackPct)/100.0;
+}
+
 double BrokerTrailMinimumDistance(double current,int backoffSteps)
 {
    long stopsLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
@@ -4339,7 +4384,8 @@ double BrokerTrailMinimumDistance(double current,int backoffSteps)
    double base=MathMax(_Point,
                        ((double)MathMax(stopsLevel,freezeLevel)+cushion)*_Point);
 
-   return base+ExitBackoffCushionPrice(current,backoffSteps);
+   return base+ExitBackoffCushionPrice(current,backoffSteps)+
+          ZeroStopsLevelFallbackPrice(current,stopsLevel,freezeLevel);
 }
 
 double BrokerCompatibleTrailSL(int direction,
@@ -4474,7 +4520,8 @@ double LatestBrokerValidExitSL(int direction,
          ProtectionTickSize(),
          ((double)MathMax(stopsLevel,freezeLevel)+
           cushion)*_Point)+
-      ExitBackoffCushionPrice(current,backoffSteps);
+      ExitBackoffCushionPrice(current,backoffSteps)+
+      ZeroStopsLevelFallbackPrice(current,stopsLevel,freezeLevel);
 
    double allowed=
       direction==1
@@ -4737,6 +4784,8 @@ bool RequestSynchronizedPositionClose(ulong ticket,
    trade.SetDeviationInPoints(
       (ulong)MathMax(0,InpDeviationPoints));
 
+   g_exitExecutionStates[stateIndex].lastCloseRetcode=code;
+
    bool accepted=
       sent && TradeRetcodeAccepted(code);
 
@@ -4922,6 +4971,13 @@ bool ClosePositionAtVirtualTrail(ulong ticket,
                                  double stop,
                                  double peak)
 {
+   int stateIndex=EnsureExitExecutionState(ticket);
+
+   ulong nowMs=NowMs();
+   if(stateIndex>=0 &&
+      nowMs<g_exitExecutionStates[stateIndex].closeCooldownUntilMs)
+      return false;
+
    ulong deviation=
       (ulong)MathMax(
          0,
@@ -4935,15 +4991,48 @@ bool ClosePositionAtVirtualTrail(ulong ticket,
          peak,
          deviation);
 
-   if(!accepted)
+   if(accepted)
    {
-      Log("HYBRID VIRTUAL TRAIL CLOSE FAILED | "+context+
-          " | ticket="+(string)ticket+
-          " | observed="+DoubleToString(current,_Digits)+
-          " | virtualSL="+DoubleToString(stop,_Digits));
+      if(stateIndex>=0)
+         g_exitExecutionStates[stateIndex].closeConsecutiveFailures=0;
+      return true;
    }
 
-   return accepted;
+   uint code=(stateIndex>=0)?g_exitExecutionStates[stateIndex].lastCloseRetcode:0;
+
+   if(code==TRADE_RETCODE_POSITION_CLOSED)
+   {
+      if(stateIndex>=0)
+         g_exitExecutionStates[stateIndex].closeConsecutiveFailures=0;
+
+      Log("HYBRID VIRTUAL TRAIL CLOSE ALREADY DONE | "+context+
+          " | ticket="+(string)ticket+
+          " | position was already closed by the time this request reached the broker");
+      return true;
+   }
+
+   int failCount=0;
+   int cooldown=MathMax(0,InpExitModifyMinimumIntervalMs);
+
+   if(stateIndex>=0)
+   {
+      failCount=++g_exitExecutionStates[stateIndex].closeConsecutiveFailures;
+      cooldown=(int)MathMin(
+         (double)MathMax(0,InpExitBackoffCooldownCapMs),
+         (double)MathMax(0,InpExitModifyMinimumIntervalMs)*
+         (double)(1<<MathMin(failCount,10)));
+      g_exitExecutionStates[stateIndex].closeCooldownUntilMs=nowMs+(ulong)cooldown;
+   }
+
+   Log("HYBRID VIRTUAL TRAIL CLOSE FAILED | "+context+
+       " | ticket="+(string)ticket+
+       " | observed="+DoubleToString(current,_Digits)+
+       " | virtualSL="+DoubleToString(stop,_Digits)+
+       " | consecutive failures="+IntegerToString(failCount)+
+       " | next retry in="+IntegerToString(cooldown)+"ms"+
+       " | retcode="+IntegerToString((int)code));
+
+   return false;
 }
 
 void PruneHybridTrailStates()
