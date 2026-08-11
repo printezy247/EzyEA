@@ -128,9 +128,32 @@
 //|         unchanged. Generalized ManageTrendTrailing() to trail any   |
 //|         tag that isn't "V1R" (previously hardcoded to "V1T" only)   |
 //|         so "V1L" positions get managed too.                        |
+//| 1.008 - Journal from the V1.007 run showed attempts=284 (the level- |
+//|         touch source is clearly working) but only accepted=32,     |
+//|         with open=4/4 pinned the entire time - the Strategy Tester |
+//|         Inputs tab caches the user's last-used value per EA and    |
+//|         doesn't pick up a new compiled default, so the actual cap  |
+//|         was still 4 despite the code default being raised to 20    |
+//|         twice already. That single stale field, not signal supply, |
+//|         is almost certainly why only 32/284 converted. Raised the  |
+//|         default further, 20->50, and flagged to the user that they |
+//|         must set InpMaxConcurrentPositions explicitly in the       |
+//|         tester's Inputs tab - a new code default alone won't apply |
+//|         to an existing saved run. Target: minimum 100 trades/day.  |
+//|                                                                     |
+//|         Also fixed a real bug surfaced by the same log: repeated   |
+//|         [invalid stops] on trailing modifies (sl jumping from      |
+//|         4128.10 to 4267.46 and failing every time). ManageTrend-    |
+//|         Trailing() only checked the candidate stop was far enough  |
+//|         from current price, never that it was on the correct SIDE  |
+//|         of it - after a pullback from a new peak, a peak-based     |
+//|         candidate can land above current price on a buy (or below  |
+//|         it on a sell) and get rejected every attempt until a fresh |
+//|         peak forms. Added an explicit side check before the        |
+//|         distance gate.                                             |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.007"
+#property version   "1.008"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -189,7 +212,7 @@ input double InpAtrSlMultiplier             = 1.5;
 
 input group "=== Risk / Sizing ==="
 input double InpRiskPercentPerTrade         = 0.25;
-input int    InpMaxConcurrentPositions      = 20;
+input int    InpMaxConcurrentPositions      = 50;
 input double InpMaxLotsAbsolute             = 5.0;
 // On a small account, the broker's minimum lot can itself risk more than
 // InpRiskPercentPerTrade at a wide ATR-based SL (confirmed live: XAUUSD's
@@ -1271,6 +1294,16 @@ void ManageTrendTrailing()
 
       double minStep=InpTrendTrailMinStepPoints*_Point;
       if(MathAbs(candidateSl-currentSl)<minStep) continue;
+
+      // The peak only ever grows, so after a pullback the peak-based
+      // candidate can land on the WRONG side of the CURRENT price (above
+      // it for a buy, below it for a sell) even though it's still an
+      // "improvement" over the old stored SL - the broker then rejects it
+      // as [invalid stops] every single attempt until a fresh peak forms.
+      // Distance alone doesn't catch this (MathAbs doesn't know which
+      // side), so the side is checked explicitly before the distance gate.
+      bool validSide=(direction==1)?(candidateSl<currentPrice):(candidateSl>currentPrice);
+      if(!validSide) continue;
 
       double minDist=MinimumStopDistance(currentPrice);
       if(MathAbs(currentPrice-candidateSl)<minDist) continue;
