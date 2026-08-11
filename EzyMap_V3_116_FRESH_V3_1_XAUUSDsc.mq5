@@ -178,7 +178,7 @@
 //     distances are ever wanted instead.                              |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "3.102"
+#property version   "3.103"
 
 #include <Trade/Trade.mqh>
 
@@ -2251,8 +2251,17 @@ void ManageHybridTrailingPositions(string context)
       return;
 
    double strategyPip=StrategyPipSize();
-   double activationDistance=MathMax(_Point,MathMax(0.0,InpTrailingActivationPips)*strategyPip);
    double trailDistance=MathMax(0.1,InpTrailingDistancePips)*strategyPip;
+   // Trail activation floor: activation used to default to InpTrailingActivationPips=0,
+   // so the trail armed on virtually the first favourable tick and began improving the
+   // (much wider) preset SL immediately - well before price had moved a full trailing
+   // distance in profit. Per explicit instruction, activation now never engages sooner
+   // than InpTrailingDistancePips itself (e.g. a 7-pip trailing stop only starts trailing
+   // once the position is running 7 pips in profit); InpTrailingActivationPips can still
+   // require MORE favourable movement than that if set higher, it just can no longer
+   // require less.
+   double activationDistance=MathMax(trailDistance,
+      MathMax(_Point,MathMax(0.0,InpTrailingActivationPips)*strategyPip));
    double presetDistance=MathMax(0.1,InpPresetStopLossPips)*strategyPip;
    double minimumStep=MathMax(_Point,MathMax(0.1,InpTrailingStepPips)*strategyPip);
 
