@@ -23,9 +23,22 @@
 //|         continuation when TRENDING with ATR-trail-only (no TP).   |
 //|         ATR-based SL for both. 0.25% equity risk per trade, 4     |
 //|         concurrent position cap, XAUUSD-only, cent-account aware. |
+//| 1.001 - Fixed a real sizing bug found in the first live tester    |
+//|         run: ComputeLotsForRisk() divided the risk budget by the  |
+//|         cent-account divisor while OneLotLoss()/OrderCalcProfit() |
+//|         stayed in raw account currency, undersizing every lot     |
+//|         calc ~100x on a real cent (USC) account and silently      |
+//|         zeroing every entry. Risk budget now stays raw/undivided  |
+//|         to match OrderCalcProfit()'s units - EffectiveAccountEq-  |
+//|         uity() is still used for status-log display only. Also   |
+//|         split the single distanceRejects gate counter into        |
+//|         distanceRejects (SL tighter than broker minimum) vs       |
+//|         sizingRejects (computed lots rounded to 0), and added a   |
+//|         Log() line with the actual numbers on every reject so the |
+//|         next test run pinpoints the exact cause without guessing. |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.000"
+#property version   "1.001"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -152,6 +165,7 @@ int g_gateRejected           = 0;
 int g_gateSpreadRejects      = 0;
 int g_gateConcurrencyRejects = 0;
 int g_gateDistanceRejects    = 0;
+int g_gateSizingRejects      = 0;
 
 //======================================================================
 // Forward declarations
@@ -403,7 +417,14 @@ double OneLotLoss(int direction,double entry,double sl)
 
 double ComputeLotsForRisk(int direction,double entry,double sl)
 {
-   double riskBudget=EffectiveAccountEquity()*InpRiskPercentPerTrade/100.0;
+   // Risk budget must stay in the SAME raw account-currency units that
+   // OrderCalcProfit() (via OneLotLoss below) returns. EffectiveAccountEquity()
+   // divides by the cent-account divisor purely for human-readable status
+   // logging - dividing it here while perLotLoss stays undivided undersized
+   // every lot calculation ~100x on a real cent account and silently zeroed
+   // every entry attempt (confirmed live: 23/23 attempts, 0 trades, on a
+   // USC-denominated account).
+   double riskBudget=AccountInfoDouble(ACCOUNT_EQUITY)*InpRiskPercentPerTrade/100.0;
    if(riskBudget<=0.0) return 0.0;
 
    double perLotLoss=OneLotLoss(direction,entry,sl);
@@ -728,6 +749,9 @@ void TryOpenPosition(int direction,string tag,double slDistance,double initialTp
    if(MathAbs(entry-sl)<minDist)
    {
       g_gateDistanceRejects++;
+      Log("ENTRY REJECTED "+tag+" reason=SL_DISTANCE_TOO_TIGHT"+
+          " slDistance="+PriceText(slDistance)+
+          " minDist="+PriceText(minDist));
       return;
    }
 
@@ -740,7 +764,11 @@ void TryOpenPosition(int direction,string tag,double slDistance,double initialTp
    double lots=ComputeLotsForRisk(direction,entry,sl);
    if(lots<=0.0)
    {
-      g_gateDistanceRejects++;
+      g_gateSizingRejects++;
+      Log("ENTRY REJECTED "+tag+" reason=ZERO_LOTS"+
+          " riskEquity="+DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2)+
+          " entry="+PriceText(entry)+" sl="+PriceText(sl)+
+          " perLotLoss="+DoubleToString(OneLotLoss(direction,entry,sl),2));
       return;
    }
 
@@ -1035,6 +1063,7 @@ void PeriodicStatusLog()
        " | rejected="+IntegerToString(g_gateRejected)+
        " | spreadRejects="+IntegerToString(g_gateSpreadRejects)+
        " | concurrencyRejects="+IntegerToString(g_gateConcurrencyRejects)+
-       " | distanceRejects="+IntegerToString(g_gateDistanceRejects));
+       " | distanceRejects="+IntegerToString(g_gateDistanceRejects)+
+       " | sizingRejects="+IntegerToString(g_gateSizingRejects));
 }
 //+------------------------------------------------------------------+
