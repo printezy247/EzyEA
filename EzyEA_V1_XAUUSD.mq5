@@ -36,9 +36,22 @@
 //|         sizingRejects (computed lots rounded to 0), and added a   |
 //|         Log() line with the actual numbers on every reject so the |
 //|         next test run pinpoints the exact cause without guessing. |
+//| 1.002 - Confirmed via the ENTRY REJECTED log added in 1.001: on a |
+//|         $1000 account, XAUUSD's 100oz contract means the broker's |
+//|         own 0.01 minimum lot can already risk more than 0.25% at  |
+//|         a normal ATR-based SL width (e.g. an $8.75 SL already     |
+//|         risks $8.75 at 0.01 lot = 0.875%), so risk-based sizing   |
+//|         rounds to 0 and every trade gets rejected - not a code    |
+//|         bug, a real small-account/contract-size constraint. Added|
+//|         InpAllowMinimumLotFallback: when sizing rounds to 0, fall |
+//|         back to the broker minimum lot instead of skipping the    |
+//|         trade, but only if that lot's real risk stays under the   |
+//|         explicit InpMinimumLotFallbackMaxRiskPct ceiling (default |
+//|         1.0%) - restores trade frequency on a small account       |
+//|         without silently exceeding the user's risk tolerance.     |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.001"
+#property version   "1.002"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -81,6 +94,15 @@ input group "=== Risk / Sizing ==="
 input double InpRiskPercentPerTrade         = 0.25;
 input int    InpMaxConcurrentPositions      = 4;
 input double InpMaxLotsAbsolute             = 5.0;
+// On a small account, the broker's minimum lot can itself risk more than
+// InpRiskPercentPerTrade at a wide ATR-based SL (confirmed live: XAUUSD's
+// 100oz contract makes even 0.01 lot risk ~$8.75 on an $8.75 SL, well over
+// 0.25% of a $1000 account, which rounds risk-based sizing down to 0 lots
+// and silently rejects the trade). When that happens, fall back to the
+// broker minimum lot instead of skipping the trade - but only if that
+// minimum lot's real risk still stays under this explicit ceiling.
+input bool   InpAllowMinimumLotFallback       = true;
+input double InpMinimumLotFallbackMaxRiskPct  = 1.0;
 input double InpMaxMarginUsePct             = 40.0;
 
 input group "=== Exit Management ==="
@@ -424,14 +446,27 @@ double ComputeLotsForRisk(int direction,double entry,double sl)
    // every lot calculation ~100x on a real cent account and silently zeroed
    // every entry attempt (confirmed live: 23/23 attempts, 0 trades, on a
    // USC-denominated account).
-   double riskBudget=AccountInfoDouble(ACCOUNT_EQUITY)*InpRiskPercentPerTrade/100.0;
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   double riskBudget=equity*InpRiskPercentPerTrade/100.0;
    if(riskBudget<=0.0) return 0.0;
 
    double perLotLoss=OneLotLoss(direction,entry,sl);
    if(perLotLoss<=0.0) return 0.0;
 
    double lots=NormalizeVolumeDown(riskBudget/perLotLoss);
-   if(lots<=0.0) return 0.0;
+
+   if(lots<=0.0)
+   {
+      if(!InpAllowMinimumLotFallback) return 0.0;
+
+      double minVol=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+      if(minVol<=0.0) return 0.0;
+
+      double minVolRiskPct=(equity>0.0)?(minVol*perLotLoss/equity)*100.0:1.0e9;
+      if(minVolRiskPct>InpMinimumLotFallbackMaxRiskPct) return 0.0;
+
+      lots=minVol;
+   }
 
    lots=MathMin(lots,InpMaxLotsAbsolute);
 
@@ -439,7 +474,6 @@ double ComputeLotsForRisk(int direction,double entry,double sl)
    ENUM_ORDER_TYPE type=(direction==1)?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
    if(OrderCalcMargin(type,_Symbol,lots,entry,marginRequired))
    {
-      double equity=AccountInfoDouble(ACCOUNT_EQUITY);
       if(equity>0.0 && marginRequired>0.0 && (marginRequired/equity)*100.0>InpMaxMarginUsePct)
       {
          double scale=(InpMaxMarginUsePct/100.0*equity)/marginRequired;
