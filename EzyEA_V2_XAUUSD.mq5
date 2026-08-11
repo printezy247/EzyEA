@@ -21,9 +21,25 @@
 //|                                                                    |
 //| CHANGELOG                                                          |
 //| 2.000 - Initial build.                                             |
+//| 2.001 - First live run: only 2 lots total volume, still short of   |
+//|         target. Two structural fixes, both aimed at frequency:     |
+//|         (1) H4/D1/W1 lookback shortened 30/20/12 -> 15/8/5. A swing |
+//|         high/low over a long lookback on a higher timeframe can    |
+//|         sit far from where price actually trades, so it may never  |
+//|         get touched in a normal test window at all - the real      |
+//|         bottleneck, not a settings issue. Shorter lookbacks keep    |
+//|         these levels closer to recent price action. (2) Switched   |
+//|         ProcessLevelTouches() from edge-triggered (must fully leave |
+//|         the zone before re-firing) to cooldown-only re-arm, per     |
+//|         explicit "maximum trade frequency" request - the reference |
+//|         file's "no entry governors" design doesn't require a full  |
+//|         round-trip out of the zone either, only a cooldown. A level |
+//|         price is chopping right at now fires repeatedly every       |
+//|         InpLevelReentrySeconds instead of going silent until price  |
+//|         fully exits and re-enters.                                 |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "2.000"
+#property version   "2.001"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -57,9 +73,15 @@ input int    InpLevelReentrySeconds         = 60;
 input int    InpLevelLookbackM5             = 24;
 input int    InpLevelLookbackM15            = 32;
 input int    InpLevelLookbackH1             = 24;
-input int    InpLevelLookbackH4             = 30;
-input int    InpLevelLookbackD1             = 20;
-input int    InpLevelLookbackW1             = 12;
+// H4/D1/W1 shortened from 30/20/12: a swing high/low over a long lookback
+// on a higher timeframe can sit far from where price actually trades,
+// so it may never get touched in a normal test window at all - the real
+// bottleneck behind the first V2 run's low frequency. Shorter lookbacks
+// keep these levels closer to recent price action, and still update the
+// moment their own timeframe closes a new bar.
+input int    InpLevelLookbackH4             = 15;
+input int    InpLevelLookbackD1             = 8;
+input int    InpLevelLookbackW1             = 5;
 
 input group "=== Stops / Trail (ATR-based, M5) ==="
 input int    InpAtrPeriod                   = 14;
@@ -819,17 +841,16 @@ void ProcessLevelTouches()
       bool touching=(observedHi>=g_levels[i].price-tolerance &&
                      observedLo<=g_levels[i].price+tolerance);
 
-      if(!touching)
-      {
-         g_levels[i].inZone=false;
-         continue;
-      }
+      g_levels[i].inZone=touching; // kept for drawing/diagnostics only
 
-      // Edge-triggered: only fires on the tick that FIRST enters the zone,
-      // never repeatedly while price sits inside it.
-      if(g_levels[i].inZone) continue;
-      g_levels[i].inZone=true;
+      if(!touching) continue;
 
+      // Cooldown-only re-arm, per explicit "maximum trade frequency"
+      // request: the reference file's "no entry governors" design does not
+      // require price to fully leave the zone before a level can fire
+      // again - only InpLevelReentrySeconds gates it. A level price is
+      // chopping right at now fires repeatedly on cooldown instead of
+      // going silent until a full round-trip out of the zone.
       if(TimeCurrent()<g_levels[i].cooldownUntil) continue;
 
       TryLevelEntry(g_levels[i].fadeDirection,g_levels[i].price);
