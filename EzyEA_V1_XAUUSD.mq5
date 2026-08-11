@@ -49,9 +49,24 @@
 //|         explicit InpMinimumLotFallbackMaxRiskPct ceiling (default |
 //|         1.0%) - restores trade frequency on a small account       |
 //|         without silently exceeding the user's risk tolerance.     |
+//| 1.003 - Confirmed live: trades now fire and the account was up    |
+//|         (1135 vs 1000). Increased trade frequency: range entries  |
+//|         now trigger off a wick piercing the Bollinger band (the   |
+//|         common case) instead of requiring a full CLOSE beyond it, |
+//|         while the entry itself still needs the confirmed close    |
+//|         back inside, so nothing repaints. Trend entries dropped   |
+//|         the redundant "closed higher than the prior bar" filter   |
+//|         (the EMA reclaim on the close is already the real         |
+//|         confirmation) and now accept a touch on either of the     |
+//|         last two closed bars, not just the second-to-last one.    |
+//|         Raised InpMaxConcurrentPositions 4->6 since a sustained    |
+//|         trend can otherwise cap out on valid signals. Added        |
+//|         WriteFinalReport(): total trades / total lots traded /    |
+//|         net P/L from this EA's own deal history (by symbol+magic),|
+//|         printed from OnDeinit() alongside the run's final balance.|
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.002"
+#property version   "1.003"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -92,7 +107,7 @@ input double InpAtrSlMultiplier             = 1.5;
 
 input group "=== Risk / Sizing ==="
 input double InpRiskPercentPerTrade         = 0.25;
-input int    InpMaxConcurrentPositions      = 4;
+input int    InpMaxConcurrentPositions      = 6;
 input double InpMaxLotsAbsolute             = 5.0;
 // On a small account, the broker's minimum lot can itself risk more than
 // InpRiskPercentPerTrade at a wide ATR-based SL (confirmed live: XAUUSD's
@@ -241,6 +256,8 @@ void   DrawStatusLabel();
 void   DrawChart();
 void   RemoveAllDrawings();
 
+void   WriteFinalReport();
+
 void   PeriodicStatusLog();
 
 //======================================================================
@@ -292,6 +309,8 @@ int OnInit()
 
 void OnDeinit(const int reason)
 {
+   WriteFinalReport();
+
    if(g_handleAdxH1!=INVALID_HANDLE)   IndicatorRelease(g_handleAdxH1);
    if(g_handleBandsM5!=INVALID_HANDLE) IndicatorRelease(g_handleBandsM5);
    if(g_handleEmaM5!=INVALID_HANDLE)   IndicatorRelease(g_handleEmaM5);
@@ -676,17 +695,22 @@ bool EvaluateRangeEntry(int &direction)
    if(CopyBufferSeries(g_handleBandsM5,2,3,lowerBuf)<3) return false;
 
    double close1=iClose(_Symbol,PERIOD_M5,1);
-   double close2=iClose(_Symbol,PERIOD_M5,2);
+   double high2 =iHigh(_Symbol,PERIOD_M5,2);
+   double low2  =iLow(_Symbol,PERIOD_M5,2);
 
-   // Faded from above the upper band back inside -> SELL toward the mean.
-   if(close2>upperBuf[2] && close1<=upperBuf[1])
+   // A wick piercing the band is a far more common event than a full close
+   // beyond it, so the "outside" leg uses the high/low; the entry itself
+   // still requires the confirmed CLOSE back inside, so nothing repaints.
+
+   // Wicked above the upper band, closed back inside -> SELL toward the mean.
+   if(high2>upperBuf[2] && close1<=upperBuf[1])
    {
       direction=-1;
       return true;
    }
 
-   // Faded from below the lower band back inside -> BUY toward the mean.
-   if(close2<lowerBuf[2] && close1>=lowerBuf[1])
+   // Wicked below the lower band, closed back inside -> BUY toward the mean.
+   if(low2<lowerBuf[2] && close1>=lowerBuf[1])
    {
       direction=1;
       return true;
@@ -703,15 +727,19 @@ bool EvaluateTrendEntry(int &direction)
    if(CopyBufferSeries(g_handleEmaM5,0,3,emaBuf)<3) return false;
 
    double close1=iClose(_Symbol,PERIOD_M5,1);
-   double close2=iClose(_Symbol,PERIOD_M5,2);
+   double low1  =iLow(_Symbol,PERIOD_M5,1);
+   double high1 =iHigh(_Symbol,PERIOD_M5,1);
    double low2  =iLow(_Symbol,PERIOD_M5,2);
    double high2 =iHigh(_Symbol,PERIOD_M5,2);
 
    if(g_trendDirection==1)
    {
-      // Pulled back to/through EMA20 against the uptrend, then closed back
-      // above it in the trend direction -> continuation BUY.
-      if(low2<=emaBuf[2] && close1>emaBuf[1] && close1>close2)
+      // Pulled back to/through EMA20 against the uptrend (on either of the
+      // last two closed bars) and reclaimed it on the close -> continuation
+      // BUY. Dropped the extra "closed higher than the prior bar" filter -
+      // the EMA reclaim on the close is already the real confirmation, and
+      // requiring both roughly halved how often a valid pullback qualified.
+      if((low2<=emaBuf[2] || low1<=emaBuf[1]) && close1>emaBuf[1])
       {
          direction=1;
          return true;
@@ -719,7 +747,7 @@ bool EvaluateTrendEntry(int &direction)
    }
    else
    {
-      if(high2>=emaBuf[2] && close1<emaBuf[1] && close1<close2)
+      if((high2>=emaBuf[2] || high1>=emaBuf[1]) && close1<emaBuf[1])
       {
          direction=-1;
          return true;
@@ -1099,5 +1127,41 @@ void PeriodicStatusLog()
        " | concurrencyRejects="+IntegerToString(g_gateConcurrencyRejects)+
        " | distanceRejects="+IntegerToString(g_gateDistanceRejects)+
        " | sizingRejects="+IntegerToString(g_gateSizingRejects));
+}
+
+// Summarizes this EA's own deal history (by symbol+magic, so it never
+// picks up manual or other-EA trades sharing the account) at shutdown -
+// covers both a Strategy Tester run ending and the EA being removed live.
+void WriteFinalReport()
+{
+   if(!HistorySelect(0,TimeCurrent())) return;
+
+   int total=HistoryDealsTotal();
+   int trades=0;
+   double lotsTraded=0.0;
+   double netPnl=0.0;
+
+   for(int i=0;i<total;i++)
+   {
+      ulong dealTicket=HistoryDealGetTicket(i);
+      if(dealTicket==0) continue;
+      if(HistoryDealGetString(dealTicket,DEAL_SYMBOL)!=_Symbol) continue;
+      if((ulong)HistoryDealGetInteger(dealTicket,DEAL_MAGIC)!=InpMagicNumber) continue;
+
+      if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket,DEAL_ENTRY)==DEAL_ENTRY_IN)
+      {
+         trades++;
+         lotsTraded+=HistoryDealGetDouble(dealTicket,DEAL_VOLUME);
+      }
+
+      netPnl+=HistoryDealGetDouble(dealTicket,DEAL_PROFIT)+
+              HistoryDealGetDouble(dealTicket,DEAL_SWAP)+
+              HistoryDealGetDouble(dealTicket,DEAL_COMMISSION);
+   }
+
+   Log("V1 FINAL REPORT"+
+       " | trades="+IntegerToString(trades)+
+       " | total lots traded="+DoubleToString(lotsTraded,2)+
+       " | net P/L="+DoubleToString(netPnl,2)+" "+AccountInfoString(ACCOUNT_CURRENCY));
 }
 //+------------------------------------------------------------------+
