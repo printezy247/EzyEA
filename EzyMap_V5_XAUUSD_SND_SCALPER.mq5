@@ -4,131 +4,90 @@
 //  EZYMAP V5 - GROUND-UP REBUILD, XAUUSD ONLY                        |
 //                                                                    |
 //  Built after a full prior session spent hardening the FRESH V3/V4  |
-//  family's broker-execution robustness (retry-storm fixes on the    |
-//  exit-close path, a zero-stops-level clearance fallback, an        |
-//  auto-calibrating spread guard). Despite all of that, a live       |
+//  family's broker-execution robustness. Despite all of that, a live |
 //  attach of FRESH V3 to a real cent-account chart drew the account  |
-//  down ~40% (270 -> 165 USC) in a session where Strategy Tester     |
-//  runs on the identical EA never showed more than ~10% drawdown.    |
-//  Investigation of the live journal/history confirmed the tester    |
-//  structurally cannot reproduce broker-side rejections (FROZEN,     |
-//  MARKET CLOSED, INVALID_STOPS) the way a real broker issues them,  |
-//  so backtest results were never going to predict this EA family's |
-//  live robustness. Per explicit instruction, V5 abandons the old    |
-//  multi-layer/confluence trading logic entirely and is a brand new, |
-//  deliberately simple design:                                       |
+//  down ~40% while Strategy Tester runs on the identical EA never    |
+//  showed more than ~10% drawdown - the tester structurally cannot   |
+//  reproduce broker-side rejections the way a real broker issues     |
+//  them. Per explicit instruction, V5 abandons the old multi-layer/  |
+//  confluence trading logic entirely for a deliberately simple       |
+//  design, and the STANDING PRIORITY for this EA line is: minimum    |
+//  drawdown or modest growth, but MAXIMUM TRADE FREQUENCY - fewer    |
+//  gates, more entries, refine safety only once entries are flowing. |
 //                                                                    |
-//  TRADE IDEA: a flat list of price LEVELS (not zones) made from the |
-//  High and Low of every closed bar on H1, H4, D1 and W1. Direction  |
-//  is decided purely by which side price approaches a level from at  |
-//  the moment of touch - price rising up INTO a level from below     |
-//  fires an instant SELL; price falling down INTO a level from above |
-//  fires an instant BUY. No confluence filter - every qualifying     |
-//  touch on every timeframe is a candidate trade. Fixed bracket only |
-//  (TP 37 pips / SL 25 pips), submitted once at entry and NEVER      |
-//  modified afterward - no trailing, no breakeven lock. This is a    |
-//  deliberate structural choice: with nothing left to retry after    |
-//  entry, V5 cannot suffer the "HYBRID VIRTUAL TRAIL CLOSE" retry-   |
-//  storm class that dominated the prior session's live failures, by  |
+//  TRADE IDEA: 4 price LEVELS per timeframe (H1/H4/D1/W1) - the      |
+//  High and Low of each of the last 2 closed bars on that timeframe, |
+//  kept as a small rolling window (16 levels total) rather than an   |
+//  unbounded history. Direction is decided purely by which side      |
+//  price approaches a level from at the moment of touch - price      |
+//  rising up INTO a level from below fires an instant SELL; price    |
+//  falling down INTO a level from above fires an instant BUY. No     |
+//  confluence filter, no spread guard, no concurrency cap, no        |
+//  execution-distance pre-check - every qualifying touch on every    |
+//  level is a candidate trade, by explicit instruction, so the raw   |
+//  entry mechanism can be verified working before any filtering is   |
+//  added back. Fixed bracket only (TP 37 pips / SL 25 pips),         |
+//  submitted once at entry and NEVER modified afterward - no         |
+//  trailing, no breakeven lock, so V5 cannot suffer the retry-storm  |
+//  class that dominated the prior session's live failures, by        |
 //  construction rather than by patching around it.                   |
 //                                                                    |
-//  REUSED FROM FRESH V3 (EzyMap_V3_116_FRESH_V3_XAUUSDsc.mq5),        |
-//  verbatim or near-verbatim, XAUUSD-only branches:                  |
-//    - Cent-account sizing: ResolveAccountUnitDivisor(),              |
-//      EffectiveAccountEquity(), LotSizingCapitalUnits(),             |
-//      NormalizeVolumeDown(), MinimumTradingEquity().                 |
-//    - Cent-aware pip sizing: StrategyPipSize() pattern               |
-//      (InpXAUUSDscStrategyPipPrice / InpStandardXAUUSDStrategyPipPrice). |
-//    - Auto-calibrating spread guard: SpreadAllowed() with the same   |
-//      median*multiplier calibration and decoupled ceiling.           |
-//    - Zero-stops-level clearance fallback: ZeroStopsLevelFallbackPrice() |
-//      - the fix built after a real BTCUSD.sc log showed brokers can   |
-//      report SYMBOL_TRADE_STOPS_LEVEL=0 while still enforcing a real  |
-//      wider minimum - applied here to the fixed entry bracket instead |
-//      of a trail modify.                                              |
-//    - Retcode classification: TradeRetcodeAccepted() /                |
-//      TemporaryTradeRetcode() - extended here to also classify        |
-//      TRADE_RETCODE_MARKET_CLOSED as temporary/retryable, which was   |
-//      missing from EVERY EA in this codebase and was confirmed live   |
-//      via a user journal screenshot showing repeated "[Market closed]"|
-//      entry rejections on XAUUSD.sc around a session boundary.        |
+//  LOT SIZING: capital-scaled, not risk-%-based - InpBaseLot         |
+//  (default 0.01) per InpBaseCapital (default 100, in the same       |
+//  "effective" equity units used elsewhere - real-dollar-equivalent  |
+//  even on a cent account) of current equity, floored at the broker  |
+//  minimum. Explicitly requested in place of the earlier OneLotLoss()|
+//  risk-% formula for simplicity and predictability across account   |
+//  sizes.                                                             |
 //                                                                    |
-//  CORRECTION (v5.1, first tester run: XAUUSD.sc M5, 2026.08.10-11):  |
-//  a full day of "every tick based on real ticks" testing produced     |
-//  ZERO trades - positions stayed 0/6 the whole run while COOLDOWN     |
-//  REJECTED climbed to 33803 with SPREAD/CONCURRENCY both at 0.        |
-//  ROOT CAUSE: the per-level cooldown AND a since-removed global       |
-//  order-request throttle both timestamped themselves with             |
-//  GetTickCount64() (real OS milliseconds). That is correct for live   |
-//  trading, but in the Strategy Tester GetTickCount64() reflects the   |
-//  tester's actual CPU processing speed, not simulated market time -   |
-//  this run compressed a full day of ticks into ~6.6 REAL seconds      |
-//  (see the journal's "Test passed in 0:00:06.603"), so a "2 second"   |
-//  cooldown consumed roughly a third of the ENTIRE test's real         |
-//  duration on a single touch, and the global throttle (250ms,         |
-//  shared across all 2719 levels) effectively latched closed after     |
-//  its first-ever call and never reopened for the rest of the run.     |
-//  FIX: every cooldown/backoff timestamp in this file now uses         |
-//  TimeCurrent() (the simulated market clock, correct in both live     |
-//  and tester) instead of GetTickCount64(), at whole-second            |
-//  granularity - InpLevelReTouchCooldownMs/InpEntryRetryMinimumIntervalMs/ |
-//  InpEntryBackoffCooldownCapMs became ...Sec inputs. The global        |
-//  order-request throttle was removed outright rather than just        |
-//  re-timed: each level already has its own cooldown, and a shared     |
-//  global throttle would incorrectly suppress two DIFFERENT levels     |
-//  legitimately touching in the same tick, which this design wants     |
-//  to allow (no confluence filter, by spec).                           |
-//+------------------------------------------------------------------+ |
+//  CORRECTION (v5.1, first tester run): a full day of testing         |
+//  produced zero trades because the per-level cooldown and a global   |
+//  order-request throttle both timestamped themselves with            |
+//  GetTickCount64() (real OS milliseconds) - correct for live         |
+//  trading, but in the Strategy Tester that reflects real CPU         |
+//  processing speed, not simulated market time, so a "2 second"       |
+//  cooldown ate a large fraction of the entire test's real duration   |
+//  on a single touch. Fixed: every cooldown now uses TimeCurrent()    |
+//  (the simulated market clock, correct in both live and tester) at   |
+//  whole-second granularity, and the global throttle was removed      |
+//  outright (each level's own cooldown already serves that purpose    |
+//  without blocking legitimate simultaneous different-level entries). |
 //                                                                    |
-//  NEW FOR V5 (not present in any prior file):                       |
-//    - Flat multi-timeframe level store with dedup, seeded from       |
-//      history at OnInit and incrementally extended on each new bar   |
-//      close per timeframe (see RefreshLevelsForTimeframe()).         |
-//    - Edge-triggered touch/direction detection per level (see        |
-//      ProcessLevelTouches()) - a level only fires on the tick it      |
-//      freshly enters the touch tolerance band from a known side, not |
-//      on every tick it happens to linger there, which by itself      |
-//      already prevents a stationary whipsaw from firing every tick.  |
-//    - A per-level cooldown (InpLevelReTouchCooldownSec) applied on    |
-//      EVERY fire attempt, win or lose, plus an additional exponential |
-//      backoff on genuine rejections (InpEntryRetryMinimumIntervalSec /|
-//      InpEntryBackoffCooldownCapSec) - the same shape of fix already  |
-//      proven for the exit-close retry storm, applied here on the      |
-//      entry side before it has a chance to become one. Timed off      |
-//      TimeCurrent(), not GetTickCount64() - see the v5.1 CORRECTION.  |
-//    - Position-to-level binding via order comment ("V5@<price>"),     |
-//      reconciled every tick by scanning open positions rather than    |
-//      trusting CTrade's post-send ticket resolution (which is not     |
-//      reliably the same ticket as the resulting position across       |
-//      brokers/account modes) - this also means an EA restart/reattach |
-//      correctly re-associates any still-open positions with their     |
-//      source level without needing any persisted state.               |
-//    - Risk-based lot sizing via OneLotLoss()/OrderCalcProfit(), with  |
-//      an explicit journal line whenever the broker minimum lot floor  |
-//      overrides the nominal risk-% target (expected and normal on a   |
-//      true ~$100-scale account - 25 pips of XAUUSD risk on the        |
-//      broker's minimum lot is already a large fraction of a balance   |
-//      that small, so effective risk-% will usually exceed the nominal |
-//      target there; this is reported, not hidden).                    |
-//                                                                    |
-//  EXPLICITLY NOT PORTED FROM V3/V4 (not needed by this design):     |
-//    confluence scoring, supply/demand ZONE detection (replaced by    |
-//    flat single-price levels), multi-layer position stacking,        |
-//    HybridTrailState / ClosePositionAtVirtualTrail and the whole      |
-//    virtual-trailing-close machinery (nothing to trail - fixed        |
-//    bracket only), TouchConfirmationSatisfied()'s confirmation-candle |
-//    wait (this design wants an instant touch trigger, not a delayed   |
-//    confirmation).                                                    |
+//  CORRECTION (v5.2, second tester run): orders were now being sent   |
+//  but the broker rejected them with [invalid stops] on essentially   |
+//  every attempt (48-49 consecutive failures observed on one level    |
+//  before the run ended), and positions stayed at 0 the whole run.    |
+//  That rejection is genuinely broker-side - this build's own         |
+//  execution-distance pre-check (ExecutionDistanceValid(), the        |
+//  zero-stops-level fallback) was passing these requests through      |
+//  fine, so removing it would not by itself change the outcome; the   |
+//  broker's real minimum stop distance on XAUUSD.sc appears to be     |
+//  wider than the fixed 25-pip SL allows at current conditions. Per   |
+//  explicit instruction, ALL diagnostic gates are removed here        |
+//  anyway (spread guard, concurrency cap, execution-distance          |
+//  pre-check, capital-cap on lot size) so the underlying broker       |
+//  response is visible directly rather than filtered - the one       |
+//  exception is the per-level cooldown/backoff (InpLevelReTouchCooldownSec / |
+//  InpEntryRetryMinimumIntervalSec / InpEntryBackoffCooldownCapSec),  |
+//  kept deliberately because removing it would reproduce, on the      |
+//  entry side, the exact zero-backoff retry-storm class this whole    |
+//  multi-session effort has been about eliminating on the exit side - |
+//  a level that the broker keeps rejecting would otherwise resend on  |
+//  every single tick, forever. Also added: an OnInit log of the       |
+//  symbol's actual SYMBOL_TRADE_STOPS_LEVEL/SYMBOL_TRADE_FREEZE_LEVEL/ |
+//  current spread, so the real broker constraint behind [invalid      |
+//  stops] is visible in the journal on the next run regardless of     |
+//  whether entries succeed.                                           |
 //                                                                    |
 //  NOT YET VERIFIED: compiles in MetaEditor (no MQL5 toolchain in     |
-//  this environment), or real trading performance - that is exactly   |
-//  what the next live/demo run is for. Verified here: brace/paren/    |
-//  bracket balance, and a manual audit that every input referenced in |
-//  a log line or helper call is actually declared.                    |
+//  this environment), or real trading performance. Verified here:    |
+//  brace/paren/bracket balance, and a manual audit that every input   |
+//  referenced anywhere is actually declared and every forward         |
+//  declaration matches a real definition.                             |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
 #property link      ""
-#property version   "5.1"
+#property version   "5.2"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -149,26 +108,13 @@ input int    InpDeviationPoints          = 20;
 // Account currency scale. AUTO (default) detects a cent account from the
 // account currency, server/company name, or a .sc-style symbol suffix on
 // live, but forces standard (divisor=1) inside the Strategy Tester unless
-// InpTesterAutoModeIsStandard is turned off - a tester deposit must never
-// be divided by 100 just because the historical symbol name ends in .sc.
+// InpTesterAutoModeIsStandard is turned off.
 input ENUM_EZY_ACCOUNT_SCALE InpAccountScaleMode = EZY_ACCOUNT_AUTO;
 input double InpCentAccountUnitDivisor   = 100.0;
 input bool   InpTesterAutoModeIsStandard = true;
 input bool   InpTreatSCSuffixAsCentOnLive = true;
-input bool   InpEnableCentSafetyCaps     = true;
-input double InpCentAbsoluteMaxLots      = 0.20;
-input bool   InpUseBalanceForLotSizing   = true;
-input bool   InpUseBrokerNativeDepositUnitsForLots = false;
 
-// Minimum equity (in the same "effective" units used for sizing - real
-// dollar-equivalent even on a cent account) below which V5 stops opening
-// new trades entirely, regardless of what the risk-% formula would size.
-input double InpCentMinimumEffectiveEquity = 5.0;
-input double InpMinimumAccountEquity       = 20.0;
-
-// Cent-aware pip sizing for XAUUSD.sc vs standard XAUUSD - same mechanism
-// as FRESH V3's StrategyPipSize(), simplified since V5 is XAUUSD-only and
-// has no "legacy" non-cent distances to preserve.
+// Cent-aware pip sizing for XAUUSD.sc vs standard XAUUSD.
 input bool   InpUseXAUUSDscBrokerPointPips  = true;
 input double InpXAUUSDscStrategyPipPrice    = 0.01;
 input double InpStandardXAUUSDStrategyPipPrice = 0.10;
@@ -177,58 +123,24 @@ input double InpStandardXAUUSDStrategyPipPrice = 0.10;
 input double InpTakeProfitPips = 37.0;
 input double InpStopLossPips   = 25.0;
 
-// Level detection: every closed bar's High/Low on each timeframe becomes
-// a permanent level once seeded. These lookback counts only bound the
-// ONE-TIME historical seed at OnInit for scan-cost sanity; after that,
-// each timeframe only ever adds ~1 new bar's worth of levels per period,
-// which is negligible growth over any realistic run length.
-input int    InpH1LevelLookbackBars = 2000;
-input int    InpH4LevelLookbackBars = 1000;
-input int    InpD1LevelLookbackBars = 500;
-input int    InpW1LevelLookbackBars = 200;
-
 // How close price must come to a level, in raw broker points, to count as
-// a touch. Also used to dedup near-identical levels detected on different
-// timeframes so the same real price isn't double-counted as two triggers.
+// a touch. Also used to dedup near-identical levels on the same timeframe.
 input int    InpLevelTouchTolerancePoints = 20;
 
-// Total concurrent open positions across all levels/directions combined.
-input int    InpMaxConcurrentPositions = 6;
+// Capital-scaled lot sizing: InpBaseLot per InpBaseCapital of current
+// effective equity, floored at the broker minimum. No cap above that -
+// deliberately simple, replacing the earlier risk-%-of-SL-distance
+// formula per explicit instruction.
+input double InpBaseLot      = 0.01;
+input double InpBaseCapital  = 100.0;
 
-// Risk-based lot sizing: lots = (equity * risk%) / OneLotLoss(entry,sl).
-// On a true ~$100-scale account this will usually round UP to the broker
-// minimum lot rather than down to a fractional lot - see the header note.
-input double InpRiskPercentPerTrade = 1.0;
-
-// Auto-calibrating spread guard - identical mechanism to FRESH V3's
-// SpreadAllowed(): while InpAutoCalibrateSpreadCap is on, the filter
-// fails OPEN (allows trading) for the first InpSpreadCalibrationTicks
-// ticks while it measures this broker's real median spread, then locks
-// in effective_cap = median * InpSpreadCalibrationMultiplier (optionally
-// clamped by InpMaxSpreadPoints if that is set above 0).
-input int    InpMaxSpreadPoints          = 0;
-input bool   InpAutoCalibrateSpreadCap   = true;
-input int    InpSpreadCalibrationTicks   = 100;
-input double InpSpreadCalibrationMultiplier = 3.0;
-
-// Per-level cooldown applied on EVERY fire attempt (win or lose), so a
-// level whipsawing right at its price cannot re-fire faster than this,
-// independent of the exponential backoff below which only engages on
-// genuine broker rejections. Whole-second granularity, timed off
-// TimeCurrent() (the simulated market clock) rather than GetTickCount64()
-// (real CPU time) - see the v5.1 CORRECTION note in the header for why
-// that distinction matters and broke the first tester run outright.
-input int    InpLevelReTouchCooldownSec = 2;
-
-// Entry-side retry backoff on genuine rejections (mirrors this session's
-// exit-close retry-storm fix, applied here on the entry side before it
-// has a chance to become one). Also TimeCurrent()-based, whole seconds.
+// Per-level cooldown applied on EVERY fire attempt (win or lose) plus an
+// exponential backoff on genuine rejections. This is the one gate kept
+// even with everything else removed - see the v5.2 CORRECTION note in
+// the header for why. TimeCurrent()-based, whole seconds.
+input int    InpLevelReTouchCooldownSec      = 1;
 input int    InpEntryRetryMinimumIntervalSec = 1;
-input int    InpEntryBackoffCooldownCapSec   = 15;
-
-// Execution-distance safety for the fixed entry bracket.
-input int    InpExecutionStopCushionPoints = 2;
-input double InpZeroStopsLevelFallbackPct  = 0.05;
+input int    InpEntryBackoffCooldownCapSec   = 10;
 
 // Reporting.
 input bool   InpPrintExecutionLog       = true;
@@ -252,10 +164,6 @@ LevelState g_levels[];
 double g_accountUnitDivisor = 1.0;
 double g_pipSize            = 0.10;
 
-double g_spreadCalSamples[];
-int    g_spreadCalCount        = 0;
-double g_spreadCalEffectiveCap = -1.0;
-
 datetime g_lastH1BarTime = 0;
 datetime g_lastH4BarTime = 0;
 datetime g_lastD1BarTime = 0;
@@ -263,39 +171,28 @@ datetime g_lastW1BarTime = 0;
 
 datetime g_lastStatusReportTime = 0;
 
-long g_gateConcurrencyRejects = 0;
-long g_gateCooldownRejects    = 0;
-long g_gateSpreadRejects      = 0;
-long g_gateDistanceRejects    = 0;
-long g_orderSendAttempts      = 0;
-long g_orderSendAccepted      = 0;
-long g_orderSendRejected      = 0;
+long g_gateCooldownRejects = 0;
+long g_orderSendAttempts   = 0;
+long g_orderSendAccepted   = 0;
+long g_orderSendRejected   = 0;
 
 //------------------------------ Forward declarations --------------------
 double ResolveAccountUnitDivisor();
 string _UpperStr(string s);
 double EffectiveAccountEquity();
-double LotSizingCapitalUnits();
-bool   IsLiveCentAccount();
-double MinimumTradingEquity();
 bool   IsCentSuffixSymbol();
 double StrategyPipSize();
 double RoundPrice(double v);
 int    VolumeDigits();
 double NormalizeVolumeDown(double vol);
-double OneLotLoss(int direction,double entry,double sl);
-double ComputeRiskLot(int direction,double entry,double sl);
-double MedianOfSpreadSamples(double &values[],int count);
-bool   SpreadAllowed();
-double ZeroStopsLevelFallbackPrice(double referencePrice,long stopsLevel,long freezeLevel);
-bool   ExecutionDistanceValid(int direction,double entryPrice,double sl,double tp);
+double ComputeCapitalScaledLot();
 bool   TradeRetcodeAccepted(uint code);
 bool   TemporaryTradeRetcode(uint code);
 void   Log(string msg);
 int    CountOurPositions();
 int    CountOurPositionsByDirection(int direction);
-void   AddLevel(double price,datetime barTime,ENUM_TIMEFRAMES tf);
-void   RefreshLevelsForTimeframe(ENUM_TIMEFRAMES tf,datetime &lastBarTime,int lookbackBars);
+void   AddOrEvictLevel(double price,datetime barTime,ENUM_TIMEFRAMES tf);
+void   RefreshLevelsForTimeframe(ENUM_TIMEFRAMES tf,datetime &lastBarTime,int seedBars);
 int    FindLevelByPrice(double price);
 bool   ParseLevelComment(string comment,double &outPrice);
 void   ReconcileLevelBindings();
@@ -303,6 +200,11 @@ void   ProcessLevelTouches();
 bool   TryFireLevel(int levelIndex,int direction);
 void   ReportLiveParityStatus();
 void   ReportDeploymentGateBreakdown();
+string TimeframeLabel(ENUM_TIMEFRAMES tf);
+color  LevelColor(ENUM_TIMEFRAMES tf);
+void   DrawLevel(int index);
+void   DrawAllLevels();
+void   RemoveAllLevelDrawings();
 
 //------------------------------ Account/sizing helpers -------------------
 double ResolveAccountUnitDivisor()
@@ -346,31 +248,6 @@ string _UpperStr(string s)
 double EffectiveAccountEquity()
 {
    return AccountInfoDouble(ACCOUNT_EQUITY)/MathMax(1.0,g_accountUnitDivisor);
-}
-
-double LotSizingCapitalUnits()
-{
-   double raw=InpUseBalanceForLotSizing
-              ? AccountInfoDouble(ACCOUNT_BALANCE)
-              : AccountInfoDouble(ACCOUNT_EQUITY);
-
-   if(InpUseBrokerNativeDepositUnitsForLots)
-      return MathMax(0.0,raw);
-
-   return MathMax(0.0,raw/MathMax(1.0,g_accountUnitDivisor));
-}
-
-bool IsLiveCentAccount()
-{
-   return (!(bool)MQLInfoInteger(MQL_TESTER) && g_accountUnitDivisor>1.0);
-}
-
-double MinimumTradingEquity()
-{
-   if(g_accountUnitDivisor>1.0)
-      return MathMax(0.0,InpCentMinimumEffectiveEquity);
-
-   return MathMax(0.0,InpMinimumAccountEquity);
 }
 
 bool IsCentSuffixSymbol()
@@ -419,169 +296,24 @@ double NormalizeVolumeDown(double vol)
    return NormalizeDouble(v,VolumeDigits());
 }
 
-double OneLotLoss(int direction,double entry,double sl)
-{
-   if(entry<=0 || sl<=0) return 0.0;
-   if(direction==1 && sl>=entry) return 0.0;
-   if(direction==-1 && sl<=entry) return 0.0;
-
-   double profit=0.0;
-   ENUM_ORDER_TYPE type=(direction==1)?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
-   if(!OrderCalcProfit(type,_Symbol,1.0,entry,sl,profit))
-   {
-      Log("OrderCalcProfit failed. Error "+IntegerToString(GetLastError()));
-      return 0.0;
-   }
-
-   return MathAbs(profit);
-}
-
-// Risk-based lot sizing. On a true ~$100-scale account the risk-% formula
-// will usually round up to the broker minimum lot rather than down to a
-// fractional lot - that is a real structural fact (25 pips of XAUUSD risk
-// on 1.0 lot is a large dollar amount relative to $100), not a bug, so the
-// resulting effective risk-% is logged explicitly whenever the minimum
-// floor overrides the nominal target.
-double ComputeRiskLot(int direction,double entry,double sl)
+// Capital-scaled lot sizing: InpBaseLot per InpBaseCapital of current
+// effective equity, floored at the broker minimum. No risk/SL-distance
+// math, no cap above the floor - deliberately simple, per explicit
+// instruction to remove all sizing filters for now.
+double ComputeCapitalScaledLot()
 {
    double effectiveEquity=EffectiveAccountEquity();
-   if(effectiveEquity<MinimumTradingEquity())
+   if(effectiveEquity<=0.0)
       return 0.0;
 
-   double riskBudget=effectiveEquity*MathMax(0.0,InpRiskPercentPerTrade)/100.0;
-   double lossPerLot=OneLotLoss(direction,entry,sl);
-   if(lossPerLot<=0.0)
-      return 0.0;
-
-   double rawLots=riskBudget/lossPerLot;
-   double lots=NormalizeVolumeDown(rawLots);
+   double lots=MathMax(0.0,InpBaseLot)*(effectiveEquity/MathMax(1.0,InpBaseCapital));
+   lots=NormalizeVolumeDown(lots);
 
    double minVol=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
-   bool flooredToMinimum=false;
-
    if(lots<minVol)
-   {
       lots=minVol;
-      flooredToMinimum=true;
-   }
 
-   if(InpEnableCentSafetyCaps && InpCentAbsoluteMaxLots>0.0)
-      lots=MathMin(lots,InpCentAbsoluteMaxLots);
-
-   lots=NormalizeVolumeDown(lots);
-   if(lots<minVol)
-      return 0.0;
-
-   if(flooredToMinimum)
-   {
-      double actualRiskCash=lots*lossPerLot;
-      double actualRiskPct=(effectiveEquity>0.0)?(actualRiskCash/effectiveEquity*100.0):0.0;
-
-      Log("V5 LOT SIZE FLOORED TO BROKER MINIMUM"+
-          " | nominal risk%="+DoubleToString(InpRiskPercentPerTrade,2)+
-          " | effective risk%="+DoubleToString(actualRiskPct,2)+
-          " | lots="+DoubleToString(lots,VolumeDigits())+
-          " | equity="+DoubleToString(effectiveEquity,2));
-   }
-
-   return lots;
-}
-
-//------------------------------ Spread guard -----------------------------
-double MedianOfSpreadSamples(double &values[],int count)
-{
-   if(count<=0) return 0.0;
-
-   double copy[];
-   ArrayResize(copy,count);
-   for(int i=0;i<count;i++) copy[i]=values[i];
-   ArraySort(copy);
-
-   if(count%2==1) return copy[count/2];
-   return 0.5*(copy[count/2-1]+copy[count/2]);
-}
-
-bool SpreadAllowed()
-{
-   MqlTick tick;
-   if(!SymbolInfoTick(_Symbol,tick))
-      return false;
-
-   double spread=(tick.ask-tick.bid)/_Point;
-
-   if(!InpAutoCalibrateSpreadCap)
-   {
-      if(InpMaxSpreadPoints<=0) return true;
-      return (spread<=InpMaxSpreadPoints);
-   }
-
-   if(g_spreadCalEffectiveCap>=0.0)
-      return (spread<=g_spreadCalEffectiveCap);
-
-   int required=MathMax(20,InpSpreadCalibrationTicks);
-
-   if(g_spreadCalCount<ArraySize(g_spreadCalSamples))
-   {
-      g_spreadCalSamples[g_spreadCalCount]=spread;
-      g_spreadCalCount++;
-   }
-
-   if(g_spreadCalCount>=required)
-   {
-      double median=MedianOfSpreadSamples(g_spreadCalSamples,g_spreadCalCount);
-      double mult=MathMax(1.0,InpSpreadCalibrationMultiplier);
-      double effective=median*mult;
-
-      if(InpMaxSpreadPoints>0)
-         effective=MathMin(effective,(double)InpMaxSpreadPoints);
-
-      g_spreadCalEffectiveCap=MathMax(1.0,effective);
-
-      Log("V5 SPREAD AUTO-CALIBRATION COMPLETE"+
-          " | samples="+IntegerToString(g_spreadCalCount)+
-          " | median observed="+DoubleToString(median,1)+" points"+
-          " | multiplier="+DoubleToString(mult,2)+
-          " | ceiling(InpMaxSpreadPoints)="+IntegerToString(InpMaxSpreadPoints)+
-          (InpMaxSpreadPoints<=0?" (uncapped)":"")+
-          " | EFFECTIVE CAP NOW ENFORCED="+
-          DoubleToString(g_spreadCalEffectiveCap,1)+" points");
-   }
-
-   return true; // fail open while calibrating
-}
-
-//------------------------------ Execution-distance safety ----------------
-double ZeroStopsLevelFallbackPrice(double referencePrice,long stopsLevel,long freezeLevel)
-{
-   if(stopsLevel>0 || freezeLevel>0 || referencePrice<=0.0)
-      return 0.0;
-   return referencePrice*MathMax(0.0,InpZeroStopsLevelFallbackPct)/100.0;
-}
-
-bool ExecutionDistanceValid(int direction,double entryPrice,double sl,double tp)
-{
-   if(entryPrice<=0.0 || sl<=0.0 || tp<=0.0)
-      return false;
-
-   long stopsLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
-   long freezeLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL);
-
-   double minimumDistance=
-      MathMax(_Point,
-              ((double)MathMax(stopsLevel,freezeLevel)+
-               MathMax(0,InpExecutionStopCushionPoints))*_Point)+
-      ZeroStopsLevelFallbackPrice(entryPrice,stopsLevel,freezeLevel);
-
-   if(direction==1)
-   {
-      if(sl>entryPrice-minimumDistance+_Point*0.25) return false;
-      if(tp<entryPrice+minimumDistance-_Point*0.25) return false;
-      return true;
-   }
-
-   if(sl<entryPrice+minimumDistance-_Point*0.25) return false;
-   if(tp>entryPrice-minimumDistance+_Point*0.25) return false;
-   return true;
+   return NormalizeVolumeDown(lots)>0.0?lots:0.0;
 }
 
 //------------------------------ Retcode classification --------------------
@@ -592,11 +324,10 @@ bool TradeRetcodeAccepted(uint code)
            code==TRADE_RETCODE_DONE_PARTIAL);
 }
 
-// V5: TRADE_RETCODE_MARKET_CLOSED is included here from day one - it was
-// confirmed missing from every prior EA in this codebase, and confirmed
-// live via a user journal screenshot showing repeated "[Market closed]"
-// entry rejections on XAUUSD.sc, retried by the deployment-retry interval
-// but never actually classified as "temporary" in the EA's own reporting.
+// TRADE_RETCODE_MARKET_CLOSED is included here from day one - confirmed
+// missing from every prior EA in this codebase, and confirmed live via a
+// user journal screenshot showing repeated "[Market closed]" entry
+// rejections on XAUUSD.sc.
 bool TemporaryTradeRetcode(uint code)
 {
    return (code==TRADE_RETCODE_REQUOTE ||
@@ -656,7 +387,15 @@ int CountOurPositionsByDirection(int direction)
 }
 
 //------------------------------ Level store --------------------------------
-void AddLevel(double price,datetime barTime,ENUM_TIMEFRAMES tf)
+// Keeps exactly 4 levels per timeframe (16 total across H1/H4/D1/W1) - a
+// small rolling window of the last 2 closed bars' High and Low on that
+// timeframe, not the full unbounded history the first version tracked.
+// When a 5th level would form for a timeframe, the oldest one WITHOUT a
+// currently-open trade is evicted and overwritten in place; if all 4
+// happen to have open trades (possible now that there is no concurrency
+// cap), the new level is simply skipped until a slot frees up next time -
+// rare, self-resolving, and never orphans or duplicates an open position.
+void AddOrEvictLevel(double price,datetime barTime,ENUM_TIMEFRAMES tf)
 {
    if(price<=0.0) return;
 
@@ -664,25 +403,55 @@ void AddLevel(double price,datetime barTime,ENUM_TIMEFRAMES tf)
    int n=ArraySize(g_levels);
 
    for(int i=0;i<n;i++)
-      if(MathAbs(g_levels[i].price-price)<=tol)
-         return; // dedup: an equivalent real price is already tracked
+      if(g_levels[i].sourceTf==tf && MathAbs(g_levels[i].price-price)<=tol)
+         return; // already tracked for this timeframe
 
-   ArrayResize(g_levels,n+1,256);
-   g_levels[n].price=price;
-   g_levels[n].barTime=barTime;
-   g_levels[n].sourceTf=tf;
-   g_levels[n].lastSide=0;
-   g_levels[n].openTicket=0;
-   g_levels[n].entryConsecutiveFailures=0;
-   g_levels[n].entryCooldownUntil=0;
+   int countForTf=0;
+   int oldestIdx=-1;
+   datetime oldestTime=0;
+
+   for(int i=0;i<n;i++)
+   {
+      if(g_levels[i].sourceTf!=tf) continue;
+      countForTf++;
+      if(g_levels[i].openTicket==0 &&
+         (oldestIdx<0 || g_levels[i].barTime<oldestTime))
+      {
+         oldestIdx=i;
+         oldestTime=g_levels[i].barTime;
+      }
+   }
+
+   if(countForTf>=4)
+   {
+      if(oldestIdx<0)
+         return; // all 4 have open trades right now - skip, retry later
+
+      g_levels[oldestIdx].price=price;
+      g_levels[oldestIdx].barTime=barTime;
+      g_levels[oldestIdx].lastSide=0;
+      g_levels[oldestIdx].openTicket=0;
+      g_levels[oldestIdx].entryConsecutiveFailures=0;
+      g_levels[oldestIdx].entryCooldownUntil=0;
+      return;
+   }
+
+   int idx=ArraySize(g_levels);
+   ArrayResize(g_levels,idx+1,16);
+   g_levels[idx].price=price;
+   g_levels[idx].barTime=barTime;
+   g_levels[idx].sourceTf=tf;
+   g_levels[idx].lastSide=0;
+   g_levels[idx].openTicket=0;
+   g_levels[idx].entryConsecutiveFailures=0;
+   g_levels[idx].entryCooldownUntil=0;
 }
 
-// Seeds the historical lookback window the first time it is called for a
-// timeframe (lastBarTime==0), then on every later call only walks back as
-// far as needed to cover any bars that closed since the previous check -
-// correct even across a gap where the EA was detached/offline for a
-// while, since it stops as soon as it reaches a bar time already seen.
-void RefreshLevelsForTimeframe(ENUM_TIMEFRAMES tf,datetime &lastBarTime,int lookbackBars)
+// Seeds each timeframe with its last 2 closed bars (4 levels) the first
+// time it is called (lastBarTime==0), then on every later call only walks
+// back as far as needed to cover any bars that closed since the previous
+// check - correct even across a gap where the EA was offline for a while.
+void RefreshLevelsForTimeframe(ENUM_TIMEFRAMES tf,datetime &lastBarTime,int seedBars)
 {
    datetime currentBarTime=iTime(_Symbol,tf,0);
    if(currentBarTime==0) return; // no history loaded yet for this timeframe
@@ -690,14 +459,14 @@ void RefreshLevelsForTimeframe(ENUM_TIMEFRAMES tf,datetime &lastBarTime,int look
    if(lastBarTime==0)
    {
       int totalBars=iBars(_Symbol,tf);
-      int bars=MathMin(MathMax(0,lookbackBars),MathMax(0,totalBars-1));
+      int bars=MathMin(MathMax(0,seedBars),MathMax(0,totalBars-1));
 
       for(int shift=bars;shift>=1;shift--)
       {
          datetime bt=iTime(_Symbol,tf,shift);
          if(bt==0) continue;
-         AddLevel(iHigh(_Symbol,tf,shift),bt,tf);
-         AddLevel(iLow(_Symbol,tf,shift),bt,tf);
+         AddOrEvictLevel(iHigh(_Symbol,tf,shift),bt,tf);
+         AddOrEvictLevel(iLow(_Symbol,tf,shift),bt,tf);
       }
 
       lastBarTime=currentBarTime;
@@ -711,8 +480,8 @@ void RefreshLevelsForTimeframe(ENUM_TIMEFRAMES tf,datetime &lastBarTime,int look
    {
       datetime bt=iTime(_Symbol,tf,shift);
       if(bt<=lastBarTime) break;
-      AddLevel(iHigh(_Symbol,tf,shift),bt,tf);
-      AddLevel(iLow(_Symbol,tf,shift),bt,tf);
+      AddOrEvictLevel(iHigh(_Symbol,tf,shift),bt,tf);
+      AddOrEvictLevel(iLow(_Symbol,tf,shift),bt,tf);
    }
 
    lastBarTime=currentBarTime;
@@ -740,11 +509,11 @@ bool ParseLevelComment(string comment,double &outPrice)
 
 // Binds each currently open position (ours) to its source level by parsing
 // the "V5@<price>" order comment back to a price and matching it against
-// the level store. Deliberately does NOT rely on CTrade's post-send ticket
+// the level store, rather than trusting CTrade's post-send ticket
 // resolution (ResultOrder()/ResultDeal() are not reliably the resulting
-// POSITION ticket across every broker/account mode) - this same pass also
-// correctly re-associates any still-open positions with their source level
-// after an EA restart/reattach, with no persisted state required.
+// POSITION ticket across every broker/account mode). Also correctly
+// re-associates any still-open positions with their source level after an
+// EA restart/reattach, with no persisted state required.
 void ReconcileLevelBindings()
 {
    for(int i=PositionsTotal()-1;i>=0;i--)
@@ -768,27 +537,12 @@ void ReconcileLevelBindings()
 bool TryFireLevel(int levelIndex,int direction)
 {
    // TimeCurrent() (the simulated market clock) rather than GetTickCount64()
-   // (real CPU time) - see the v5.1 CORRECTION note in the header. Using
-   // GetTickCount64() here made every cooldown meaningless in the Strategy
-   // Tester, which can compress a full day of ticks into single-digit real
-   // seconds.
+   // (real CPU time) - see the v5.1 CORRECTION note in the header.
    datetime nowTime=TimeCurrent();
 
    if(nowTime<g_levels[levelIndex].entryCooldownUntil)
    {
       g_gateCooldownRejects++;
-      return false;
-   }
-
-   if(CountOurPositions()>=InpMaxConcurrentPositions)
-   {
-      g_gateConcurrencyRejects++;
-      return false;
-   }
-
-   if(!SpreadAllowed())
-   {
-      g_gateSpreadRejects++;
       return false;
    }
 
@@ -803,20 +557,16 @@ bool TryFireLevel(int levelIndex,int direction)
    double sl=RoundPrice(direction==1?entryPrice-slDistance:entryPrice+slDistance);
    double tp=RoundPrice(direction==1?entryPrice+tpDistance:entryPrice-tpDistance);
 
-   if(!ExecutionDistanceValid(direction,entryPrice,sl,tp))
-   {
-      g_gateDistanceRejects++;
-      return false;
-   }
-
-   double lots=ComputeRiskLot(direction,entryPrice,sl);
+   double lots=ComputeCapitalScaledLot();
    if(lots<=0.0)
       return false;
 
    // Baseline cooldown applied on EVERY attempt, win or lose, so a
    // whipsaw at the exact level price cannot re-fire faster than
    // InpLevelReTouchCooldownSec - independent of the exponential backoff
-   // below, which only extends this further on genuine rejections.
+   // below, which only extends this further on genuine rejections. This
+   // is the one gate kept with everything else removed - see the v5.2
+   // CORRECTION note in the header for why.
    g_levels[levelIndex].entryCooldownUntil=
       nowTime+(datetime)MathMax(0,InpLevelReTouchCooldownSec);
 
@@ -943,7 +693,6 @@ void ReportLiveParityStatus()
        " (H1="+IntegerToString(h1)+" H4="+IntegerToString(h4)+
        " D1="+IntegerToString(d1)+" W1="+IntegerToString(w1)+")"+
        " | positions="+IntegerToString(CountOurPositions())+
-       "/"+IntegerToString(InpMaxConcurrentPositions)+
        " | levels with open trade="+IntegerToString(openLevels)+
        " | BUY="+IntegerToString(CountOurPositionsByDirection(1))+
        " SELL="+IntegerToString(CountOurPositionsByDirection(-1))+
@@ -955,13 +704,87 @@ void ReportLiveParityStatus()
 void ReportDeploymentGateBreakdown()
 {
    Log("V5 DEPLOYMENT GATE BREAKDOWN"+
-       " | CONCURRENCY CAP REJECTED="+IntegerToString((int)g_gateConcurrencyRejects)+
        " | COOLDOWN REJECTED="+IntegerToString((int)g_gateCooldownRejects)+
-       " | SPREAD REJECTED="+IntegerToString((int)g_gateSpreadRejects)+
-       " | EXECUTION-DISTANCE REJECTED="+IntegerToString((int)g_gateDistanceRejects)+
        " | ORDER-SEND ATTEMPTS="+IntegerToString((int)g_orderSendAttempts)+
        " | ACCEPTED="+IntegerToString((int)g_orderSendAccepted)+
        " | REJECTED="+IntegerToString((int)g_orderSendRejected));
+}
+
+//------------------------------ Chart visualization -------------------------
+// One dashed horizontal line + one text label per tracked level, so the 4
+// levels per timeframe are visible directly on the chart (in the Strategy
+// Tester's visual mode too) rather than only inferable from the journal.
+// Object names are tied to the level's array index, which is stable for
+// the lifetime of that slot (AddOrEvictLevel() overwrites slots in place
+// rather than reordering the array), so updating in place - not deleting
+// and recreating - is safe and cheap even every tick.
+string TimeframeLabel(ENUM_TIMEFRAMES tf)
+{
+   if(tf==PERIOD_H1) return "H1";
+   if(tf==PERIOD_H4) return "H4";
+   if(tf==PERIOD_D1) return "Daily";
+   if(tf==PERIOD_W1) return "Weekly";
+   return EnumToString(tf);
+}
+
+color LevelColor(ENUM_TIMEFRAMES tf)
+{
+   if(tf==PERIOD_H1) return clrDeepSkyBlue;
+   if(tf==PERIOD_H4) return clrOrange;
+   if(tf==PERIOD_D1) return clrLimeGreen;
+   if(tf==PERIOD_W1) return clrMagenta;
+   return clrWhite;
+}
+
+void DrawLevel(int index)
+{
+   if(index<0 || index>=ArraySize(g_levels)) return;
+
+   double price=g_levels[index].price;
+   if(price<=0.0) return;
+
+   ENUM_TIMEFRAMES tf=g_levels[index].sourceTf;
+   color col=LevelColor(tf);
+   string tfText=TimeframeLabel(tf);
+
+   string lineName="V5_LVL_"+IntegerToString(index);
+   if(ObjectFind(0,lineName)<0)
+      ObjectCreate(0,lineName,OBJ_HLINE,0,0,price);
+   ObjectSetDouble(0,lineName,OBJPROP_PRICE,price);
+   ObjectSetInteger(0,lineName,OBJPROP_COLOR,col);
+   ObjectSetInteger(0,lineName,OBJPROP_STYLE,STYLE_DASH);
+   ObjectSetInteger(0,lineName,OBJPROP_WIDTH,1);
+   ObjectSetInteger(0,lineName,OBJPROP_BACK,true);
+   ObjectSetString(0,lineName,OBJPROP_TOOLTIP,
+      tfText+" level "+DoubleToString(price,_Digits));
+
+   // Text label floats a couple of bars ahead of the latest bar so it sits
+   // in the empty space to the right of price action rather than
+   // overlapping candles, and is re-anchored every call so it keeps pace
+   // as the chart scrolls forward (live or tester).
+   datetime labelTime=TimeCurrent()+PeriodSeconds(PERIOD_CURRENT)*2;
+   string labelName="V5_LBL_"+IntegerToString(index);
+   if(ObjectFind(0,labelName)<0)
+      ObjectCreate(0,labelName,OBJ_TEXT,0,labelTime,price);
+   ObjectSetInteger(0,labelName,OBJPROP_TIME,labelTime);
+   ObjectSetDouble(0,labelName,OBJPROP_PRICE,price);
+   ObjectSetString(0,labelName,OBJPROP_TEXT," "+tfText);
+   ObjectSetInteger(0,labelName,OBJPROP_COLOR,col);
+   ObjectSetInteger(0,labelName,OBJPROP_FONTSIZE,8);
+   ObjectSetInteger(0,labelName,OBJPROP_ANCHOR,ANCHOR_LEFT);
+}
+
+void DrawAllLevels()
+{
+   int n=ArraySize(g_levels);
+   for(int i=0;i<n;i++)
+      DrawLevel(i);
+}
+
+void RemoveAllLevelDrawings()
+{
+   ObjectsDeleteAll(0,"V5_LVL_");
+   ObjectsDeleteAll(0,"V5_LBL_");
 }
 
 //------------------------------ Lifecycle -----------------------------------
@@ -976,31 +799,45 @@ int OnInit()
    g_lastD1BarTime=0;
    g_lastW1BarTime=0;
 
-   g_spreadCalCount=0;
-   g_spreadCalEffectiveCap=-1.0;
-   ArrayResize(g_spreadCalSamples,MathMax(20,InpSpreadCalibrationTicks));
-
-   g_gateConcurrencyRejects=0;
    g_gateCooldownRejects=0;
-   g_gateSpreadRejects=0;
-   g_gateDistanceRejects=0;
    g_orderSendAttempts=0;
    g_orderSendAccepted=0;
    g_orderSendRejected=0;
    g_lastStatusReportTime=0;
 
-   RefreshLevelsForTimeframe(PERIOD_H1,g_lastH1BarTime,InpH1LevelLookbackBars);
-   RefreshLevelsForTimeframe(PERIOD_H4,g_lastH4BarTime,InpH4LevelLookbackBars);
-   RefreshLevelsForTimeframe(PERIOD_D1,g_lastD1BarTime,InpD1LevelLookbackBars);
-   RefreshLevelsForTimeframe(PERIOD_W1,g_lastW1BarTime,InpW1LevelLookbackBars);
+   RefreshLevelsForTimeframe(PERIOD_H1,g_lastH1BarTime,2);
+   RefreshLevelsForTimeframe(PERIOD_H4,g_lastH4BarTime,2);
+   RefreshLevelsForTimeframe(PERIOD_D1,g_lastD1BarTime,2);
+   RefreshLevelsForTimeframe(PERIOD_W1,g_lastW1BarTime,2);
 
    ReconcileLevelBindings();
+   RemoveAllLevelDrawings();
+   DrawAllLevels();
 
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpDeviationPoints);
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetMarginMode();
    trade.SetAsyncMode(false);
+
+   // v5.2: the real broker constraint behind any future [invalid stops]
+   // rejection, logged directly so it doesn't have to be inferred from
+   // OrderSend failures.
+   long stopsLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
+   long freezeLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL);
+   MqlTick initTick;
+   double spreadPoints=0.0;
+   if(SymbolInfoTick(_Symbol,initTick) && _Point>0)
+      spreadPoints=(initTick.ask-initTick.bid)/_Point;
+
+   Log("V5 BROKER CONSTRAINTS"+
+       " | SYMBOL_TRADE_STOPS_LEVEL="+IntegerToString((int)stopsLevel)+" points"+
+       " | SYMBOL_TRADE_FREEZE_LEVEL="+IntegerToString((int)freezeLevel)+" points"+
+       " | current spread="+DoubleToString(spreadPoints,1)+" points"+
+       " | fixed SL distance="+DoubleToString(MathMax(0.1,InpStopLossPips)*g_pipSize,_Digits)+
+       " ("+DoubleToString(InpStopLossPips,1)+" pips)"+
+       " | fixed TP distance="+DoubleToString(MathMax(0.1,InpTakeProfitPips)*g_pipSize,_Digits)+
+       " ("+DoubleToString(InpTakeProfitPips,1)+" pips)");
 
    Log("V5 INIT"+
        " | symbol="+_Symbol+
@@ -1010,25 +847,27 @@ int OnInit()
        " | levels seeded="+IntegerToString(ArraySize(g_levels))+
        " | TP="+DoubleToString(InpTakeProfitPips,1)+"p"+
        " | SL="+DoubleToString(InpStopLossPips,1)+"p"+
-       " | maxConcurrent="+IntegerToString(InpMaxConcurrentPositions)+
-       " | riskPerTrade="+DoubleToString(InpRiskPercentPerTrade,2)+"%");
+       " | lot="+DoubleToString(InpBaseLot,2)+" per "+DoubleToString(InpBaseCapital,0)+
+       " capital (no cap, no risk filter)");
 
    return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int reason)
 {
+   RemoveAllLevelDrawings();
 }
 
 void OnTick()
 {
-   RefreshLevelsForTimeframe(PERIOD_H1,g_lastH1BarTime,InpH1LevelLookbackBars);
-   RefreshLevelsForTimeframe(PERIOD_H4,g_lastH4BarTime,InpH4LevelLookbackBars);
-   RefreshLevelsForTimeframe(PERIOD_D1,g_lastD1BarTime,InpD1LevelLookbackBars);
-   RefreshLevelsForTimeframe(PERIOD_W1,g_lastW1BarTime,InpW1LevelLookbackBars);
+   RefreshLevelsForTimeframe(PERIOD_H1,g_lastH1BarTime,2);
+   RefreshLevelsForTimeframe(PERIOD_H4,g_lastH4BarTime,2);
+   RefreshLevelsForTimeframe(PERIOD_D1,g_lastD1BarTime,2);
+   RefreshLevelsForTimeframe(PERIOD_W1,g_lastW1BarTime,2);
 
    ReconcileLevelBindings();
    ProcessLevelTouches();
+   DrawAllLevels();
 
    if(InpStatusReportIntervalSec>0 &&
       TimeCurrent()-g_lastStatusReportTime>=InpStatusReportIntervalSec)
