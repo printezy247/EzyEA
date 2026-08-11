@@ -90,9 +90,28 @@
 //|         doubling the entry surface on trending days. Raised        |
 //|         InpMaxConcurrentPositions 6->10 so the higher signal rate |
 //|         isn't immediately capped out.                             |
+//| 1.006 - 0.22->0.43 lots (roughly doubled again, as expected) but   |
+//|         still short of target. Hard ceiling worth stating         |
+//|         plainly: at the 0.01-lot floor this account/risk combo    |
+//|         produces, even one trade on every single M5 bar (288/day) |
+//|         only totals ~2.9 lots/day - literal 30-70 lots of volume  |
+//|         is not reachable through frequency alone here, only        |
+//|         through bigger positions (the aggressive sizing already   |
+//|         declined). Pushed trade COUNT as far as requested          |
+//|         ("remove confluence if needed"): both EvaluateRangeEntry() |
+//|         and EvaluateTrendEntry() dropped their multi-bar/reclaim   |
+//|         confirmation and now trigger off a single confirmed bar - |
+//|         range fades the close immediately once it's beyond the    |
+//|         band, trend enters on any bar closed on the trend side of |
+//|         EMA20. Both remain repaint-safe (closed-bar-only) but are  |
+//|         far less selective and will whipsaw more; deliberate      |
+//|         trade of quality for frequency per the user's request,    |
+//|         with a drawdown/quality filter to be layered back on      |
+//|         later. Raised InpMaxConcurrentPositions 10->20 so this     |
+//|         much higher signal rate has room to convert into trades.  |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.005"
+#property version   "1.006"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -133,7 +152,7 @@ input double InpAtrSlMultiplier             = 1.5;
 
 input group "=== Risk / Sizing ==="
 input double InpRiskPercentPerTrade         = 0.25;
-input int    InpMaxConcurrentPositions      = 10;
+input int    InpMaxConcurrentPositions      = 20;
 input double InpMaxLotsAbsolute             = 5.0;
 // On a small account, the broker's minimum lot can itself risk more than
 // InpRiskPercentPerTrade at a wide ATR-based SL (confirmed live: XAUUSD's
@@ -718,26 +737,23 @@ bool UpdateOnNewM5Bar()
 bool EvaluateRangeEntry(int &direction)
 {
    double upperBuf[],lowerBuf[];
-   if(CopyBufferSeries(g_handleBandsM5,1,3,upperBuf)<3) return false;
-   if(CopyBufferSeries(g_handleBandsM5,2,3,lowerBuf)<3) return false;
+   if(CopyBufferSeries(g_handleBandsM5,1,2,upperBuf)<2) return false;
+   if(CopyBufferSeries(g_handleBandsM5,2,2,lowerBuf)<2) return false;
 
    double close1=iClose(_Symbol,PERIOD_M5,1);
-   double high2 =iHigh(_Symbol,PERIOD_M5,2);
-   double low2  =iLow(_Symbol,PERIOD_M5,2);
 
-   // A wick piercing the band is a far more common event than a full close
-   // beyond it, so the "outside" leg uses the high/low; the entry itself
-   // still requires the confirmed CLOSE back inside, so nothing repaints.
-
-   // Wicked above the upper band, closed back inside -> SELL toward the mean.
-   if(high2>upperBuf[2] && close1<=upperBuf[1])
+   // Simplified per explicit "maximum frequency, remove confluence" request:
+   // fades the confirmed close beyond the band immediately - no longer
+   // waiting for a second bar's reclaim back inside. Still only reads the
+   // last CLOSED bar (never the forming one), so it stays repaint-safe;
+   // it is simply far less selective now, and will whipsaw more.
+   if(close1>upperBuf[1])
    {
       direction=-1;
       return true;
    }
 
-   // Wicked below the lower band, closed back inside -> BUY toward the mean.
-   if(low2<lowerBuf[2] && close1>=lowerBuf[1])
+   if(close1<lowerBuf[1])
    {
       direction=1;
       return true;
@@ -751,36 +767,26 @@ bool EvaluateTrendEntry(int &direction)
    if(g_trendDirection==0) return false;
 
    double emaBuf[];
-   if(CopyBufferSeries(g_handleEmaM5,0,4,emaBuf)<4) return false;
+   if(CopyBufferSeries(g_handleEmaM5,0,2,emaBuf)<2) return false;
 
    double close1=iClose(_Symbol,PERIOD_M5,1);
-   double low1  =iLow(_Symbol,PERIOD_M5,1);
-   double high1 =iHigh(_Symbol,PERIOD_M5,1);
-   double low2  =iLow(_Symbol,PERIOD_M5,2);
-   double high2 =iHigh(_Symbol,PERIOD_M5,2);
-   double low3  =iLow(_Symbol,PERIOD_M5,3);
-   double high3 =iHigh(_Symbol,PERIOD_M5,3);
 
-   if(g_trendDirection==1)
+   // Simplified per explicit "maximum frequency, remove confluence" request:
+   // no pullback/touch requirement anymore, just "closed on the trend side
+   // of EMA20 on the last confirmed bar". Still never counter-trend and
+   // still bar-close-confirmed, but fires on most bars of a live trend
+   // instead of only at a discrete pullback event - a deliberate trade of
+   // selectivity for frequency, to be revisited with a drawdown filter.
+   if(g_trendDirection==1 && close1>emaBuf[1])
    {
-      // Pulled back to/through EMA20 against the uptrend (on any of the
-      // last three closed bars) and reclaimed it on the close -> continuation
-      // BUY. Dropped the extra "closed higher than the prior bar" filter -
-      // the EMA reclaim on the close is already the real confirmation, and
-      // requiring both roughly halved how often a valid pullback qualified.
-      if((low3<=emaBuf[3] || low2<=emaBuf[2] || low1<=emaBuf[1]) && close1>emaBuf[1])
-      {
-         direction=1;
-         return true;
-      }
+      direction=1;
+      return true;
    }
-   else
+
+   if(g_trendDirection==-1 && close1<emaBuf[1])
    {
-      if((high3>=emaBuf[3] || high2>=emaBuf[2] || high1>=emaBuf[1]) && close1<emaBuf[1])
-      {
-         direction=-1;
-         return true;
-      }
+      direction=-1;
+      return true;
    }
 
    return false;
