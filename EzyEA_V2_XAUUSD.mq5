@@ -83,9 +83,26 @@
 //|         existing positions keep trailing normally, only new entries |
 //|         pause. This is the hard backstop against margin calls       |
 //|         regardless of what's driving the drawdown.                 |
+//| 2.005 - Confirmed live: margin calls STILL happened on both test    |
+//|         dates with 2.004, and the equity graph showed why - many    |
+//|         same-direction positions floating deeply underwater for an  |
+//|         extended stretch before individually hitting their stop.    |
+//|         Halting new entries alone can't stop an existing pile of    |
+//|         correlated losers from bleeding out. User explicitly        |
+//|         approved bringing back ADX ("you can add adx if you want"). |
+//|         Two fixes: (1) UpdateDrawdownBreaker() now calls the new     |
+//|         CloseAllPositions() the moment it trips, instead of only     |
+//|         blocking new entries - an actual emergency stop. (2) Added  |
+//|         an H1 ADX trend FILTER (InpEnableTrendFilter, threshold 25) |
+//|         that blocks a fade running directly against a confirmed     |
+//|         strong trend - SND levels remain the ONLY entry mechanism   |
+//|         and both directions still trade freely outside a strong     |
+//|         trend, this does not bring back V1's regime system, it only |
+//|         removes the specific correlated-loss scenario that caused   |
+//|         both margin calls.                                          |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "2.004"
+#property version   "2.005"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -103,6 +120,20 @@ enum ENUM_EZY_ACCOUNT_SCALE
 //======================================================================
 // Inputs
 //======================================================================
+input group "=== Trend Filter (H1 ADX) - blocks counter-trend fades only ==="
+// Confirmed live: with zero trend awareness, V2 can fade the SAME
+// direction at level after level through a strong trend, piling up
+// correlated losers that caused two separate margin calls. This does
+// NOT bring back V1's regime system - SND levels are still the only
+// entry mechanism and both directions still trade freely in normal
+// conditions. It only blocks a fade that runs directly against an
+// H1 ADX-confirmed strong trend (e.g. no BUY demand-fades while H1 is
+// strongly trending down), which is exactly the correlated-loss
+// scenario that caused the margin calls.
+input bool   InpEnableTrendFilter           = true;
+input int    InpAdxPeriod                   = 14;
+input double InpAdxTrendThreshold           = 25.0;
+
 input group "=== SND Level-Touch Entries: M5 -> Weekly, raw touch, no confluence ==="
 // Learned from the old EzyMap "EVERY_ZERO_CONF_LEVEL_NO_ENTRY_GOVERNORS"
 // build per explicit request: track swing high/low (supply/demand)
@@ -238,6 +269,11 @@ struct LevelTouchState
 CTrade trade;
 
 int g_handleAtrM5 = INVALID_HANDLE;
+int g_handleAdxH1 = INVALID_HANDLE;
+
+datetime g_lastAdxH1BarTime = 0;
+int      g_trendDirection   = 0;   // 1 up, -1 down, 0 no strong trend
+double   g_lastAdxValue     = 0.0;
 
 double g_accountUnitDivisor = 1.0;
 
@@ -309,6 +345,9 @@ bool   SpreadAllowed();
 int    CountOpenPositions();
 int    CountOpenPositionsByDirection(int direction);
 void   UpdateDrawdownBreaker();
+void   UpdateTrendFilterOnNewH1Bar();
+bool   TrendFilterAllows(int direction);
+void   CloseAllPositions(string reason);
 
 int    CopyBufferSeries(int handle,int bufferIndex,int count,double &out[]);
 
@@ -347,11 +386,16 @@ int OnInit()
    trade.SetDeviationInPoints(InpDeviationPoints);
 
    g_handleAtrM5 = iATR(_Symbol,PERIOD_M5,InpAtrPeriod);
-   if(g_handleAtrM5==INVALID_HANDLE)
+   g_handleAdxH1 = iADX(_Symbol,PERIOD_H1,InpAdxPeriod);
+   if(g_handleAtrM5==INVALID_HANDLE || g_handleAdxH1==INVALID_HANDLE)
    {
       Log("Indicator handle creation failed.");
       return INIT_FAILED;
    }
+
+   g_lastAdxH1BarTime=0;
+   g_trendDirection=0;
+   g_lastAdxValue=0.0;
 
    g_accountUnitDivisor = ResolveAccountUnitDivisor();
 
@@ -401,6 +445,7 @@ void OnDeinit(const int reason)
    WriteFinalReport();
 
    if(g_handleAtrM5!=INVALID_HANDLE) IndicatorRelease(g_handleAtrM5);
+   if(g_handleAdxH1!=INVALID_HANDLE) IndicatorRelease(g_handleAdxH1);
 
    RemoveAllDrawings();
 }
@@ -408,6 +453,7 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    UpdateDrawdownBreaker();
+   UpdateTrendFilterOnNewH1Bar();
 
    if(InpEnableLevelTouchEntries)
    {
@@ -754,11 +800,76 @@ int CountOpenPositionsByDirection(int direction)
 }
 
 //======================================================================
-// Drawdown circuit breaker: halts new entries once floating+realized
-// drawdown from the peak equity seen since attach crosses the threshold.
-// Existing positions are untouched - ManageTrailing() keeps managing them
-// normally - only new entries pause. Resumes with hysteresis so it
-// doesn't flap on/off right at the boundary.
+// H1 ADX trend filter: does NOT change which mechanism generates entries
+// (SND level touches are still the only trigger) - it only blocks a fade
+// that runs directly against a confirmed strong trend. Recomputed once
+// per new H1 bar, same cadence V1 used.
+//======================================================================
+void UpdateTrendFilterOnNewH1Bar()
+{
+   if(!InpEnableTrendFilter) return;
+
+   datetime h1=iTime(_Symbol,PERIOD_H1,0);
+   if(h1==0 || h1==g_lastAdxH1BarTime) return;
+   g_lastAdxH1BarTime=h1;
+
+   double adxBuf[],plusBuf[],minusBuf[];
+   if(CopyBufferSeries(g_handleAdxH1,0,3,adxBuf)<3)   return;
+   if(CopyBufferSeries(g_handleAdxH1,1,3,plusBuf)<3)  return;
+   if(CopyBufferSeries(g_handleAdxH1,2,3,minusBuf)<3) return;
+
+   double adx    =adxBuf[1];
+   double plusDI =plusBuf[1];
+   double minusDI=minusBuf[1];
+
+   g_lastAdxValue=adx;
+
+   if(adx>=InpAdxTrendThreshold)
+      g_trendDirection=(plusDI>minusDI)?1:((minusDI>plusDI)?-1:0);
+   else
+      g_trendDirection=0; // no confirmed strong trend - both directions free to trade
+}
+
+bool TrendFilterAllows(int direction)
+{
+   if(!InpEnableTrendFilter) return true;
+   if(g_trendDirection==0) return true;      // not strongly trending - no restriction
+   return direction==g_trendDirection;        // strongly trending - only the trend side fades
+}
+
+//======================================================================
+// Emergency stop: closes every position this EA opened. Used by the
+// drawdown breaker below so a hard equity threshold actually stops the
+// bleeding instead of just blocking new entries while an existing pile
+// of correlated losers keeps moving against the account.
+//======================================================================
+void CloseAllPositions(string reason)
+{
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+
+      bool ok=trade.PositionClose(ticket);
+      uint retcode=trade.ResultRetcode();
+      if(!ok || !TradeRetcodeAccepted(retcode))
+         Log("EMERGENCY CLOSE FAILED ticket="+IntegerToString((int)ticket)+
+             " retcode="+IntegerToString(retcode)+" reason="+reason);
+   }
+}
+
+//======================================================================
+// Drawdown circuit breaker: once floating+realized drawdown from the
+// peak equity seen since attach crosses the threshold, this closes EVERY
+// open position immediately and halts new entries - confirmed live that
+// halting new entries alone isn't enough, since an existing pile of
+// correlated losers keeps bleeding regardless of whether new trades are
+// blocked. Resumes with hysteresis once equity recovers (positions were
+// already flattened, so "resume" just means new entries are allowed
+// again - there's no existing state to reconcile).
 //======================================================================
 void UpdateDrawdownBreaker()
 {
@@ -780,10 +891,11 @@ void UpdateDrawdownBreaker()
    if(!g_tradingHalted && drawdownPct>=InpMaxEquityDrawdownPct)
    {
       g_tradingHalted=true;
-      Log("DRAWDOWN BREAKER TRIPPED - new entries halted"+
+      Log("DRAWDOWN BREAKER TRIPPED - closing all positions and halting new entries"+
           " | drawdown="+DoubleToString(drawdownPct,2)+"%"+
           " | peakEquity="+DoubleToString(g_peakEquity,2)+
           " | equity="+DoubleToString(equity,2));
+      CloseAllPositions("drawdown breaker");
    }
    else if(g_tradingHalted && drawdownPct<=resumeThreshold)
    {
@@ -1021,6 +1133,12 @@ void ProcessLevelTouches()
 
       if(!touching) continue;
 
+      // Blocks only a fade running directly against a confirmed strong
+      // H1 trend - the correlated-loss mechanism behind two live margin
+      // calls. Checked before the cooldown so a level isn't left waiting
+      // out a stale cooldown once the trend condition clears.
+      if(!TrendFilterAllows(g_levels[i].fadeDirection)) continue;
+
       // Cooldown-only re-arm, per explicit "maximum trade frequency"
       // request: the reference file's "no entry governors" design does not
       // require price to fully leave the zone before a level can fire
@@ -1201,9 +1319,11 @@ void DrawLevels()
 void DrawStatusLabel()
 {
    string name="V2_StatusLabel";
-   string text=StringFormat("EzyEA V2 | SND levels active=%d/%d | Open=%d/%d | %s",
+   string trendText=(g_trendDirection==1?"UP":(g_trendDirection==-1?"DOWN":"NONE"));
+   string text=StringFormat("EzyEA V2 | SND levels active=%d/%d | Open=%d/%d | ADX=%.1f trend=%s | %s",
                 CountActiveLevels(),ArraySize(g_levels),
                 CountOpenPositions(),InpMaxConcurrentPositions,
+                g_lastAdxValue,trendText,
                 g_tradingHalted?"HALTED (drawdown breaker)":"ACTIVE");
 
    if(ObjectFind(0,name)<0)
