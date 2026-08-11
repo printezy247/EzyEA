@@ -18,19 +18,22 @@
 //  TRADE IDEA: 4 price LEVELS per timeframe (H1/H4/D1/W1) - the      |
 //  High and Low of each of the last 2 closed bars on that timeframe, |
 //  kept as a small rolling window (16 levels total) rather than an   |
-//  unbounded history. Direction is decided purely by which side      |
-//  price approaches a level from at the moment of touch - price      |
-//  rising up INTO a level from below fires an instant SELL; price    |
-//  falling down INTO a level from above fires an instant BUY. No     |
-//  confluence filter, no spread guard, no concurrency cap, no        |
-//  execution-distance pre-check - every qualifying touch on every    |
-//  level is a candidate trade, by explicit instruction, so the raw   |
-//  entry mechanism can be verified working before any filtering is   |
-//  added back. Fixed bracket only (TP 37 pips / SL 25 pips),         |
-//  submitted once at entry and NEVER modified afterward - no         |
-//  trailing, no breakeven lock, so V5 cannot suffer the retry-storm  |
-//  class that dominated the prior session's live failures, by        |
-//  construction rather than by patching around it.                   |
+//  unbounded history. A real resting LIMIT ORDER is placed directly  |
+//  at each level's price - a SELL LIMIT if the level is currently    |
+//  above price, a BUY LIMIT if it is below - so the broker's own     |
+//  order-matching engine decides when price has reached a level,     |
+//  rather than this EA polling ticks to detect a touch (see the      |
+//  v5.5 CORRECTION for why that changed). No confluence filter, no   |
+//  spread guard, no concurrency cap, no execution-distance           |
+//  pre-check - every level always carries a resting order, by        |
+//  explicit instruction. Fixed bracket only (TP 37 pips / SL 25      |
+//  pips), attached to the limit order at placement and NEVER         |
+//  modified afterward - no trailing, no breakeven lock, so V5        |
+//  cannot suffer the retry-storm class that dominated the prior      |
+//  session's live failures, by construction rather than by           |
+//  patching around it. Once a level's order fills and the resulting  |
+//  position closes, a fresh limit order is placed at the same level  |
+//  automatically.                                                    |
 //                                                                    |
 //  LOT SIZING: capital-scaled, not risk-%-based - InpBaseLot         |
 //  (default 0.01) per InpBaseCapital (default 100, in the same       |
@@ -120,6 +123,27 @@
 //  visible, and a periodic "V5 LEVEL DUMP" line listing every tracked  |
 //  level's exact price against the current bid.                        |
 //                                                                    |
+//  CORRECTION (v5.5, trading logic change per explicit instruction):   |
+//  replaced instant market entry on tick-detected touch with a real     |
+//  RESTING LIMIT ORDER placed directly at each level's price - a SELL   |
+//  LIMIT if the level is currently above price, a BUY LIMIT if it is    |
+//  below. This retires the entire tick-polling touch-detection          |
+//  approach (and the v5.4 crossing-envelope fix along with it) in       |
+//  favour of letting the broker's own order-matching engine decide      |
+//  when price has reached a level, using its live price feed rather     |
+//  than a periodic OnTick snapshot - structurally immune to the         |
+//  tunneling problem v5.4 fixed by hand. LevelState's hasPrevPrice/     |
+//  prevPrice fields were replaced with a single pendingTicket field.    |
+//  When a level's order fills, the resulting position is bound to      |
+//  openTicket exactly as before (via ReconcileLevelBindings() comment   |
+//  matching); once that position closes, a fresh limit order is        |
+//  placed at the same level automatically - directly implementing "a    |
+//  new limit is generated once the previous one on that level has      |
+//  been triggered." A level being rolled over (evicted for a newer     |
+//  bar's H/L once 4 are already tracked) now cancels any resting        |
+//  pending order at the old price first, so nothing is ever left        |
+//  orphaned at the broker.                                              |
+//                                                                    |
 //  NOT YET VERIFIED: compiles in MetaEditor (no MQL5 toolchain in     |
 //  this environment), or real trading performance. Verified here:    |
 //  brace/paren/bracket balance, and a manual audit that every input   |
@@ -128,7 +152,7 @@
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
 #property link      ""
-#property version   "5.4"
+#property version   "5.5"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -193,8 +217,7 @@ struct LevelState
    double         price;
    datetime       barTime;
    ENUM_TIMEFRAMES sourceTf;
-   bool           hasPrevPrice;          // false until one tick has been observed
-   double         prevPrice;             // reference price as of the previous tick
+   ulong          pendingTicket;         // 0 = no resting limit order at this level
    ulong          openTicket;            // 0 = no live trade bound to this level
    int            entryConsecutiveFailures;
    datetime       entryCooldownUntil;
@@ -238,8 +261,8 @@ void   RefreshLevelsForTimeframe(ENUM_TIMEFRAMES tf,datetime &lastBarTime,int se
 int    FindLevelByPrice(double price);
 bool   ParseLevelComment(string comment,double &outPrice);
 void   ReconcileLevelBindings();
-void   ProcessLevelTouches();
-bool   TryFireLevel(int levelIndex,int direction);
+void   ManageLevelOrders();
+bool   PlaceLevelLimitOrder(int levelIndex);
 void   ReportLiveParityStatus();
 void   ReportDeploymentGateBreakdown();
 string TimeframeLabel(ENUM_TIMEFRAMES tf);
@@ -473,6 +496,17 @@ void AddOrEvictLevel(double price,datetime barTime,ENUM_TIMEFRAMES tf)
          return; // all 4 have open trades right now - skip, retry later
       }
 
+      // A resting pending order at the OLD price is no longer meaningful
+      // once this slot is repointed at a new price - cancel it rather
+      // than leave it orphaned at the broker with nothing tracking it.
+      if(g_levels[oldestIdx].pendingTicket!=0)
+      {
+         trade.OrderDelete(g_levels[oldestIdx].pendingTicket);
+         Log("V5 LIMIT CANCELLED (level rolling over) | tf="+TimeframeLabel(tf)+
+             " | old level="+DoubleToString(g_levels[oldestIdx].price,_Digits)+
+             " | ticket="+(string)g_levels[oldestIdx].pendingTicket);
+      }
+
       Log("V5 LEVEL REPLACED | tf="+TimeframeLabel(tf)+
           " | old="+DoubleToString(g_levels[oldestIdx].price,_Digits)+
           " -> new="+DoubleToString(price,_Digits)+
@@ -480,8 +514,7 @@ void AddOrEvictLevel(double price,datetime barTime,ENUM_TIMEFRAMES tf)
 
       g_levels[oldestIdx].price=price;
       g_levels[oldestIdx].barTime=barTime;
-      g_levels[oldestIdx].hasPrevPrice=false;
-      g_levels[oldestIdx].prevPrice=0.0;
+      g_levels[oldestIdx].pendingTicket=0;
       g_levels[oldestIdx].openTicket=0;
       g_levels[oldestIdx].entryConsecutiveFailures=0;
       g_levels[oldestIdx].entryCooldownUntil=0;
@@ -493,8 +526,7 @@ void AddOrEvictLevel(double price,datetime barTime,ENUM_TIMEFRAMES tf)
    g_levels[idx].price=price;
    g_levels[idx].barTime=barTime;
    g_levels[idx].sourceTf=tf;
-   g_levels[idx].hasPrevPrice=false;
-   g_levels[idx].prevPrice=0.0;
+   g_levels[idx].pendingTicket=0;
    g_levels[idx].openTicket=0;
    g_levels[idx].entryConsecutiveFailures=0;
    g_levels[idx].entryCooldownUntil=0;
@@ -589,13 +621,49 @@ void ReconcileLevelBindings()
       if(idx>=0)
          g_levels[idx].openTicket=ticket;
    }
+
+   // A level's tracked pending order may have disappeared since the last
+   // check - either it FILLED (the position loop above will have already
+   // picked up the resulting position by comment match this same pass) or
+   // it was cancelled/expired - either way, stop tracking a ticket that no
+   // longer exists so ManageLevelOrders() knows to place a fresh one.
+   int n=ArraySize(g_levels);
+   for(int i=0;i<n;i++)
+      if(g_levels[i].pendingTicket!=0 && !OrderSelect(g_levels[i].pendingTicket))
+         g_levels[i].pendingTicket=0;
+
+   // Also bind any currently-resting pending order not yet tracked, by the
+   // same comment-matching pattern - covers an EA restart/reattach finding
+   // pending orders it placed before, with no persisted state required.
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0) continue;
+      if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+      if((ulong)OrderGetInteger(ORDER_MAGIC)!=InpMagicNumber) continue;
+
+      string comment=OrderGetString(ORDER_COMMENT);
+      double lvlPrice;
+      if(!ParseLevelComment(comment,lvlPrice)) continue;
+
+      int idx=FindLevelByPrice(lvlPrice);
+      if(idx>=0)
+         g_levels[idx].pendingTicket=ticket;
+   }
 }
 
-//------------------------------ Touch detection / entry -------------------
-bool TryFireLevel(int levelIndex,int direction)
+//------------------------------ Pending limit orders -----------------------
+// v5.5: replaces the entire tick-polling touch-detection approach. Instead
+// of watching price on every tick and trying to detect when it crosses a
+// level (which needed a crossing-envelope fix in v5.4 to avoid missing
+// ticks that tunneled straight past a level), a real resting limit order
+// is placed directly AT each level's price - a SELL LIMIT if the level is
+// currently above price, a BUY LIMIT if it is below. The broker's own
+// order-matching engine then handles "did price reach this level" using
+// its live price feed, not a periodic OnTick snapshot - structurally
+// immune to the tunneling problem, and exactly what a limit order is for.
+bool PlaceLevelLimitOrder(int levelIndex)
 {
-   // TimeCurrent() (the simulated market clock) rather than GetTickCount64()
-   // (real CPU time) - see the v5.1 CORRECTION note in the header.
    datetime nowTime=TimeCurrent();
 
    if(nowTime<g_levels[levelIndex].entryCooldownUntil)
@@ -608,29 +676,36 @@ bool TryFireLevel(int levelIndex,int direction)
    if(!SymbolInfoTick(_Symbol,tick))
       return false;
 
-   double entryPrice=(direction==1)?tick.ask:tick.bid;
+   double levelPrice=g_levels[levelIndex].price;
+   double cmp=tick.bid;
+
+   // Level above current price -> SELL LIMIT (price must rise to meet it).
+   // Level below current price -> BUY LIMIT (price must fall to meet it).
+   // Level == current price (within a point) -> wait a tick for it to
+   // separate rather than guess a side.
+   int direction;
+   if(levelPrice>cmp+_Point) direction=-1;
+   else if(levelPrice<cmp-_Point) direction=1;
+   else return false;
+
    double slDistance=MathMax(0.1,InpStopLossPips)*g_pipSize;
    double tpDistance=MathMax(0.1,InpTakeProfitPips)*g_pipSize;
 
-   // v5.4: NOT widened to the broker's minimum anymore - reverted per
-   // explicit instruction (a silently wider SL is a real, unwanted extra
-   // loss). The fixed 25/37 pip bracket is sent exactly as specified; if
-   // the broker rejects it as too tight, that shows up as a genuine
-   // "V5 ENTRY FAILED | retcode=10016" in the journal rather than being
-   // masked by widening it.
-   double sl=RoundPrice(direction==1?entryPrice-slDistance:entryPrice+slDistance);
-   double tp=RoundPrice(direction==1?entryPrice+tpDistance:entryPrice-tpDistance);
+   // SL/TP are relative to the LIMIT price itself (where the order will
+   // actually fill), not current market price - the fixed 25/37 pip
+   // bracket is sent exactly as specified, never widened.
+   double sl=RoundPrice(direction==1?levelPrice-slDistance:levelPrice+slDistance);
+   double tp=RoundPrice(direction==1?levelPrice+tpDistance:levelPrice-tpDistance);
+   double orderPrice=RoundPrice(levelPrice);
 
    double lots=ComputeCapitalScaledLot();
    if(lots<=0.0)
       return false;
 
-   // Baseline cooldown applied on EVERY attempt, win or lose, so a
-   // whipsaw at the exact level price cannot re-fire faster than
-   // InpLevelReTouchCooldownSec - independent of the exponential backoff
-   // below, which only extends this further on genuine rejections. This
-   // is the one gate kept with everything else removed - see the v5.2
-   // CORRECTION note in the header for why.
+   // Baseline cooldown applied on EVERY placement attempt, win or lose,
+   // consistent with the retry-storm protection built for the exit side
+   // earlier this session - the one gate kept even with everything else
+   // removed.
    g_levels[levelIndex].entryCooldownUntil=
       nowTime+(datetime)MathMax(0,InpLevelReTouchCooldownSec);
 
@@ -638,8 +713,8 @@ bool TryFireLevel(int levelIndex,int direction)
 
    g_orderSendAttempts++;
    bool sent=(direction==1)
-             ? trade.Buy(lots,_Symbol,entryPrice,sl,tp,comment)
-             : trade.Sell(lots,_Symbol,entryPrice,sl,tp,comment);
+             ? trade.BuyLimit(lots,orderPrice,_Symbol,sl,tp,ORDER_TIME_GTC,0,comment)
+             : trade.SellLimit(lots,orderPrice,_Symbol,sl,tp,ORDER_TIME_GTC,0,comment);
 
    uint code=trade.ResultRetcode();
    bool accepted=sent && TradeRetcodeAccepted(code);
@@ -648,19 +723,16 @@ bool TryFireLevel(int levelIndex,int direction)
    {
       g_orderSendAccepted++;
       g_levels[levelIndex].entryConsecutiveFailures=0;
+      g_levels[levelIndex].pendingTicket=trade.ResultOrder();
 
-      Log("V5 ENTRY | "+(direction==1?"BUY":"SELL")+
+      Log("V5 LIMIT PLACED | "+(direction==1?"BUY LIMIT":"SELL LIMIT")+
           " | level="+DoubleToString(g_levels[levelIndex].price,_Digits)+
           " (tf="+EnumToString(g_levels[levelIndex].sourceTf)+")"+
-          " | entry="+DoubleToString(entryPrice,_Digits)+
           " | sl="+DoubleToString(sl,_Digits)+
           " | tp="+DoubleToString(tp,_Digits)+
-          " | lots="+DoubleToString(lots,VolumeDigits()));
+          " | lots="+DoubleToString(lots,VolumeDigits())+
+          " | ticket="+(string)g_levels[levelIndex].pendingTicket);
 
-      // The exact resulting position ticket is bound on the next tick's
-      // ReconcileLevelBindings() pass via the order comment, rather than
-      // trusted here from trade.ResultOrder()/ResultDeal() - see that
-      // function's header comment for why.
       return true;
    }
 
@@ -677,7 +749,7 @@ bool TryFireLevel(int levelIndex,int direction)
       (datetime)MathMax(MathMax(0,InpLevelReTouchCooldownSec),backoffSec);
    g_levels[levelIndex].entryCooldownUntil=cooldownUntil;
 
-   Log("V5 ENTRY FAILED | "+(direction==1?"BUY":"SELL")+
+   Log("V5 LIMIT FAILED | "+(direction==1?"BUY LIMIT":"SELL LIMIT")+
        " | level="+DoubleToString(g_levels[levelIndex].price,_Digits)+
        " | temporary="+string(temporary?"YES":"NO")+
        " | consecutive failures="+IntegerToString(failCount)+
@@ -688,74 +760,23 @@ bool TryFireLevel(int levelIndex,int direction)
    return false;
 }
 
-// Runs every tick. For each level: if it has a live trade bound, verify
-// the position still exists (clear the binding and re-arm the level the
-// instant it does not); otherwise evaluate touch/direction.
-//
-// v5.4: touch is now detected as a CROSSING between the previous tick's
-// reference price and the current one, not just "is the current tick
-// inside the tolerance band" - the earlier check missed any touch where
-// price moved from clearly one side of a level to clearly the other side
-// between two consecutive ticks without any single tick happening to land
-// inside a narrow tolerance band (very possible in the Strategy Tester,
-// and in fast markets generally). This mirrors how FRESH V3's own
-// ReadyTouchCMP()/BuildZeroConfluenceTouchEnvelope() treat a touch as the
-// span between the previous and current CMP, not a single snapshot.
-void ProcessLevelTouches()
+// Runs every tick. For each level: a live trade bound (openTicket!=0) or a
+// resting pending order (pendingTicket!=0) means there's nothing to do -
+// ReconcileLevelBindings() already keeps both current. Only a level with
+// neither gets a fresh limit order placed, gated by its cooldown. When an
+// open trade closes, ReconcileLevelBindings() clears openTicket on the
+// very next pass, and this function places a brand new limit order at the
+// same level on the pass after that - directly implementing "a level
+// re-triggers once its previous trade closes."
+void ManageLevelOrders()
 {
-   MqlTick tick;
-   if(!SymbolInfoTick(_Symbol,tick))
-      return;
-
-   double tol=MathMax(0,InpLevelTouchTolerancePoints)*_Point;
-   double refPrice=tick.bid;
-
    int n=ArraySize(g_levels);
    for(int i=0;i<n;i++)
    {
-      if(g_levels[i].openTicket!=0)
-      {
-         if(!PositionSelectByTicket(g_levels[i].openTicket))
-            g_levels[i].openTicket=0;
-         else
-            continue; // blocked while a trade from this level is open
-      }
+      if(g_levels[i].openTicket!=0) continue;
+      if(g_levels[i].pendingTicket!=0) continue;
 
-      double lvl=g_levels[i].price;
-
-      if(g_levels[i].hasPrevPrice)
-      {
-         double prevPrice=g_levels[i].prevPrice;
-         bool prevBelow=(prevPrice<lvl-tol);
-         bool prevAbove=(prevPrice>lvl+tol);
-         bool nowAtOrAbove=(refPrice>=lvl-tol);
-         bool nowAtOrBelow=(refPrice<=lvl+tol);
-
-         int direction=0;
-         // prevBelow && nowAtOrAbove: price rose up into/through the level
-         //   from below - "cmp touch the level above it" -> SELL.
-         // prevAbove && nowAtOrBelow: price fell down into/through the
-         //   level from above - "cmp touch the level below it" -> BUY.
-         if(prevBelow && nowAtOrAbove) direction=-1;
-         else if(prevAbove && nowAtOrBelow) direction=1;
-
-         if(direction!=0)
-         {
-            // Unconditional log at the moment of touch, BEFORE any gate or
-            // order-send outcome, so touch detection itself is never
-            // ambiguous in the journal regardless of what happens next.
-            Log("V5 TOUCH | level="+DoubleToString(lvl,_Digits)+
-                " (tf="+EnumToString(g_levels[i].sourceTf)+")"+
-                " | direction="+(direction==1?"BUY":"SELL")+
-                " | prevPrice="+DoubleToString(prevPrice,_Digits)+
-                " | price="+DoubleToString(refPrice,_Digits));
-
-            TryFireLevel(i,direction);
-         }
-      }
-
-      g_levels[i].prevPrice=refPrice;
-      g_levels[i].hasPrevPrice=true;
+      PlaceLevelLimitOrder(i);
    }
 }
 
@@ -787,19 +808,21 @@ void ReportLiveParityStatus()
        " | divisor="+DoubleToString(g_accountUnitDivisor,1)+
        " | pipSize="+DoubleToString(g_pipSize,_Digits));
 
-   // v5.4: the exact tracked price/side of every level, so a run that
-   // produces zero trades can be checked directly against the chart -
-   // e.g. does "current side" ever actually read 0 (touching) for a level
-   // the chart shows price crossing?
+   // v5.5: the exact tracked price and order/position state of every
+   // level, so a run can be checked directly against the chart and the
+   // broker's own order list.
    MqlTick statusTick;
    double statusBid=(SymbolInfoTick(_Symbol,statusTick))?statusTick.bid:0.0;
    string dump="V5 LEVEL DUMP | bid="+DoubleToString(statusBid,_Digits);
    for(int i=0;i<n;i++)
    {
+      string state="idle";
+      if(g_levels[i].openTicket!=0) state="OPEN#"+(string)g_levels[i].openTicket;
+      else if(g_levels[i].pendingTicket!=0) state="PENDING#"+(string)g_levels[i].pendingTicket;
+
       dump+=" | "+TimeframeLabel(g_levels[i].sourceTf)+
             "="+DoubleToString(g_levels[i].price,_Digits)+
-            "(prev="+(g_levels[i].hasPrevPrice?DoubleToString(g_levels[i].prevPrice,_Digits):"none")+
-            (g_levels[i].openTicket!=0?",OPEN":"")+")";
+            "("+state+")";
    }
    Log(dump);
 }
@@ -953,6 +976,8 @@ int OnInit()
        " | lot="+DoubleToString(InpBaseLot,2)+" per "+DoubleToString(InpBaseCapital,0)+
        " capital (no cap, no risk filter)");
 
+   ManageLevelOrders();
+
    return INIT_SUCCEEDED;
 }
 
@@ -969,7 +994,7 @@ void OnTick()
    RefreshLevelsForTimeframe(PERIOD_W1,g_lastW1BarTime,2);
 
    ReconcileLevelBindings();
-   ProcessLevelTouches();
+   ManageLevelOrders();
    DrawAllLevels();
 
    if(InpStatusReportIntervalSec>0 &&
