@@ -176,9 +176,28 @@
 //  entry/zone/scoring/sizing logic was touched. New inputs:           |
 //  InpUseAtrBasedStops (default true), InpAtrPeriodExit (14),         |
 //  InpAtrSlMultiplierExit (1.5) - matching V1's own defaults exactly. |
+//                                                                    |
+//  V3.304 - DRAWING ONLY, per explicit instruction ("refine drawing   |
+//  logic to follow the pine's drawing logic for v3.3 only"), against  |
+//  the newly attached EzyMap Pro V2 Pine script. Two real spec        |
+//  differences found vs the V1.4-based port already in this file:     |
+//  (1) S1/R1/S2/R2 direction-level lines were DOT/DASH width 1 in     |
+//  MT5; Pine draws S1/R1 (primary) solid width 2 and S2/R2            |
+//  (secondary) solid width 1 - now matched exactly (MT5 has no line   |
+//  alpha channel, so the primary/secondary distinction is carried by  |
+//  width alone, same technique already used for the zone boxes).      |
+//  (2) DrawUnifiedZone()'s READY width was 2 and every "plain" zone    |
+//  used width 1 with an optional dashed border; Pine's box spec is    |
+//  READY=3, plain HIGH RISK zones=2, plain LOW RISK zones=3, and      |
+//  Pine never dashes a zone box border at all. DrawUnifiedZone() now  |
+//  takes an explicit plainWidth parameter (2 for BUY/SELL_HIGH_ZONE,  |
+//  3 for BUY/SELL_LOW_ZONE) instead of a style parameter, and always  |
+//  draws solid. No entry/zone-detection/scoring/sizing/exit logic     |
+//  touched - confirmed via diff hunk boundaries (only DrawLevelLabel's|
+//  header context, DrawUnifiedZone, and DrawMap changed).             |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "3.303"
+#property version   "3.304"
 
 #include <Trade/Trade.mqh>
 
@@ -826,7 +845,7 @@ input bool   InpCounterRequireM1Break          = true;
 
 //----------------------------- Constants ----------------------------
 #define PRODUCT_NAME "EzyMap Scalp Mastery"
-#define PRODUCT_VERSION "V3.303 • Pine Pro V1.4 zone drawing • ATR-based exit (V1 parity) • V3.104 FIXED BASE • BUY2/3 • SELL1/2 • EQUAL-SCORE M1 BIAS"
+#define PRODUCT_VERSION "V3.304 • Pine Pro V2 zone/level drawing • ATR-based exit (V1 parity) • V3.104 FIXED BASE • BUY2/3 • SELL1/2 • EQUAL-SCORE M1 BIAS"
 #define EMA_LEN 13
 #define TREND_MIN_CONFLUENCES 2
 #define COUNTER_MIN_CONFLUENCES 3
@@ -3601,17 +3620,22 @@ void DrawLevelLabel(string suffix,string tag,double price,color clr,datetime lab
    ChartText(suffix,labelTime,price,tag+"  "+PriceText(price),clr,8,ANCHOR_LEFT);
 }
 
-// V3.3: Pine EzyMap Pro V1.4-style unified zone box. One rectangle per
-// S/R zone that restyles itself in place depending on state, instead of a
-// static plain-colored map zone plus a separate floating entry rectangle
-// drawn on top of it once armed/live. isLive/isReady are computed by the
-// caller from the exact same g_buyReady/g_sellReady/g_active/g_state
-// fields the trading logic already used - this function only draws.
+// Pine EzyMap Pro V2-style unified zone box. One rectangle per S/R zone
+// that restyles itself in place depending on state, instead of a static
+// plain-colored map zone plus a separate floating entry rectangle drawn on
+// top of it once armed/live. isLive/isReady are computed by the caller
+// from the exact same g_buyReady/g_sellReady/g_active/g_state fields the
+// trading logic already used - this function only draws. Widths match
+// Pine V2's box spec exactly (LIVE=4, READY=3, plain=2 for HIGH RISK / 3
+// for LOW RISK, passed in as plainWidth); Pine never dashes a zone box
+// border, so every state is solid - MT5 has no alpha channel for the
+// bgcolor/border transparency Pine layers on top, so that distinction is
+// carried entirely by width/color the same way LIVE vs READY already was.
 void DrawUnifiedZone(string zoneKey,string labelKey,string zoneTitle,
                      const ZoneInfo &z,datetime mapFuture,datetime labelTime,
                      bool isLive,bool isReady,
                      color activeColor,color plainColor,
-                     ENUM_LINE_STYLE plainStyle,bool enabled)
+                     int plainWidth,bool enabled)
 {
    if(!enabled || !z.valid)
    {
@@ -3622,36 +3646,28 @@ void DrawUnifiedZone(string zoneKey,string labelKey,string zoneTitle,
 
    color clr;
    int width;
-   ENUM_LINE_STYLE style;
    string suffix;
 
    if(isLive)
    {
-      // MT5 chart objects have no alpha/transparency channel (unlike
-      // Pine's color.new(...,X)), so LIVE vs READY are told apart by
-      // border width instead of opacity - both use the same bright
-      // BUY/SELL color, LIVE simply draws thicker.
       clr=activeColor;
       width=4;
-      style=STYLE_SOLID;
       suffix=" - LIVE";
    }
    else if(isReady)
    {
       clr=activeColor;
-      width=2;
-      style=STYLE_SOLID;
+      width=3;
       suffix=" - READY";
    }
    else
    {
       clr=plainColor;
-      width=1;
-      style=plainStyle;
+      width=plainWidth;
       suffix="";
    }
 
-   Rect(zoneKey,z.time,z.lo,mapFuture,z.hi,clr,true,width,style);
+   Rect(zoneKey,z.time,z.lo,mapFuture,z.hi,clr,true,width,STYLE_SOLID);
 
    if(InpShowDrawingLabels)
       ChartText(labelKey,labelTime,(z.lo+z.hi)/2.0,zoneTitle+suffix,clr,8,ANCHOR_LEFT);
@@ -3667,10 +3683,15 @@ void DrawMap(datetime now)
    // Direction S/R levels + labels
    if(InpShowDirectionLevels)
    {
-      HLine("S1",g_S1,InpSupportColor,STYLE_DOT,1);
-      HLine("S2",g_S2,InpSupportColor,STYLE_DASH,1);
-      HLine("R1",g_R1,InpResistanceColor,STYLE_DOT,1);
-      HLine("R2",g_R2,InpResistanceColor,STYLE_DASH,1);
+      // Pine EzyMap Pro V2: S1/R1 (primary) are solid width 2, S2/R2
+      // (secondary) are solid width 1 with a muted variant of the same
+      // color - MT5 line objects have no alpha channel, so the muting is
+      // approximated the same way the zone boxes already do: by width
+      // alone rather than a dot/dash pattern Pine's own lines never use.
+      HLine("S1",g_S1,InpSupportColor,STYLE_SOLID,2);
+      HLine("S2",g_S2,InpSupportColor,STYLE_SOLID,1);
+      HLine("R1",g_R1,InpResistanceColor,STYLE_SOLID,2);
+      HLine("R2",g_R2,InpResistanceColor,STYLE_SOLID,1);
 
       DrawLevelLabel("LBL_S1","S1",g_S1,InpSupportColor,labelTime);
       DrawLevelLabel("LBL_S2","S2",g_S2,InpSupportColor,labelTime);
@@ -3705,22 +3726,22 @@ void DrawMap(datetime now)
       DrawUnifiedZone("BUY_HIGH_ZONE","LBL_BUY_HIGH","BUY ZONE - HIGH RISK",
                       g_buyHigh,mapFuture,labelTime,
                       buyHighLive,buyHighReady,
-                      InpBuyColor,InpBuyHighRiskZoneColor,STYLE_SOLID,true);
+                      InpBuyColor,InpBuyHighRiskZoneColor,2,true);
 
       DrawUnifiedZone("SELL_HIGH_ZONE","LBL_SELL_HIGH","SELL ZONE - HIGH RISK",
                       g_sellHigh,mapFuture,labelTime,
                       sellHighLive,sellHighReady,
-                      InpSellColor,InpSellHighRiskZoneColor,STYLE_SOLID,true);
+                      InpSellColor,InpSellHighRiskZoneColor,2,true);
 
       DrawUnifiedZone("BUY_LOW_ZONE","LBL_BUY_LOW","BUY ZONE - LOW RISK",
                       g_buyLow,mapFuture,labelTime,
                       buyLowLive,buyLowReady,
-                      InpBuyColor,InpBuyLowRiskZoneColor,STYLE_DASH,InpShowLowRiskZones);
+                      InpBuyColor,InpBuyLowRiskZoneColor,3,InpShowLowRiskZones);
 
       DrawUnifiedZone("SELL_LOW_ZONE","LBL_SELL_LOW","SELL ZONE - LOW RISK",
                       g_sellLow,mapFuture,labelTime,
                       sellLowLive,sellLowReady,
-                      InpSellColor,InpSellLowRiskZoneColor,STYLE_DASH,InpShowLowRiskZones);
+                      InpSellColor,InpSellLowRiskZoneColor,3,InpShowLowRiskZones);
 
       // Optional temporary validation marker for the exact candle chosen -
       // unchanged, not part of Pine's zone-box logic, just kept alongside it.
