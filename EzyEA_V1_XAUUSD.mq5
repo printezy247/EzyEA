@@ -1,159 +1,37 @@
 //+------------------------------------------------------------------+
 //|                                             EzyEA_V1_XAUUSD.mq5  |
 //|                                                                    |
-//| EzyEA V1 - ground-up regime-aware XAUUSD scalper.                 |
-//|                                                                    |
-//| Built from scratch (no reused trading logic from the EzyMap V2/   |
-//| V3/V4/V5 family, all of which were marked failed on live/tester   |
-//| parity). Only proven, self-contained infrastructure patterns from |
-//| that codebase are reused: cent-account equity scaling, risk-based |
-//| lot sizing via OrderCalcProfit(), trade retcode classification    |
-//| (including TRADE_RETCODE_MARKET_CLOSED), the zero-stops-level     |
-//| broker fallback, an auto-calibrating spread guard, and a          |
-//| TimeCurrent()-based (never GetTickCount64()) modify backoff -     |
-//| GetTickCount64() reflects real CPU time, not simulated market     |
-//| time, and produced meaningless cooldowns in the Strategy Tester   |
-//| during the V5 build. All entry/exit/regime logic below is new.   |
-//|                                                                    |
-//| CHANGELOG                                                         |
-//| 1.000 - Initial build. ADX(14) H1 regime read (RANGING<20,        |
-//|         TRENDING>=20, direction via +DI/-DI). M5 entries gated    |
-//|         by regime: Bollinger(20,2) mean-reversion when RANGING    |
-//|         with a live-tracked middle-band TP, EMA20 pullback        |
-//|         continuation when TRENDING with ATR-trail-only (no TP).   |
-//|         ATR-based SL for both. 0.25% equity risk per trade, 4     |
-//|         concurrent position cap, XAUUSD-only, cent-account aware. |
-//| 1.001 - Fixed a real sizing bug found in the first live tester    |
-//|         run: ComputeLotsForRisk() divided the risk budget by the  |
-//|         cent-account divisor while OneLotLoss()/OrderCalcProfit() |
-//|         stayed in raw account currency, undersizing every lot     |
-//|         calc ~100x on a real cent (USC) account and silently      |
-//|         zeroing every entry. Risk budget now stays raw/undivided  |
-//|         to match OrderCalcProfit()'s units - EffectiveAccountEq-  |
-//|         uity() is still used for status-log display only. Also   |
-//|         split the single distanceRejects gate counter into        |
-//|         distanceRejects (SL tighter than broker minimum) vs       |
-//|         sizingRejects (computed lots rounded to 0), and added a   |
-//|         Log() line with the actual numbers on every reject so the |
-//|         next test run pinpoints the exact cause without guessing. |
-//| 1.002 - Confirmed via the ENTRY REJECTED log added in 1.001: on a |
-//|         $1000 account, XAUUSD's 100oz contract means the broker's |
-//|         own 0.01 minimum lot can already risk more than 0.25% at  |
-//|         a normal ATR-based SL width (e.g. an $8.75 SL already     |
-//|         risks $8.75 at 0.01 lot = 0.875%), so risk-based sizing   |
-//|         rounds to 0 and every trade gets rejected - not a code    |
-//|         bug, a real small-account/contract-size constraint. Added|
-//|         InpAllowMinimumLotFallback: when sizing rounds to 0, fall |
-//|         back to the broker minimum lot instead of skipping the    |
-//|         trade, but only if that lot's real risk stays under the   |
-//|         explicit InpMinimumLotFallbackMaxRiskPct ceiling (default |
-//|         1.0%) - restores trade frequency on a small account       |
-//|         without silently exceeding the user's risk tolerance.     |
-//| 1.003 - Confirmed live: trades now fire and the account was up    |
-//|         (1135 vs 1000). Increased trade frequency: range entries  |
-//|         now trigger off a wick piercing the Bollinger band (the   |
-//|         common case) instead of requiring a full CLOSE beyond it, |
-//|         while the entry itself still needs the confirmed close    |
-//|         back inside, so nothing repaints. Trend entries dropped   |
-//|         the redundant "closed higher than the prior bar" filter   |
-//|         (the EMA reclaim on the close is already the real         |
-//|         confirmation) and now accept a touch on either of the     |
-//|         last two closed bars, not just the second-to-last one.    |
-//|         Raised InpMaxConcurrentPositions 4->6 since a sustained    |
-//|         trend can otherwise cap out on valid signals. Added        |
-//|         WriteFinalReport(): total trades / total lots traded /    |
-//|         net P/L from this EA's own deal history (by symbol+magic),|
-//|         printed from OnDeinit() alongside the run's final balance.|
-//| 1.004 - User asked for 30-70 lots/day on the $1000 tester account,|
-//|         explicitly keeping risk-per-trade conservative (declined  |
-//|         the V3/V4-style aggressive sizing tradeoff). At the       |
-//|         0.01-lot floor that nearly every trade hits on this       |
-//|         account size, that's a trade-COUNT target (~30-70         |
-//|         trades/day), not a total-lot-volume one - 100 trades/day  |
-//|         at 0.01 lots is still only 1.0 lot of volume. Pushed      |
-//|         frequency further toward that: InpBandsDeviation 2.0->1.5 |
-//|         (narrower bands = far more frequent wick touches for      |
-//|         range entries), and widened the trend-entry EMA touch     |
-//|         window from the last 2 closed bars to the last 3. Risk    |
-//|         model, SL/TP structure, and position sizing untouched.    |
-//| 1.005 - Trade count barely moved (21->22) because the test window |
-//|         was one persistent uptrend the whole time: only ONE       |
-//|         pattern type is ever live at once (regime picks either    |
-//|         continuation OR mean-reversion), so 1.004's band/window   |
-//|         loosening had nothing to act on for most of the run. User |
-//|         asked for maximum frequency now, drawdown filter to be    |
-//|         tuned later. Restructured EvaluateEntries(): while         |
-//|         TRENDING, the Bollinger touch-and-reclaim pattern now ALSO|
-//|         fires as a trend-aligned pullback dip-buy alongside the   |
-//|         continuation pattern - not a counter-trend fade (only     |
-//|         accepted when it agrees with g_trendDirection), roughly   |
-//|         doubling the entry surface on trending days. Raised        |
-//|         InpMaxConcurrentPositions 6->10 so the higher signal rate |
-//|         isn't immediately capped out.                             |
-//| 1.006 - 0.22->0.43 lots (roughly doubled again, as expected) but   |
-//|         still short of target. Hard ceiling worth stating         |
-//|         plainly: at the 0.01-lot floor this account/risk combo    |
-//|         produces, even one trade on every single M5 bar (288/day) |
-//|         only totals ~2.9 lots/day - literal 30-70 lots of volume  |
-//|         is not reachable through frequency alone here, only        |
-//|         through bigger positions (the aggressive sizing already   |
-//|         declined). Pushed trade COUNT as far as requested          |
-//|         ("remove confluence if needed"): both EvaluateRangeEntry() |
-//|         and EvaluateTrendEntry() dropped their multi-bar/reclaim   |
-//|         confirmation and now trigger off a single confirmed bar - |
-//|         range fades the close immediately once it's beyond the    |
-//|         band, trend enters on any bar closed on the trend side of |
-//|         EMA20. Both remain repaint-safe (closed-bar-only) but are  |
-//|         far less selective and will whipsaw more; deliberate      |
-//|         trade of quality for frequency per the user's request,    |
-//|         with a drawdown/quality filter to be layered back on      |
-//|         later. Raised InpMaxConcurrentPositions 10->20 so this     |
-//|         much higher signal rate has room to convert into trades.  |
-//| 1.007 - User attached the old EzyMap "EVERY_ZERO_CONF_LEVEL_NO_    |
-//|         ENTRY_GOVERNORS" build and asked V1 to learn from its      |
-//|         trigger approach: track multi-timeframe swing highs/lows   |
-//|         and fire an immediate fade on ANY tick touch, no reclaim   |
-//|         or confluence at all. Added as a new, independent entry    |
-//|         source (tag "V1L"): 8 static levels (H1/H4/D1/W1 swing     |
-//|         high=resistance + swing low=support), rebuilt only on      |
-//|         each level's own timeframe bar close, checked every tick   |
-//|         using the same previous-vs-current-tick envelope-crossing  |
-//|         check this session already proved catches fast moves a     |
-//|         single-tick snapshot misses. Edge-triggered (fires once     |
-//|         per zone entry, not repeatedly while sitting inside it)     |
-//|         plus a TimeCurrent()-based re-entry cooldown per level.     |
-//|         Routes through the existing TryOpenPosition() pipeline, so  |
-//|         it inherits the same ATR-based SL, 0.25%-risk sizing with   |
-//|         minimum-lot fallback, spread guard, and concurrency cap     |
-//|         unchanged. Generalized ManageTrendTrailing() to trail any   |
-//|         tag that isn't "V1R" (previously hardcoded to "V1T" only)   |
-//|         so "V1L" positions get managed too.                        |
-//| 1.008 - Journal from the V1.007 run showed attempts=284 (the level- |
-//|         touch source is clearly working) but only accepted=32,     |
-//|         with open=4/4 pinned the entire time - the Strategy Tester |
-//|         Inputs tab caches the user's last-used value per EA and    |
-//|         doesn't pick up a new compiled default, so the actual cap  |
-//|         was still 4 despite the code default being raised to 20    |
-//|         twice already. That single stale field, not signal supply, |
-//|         is almost certainly why only 32/284 converted. Raised the  |
-//|         default further, 20->50, and flagged to the user that they |
-//|         must set InpMaxConcurrentPositions explicitly in the       |
-//|         tester's Inputs tab - a new code default alone won't apply |
-//|         to an existing saved run. Target: minimum 100 trades/day.  |
+//| EzyEA V1 (REBUILT) - per explicit instruction, the original ADX-  |
+//| regime + Bollinger mean-reversion + EMA pullback-continuation      |
+//| design is fully replaced with a single new trigger concept:        |
+//| EMA13 / EMA47 / Pivot Point CONFLUENCE. When all three references  |
+//| cluster within a small tolerance of each other on M5 and price      |
+//| touches that cluster, the touch is FADED (mean-reversion), the      |
+//| same "touch a reference, trade the reversion" philosophy already    |
+//| proven this session for SND levels and single-EMA touches - just    |
+//| applied to a 3-way confluence zone instead of one reference.        |
 //|                                                                     |
-//|         Also fixed a real bug surfaced by the same log: repeated   |
-//|         [invalid stops] on trailing modifies (sl jumping from      |
-//|         4128.10 to 4267.46 and failing every time). ManageTrend-    |
-//|         Trailing() only checked the candidate stop was far enough  |
-//|         from current price, never that it was on the correct SIDE  |
-//|         of it - after a pullback from a new peak, a peak-based     |
-//|         candidate can land above current price on a buy (or below  |
-//|         it on a sell) and get rejected every attempt until a fresh |
-//|         peak forms. Added an explicit side check before the        |
-//|         distance gate.                                             |
+//| This overwrites the original EzyEA V1 by explicit user confirmation |
+//| (they were live-testing the old version on a 200 USC account and    |
+//| were told clearly this would replace it before confirming).         |
+//|                                                                     |
+//| Everything else is the same proven infrastructure from this          |
+//| session: risk-based lot sizing via OrderCalcProfit() with a          |
+//| portfolio-aware margin check, ATR-based SL/trail-only exit with       |
+//| the activation-floor rule and the trailing side-validation fix,       |
+//| a hard max-holding-time exit, an overall peak-equity drawdown          |
+//| breaker, TimeCurrent()-based modify backoff, the zero-stops-level      |
+//| broker fallback, an auto-calibrating spread guard, and cent-account-   |
+//| aware equity handling. The minimum-lot fallback defaults OFF, per       |
+//| the lesson confirmed live on V4: it can make a risk% input dishonest    |
+//| by silently trading at an inflated effective risk once the real          |
+//| calculated size rounds below the broker minimum.                          |
+//|                                                                             |
+//| CHANGELOG                                                                   |
+//| 1.000 (rebuild) - Initial build of the confluence-fade design.              |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.008"
+#property version   "1.000"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -161,12 +39,6 @@
 //======================================================================
 // Enums
 //======================================================================
-enum ENUM_EZY_REGIME
-{
-   REGIME_RANGING  = 0,
-   REGIME_TRENDING = 1
-};
-
 enum ENUM_EZY_ACCOUNT_SCALE
 {
    EZY_ACCOUNT_AUTO     = 0,
@@ -177,91 +49,82 @@ enum ENUM_EZY_ACCOUNT_SCALE
 //======================================================================
 // Inputs
 //======================================================================
-input group "=== Regime Detection (H1 ADX) ==="
-input int    InpAdxPeriod                   = 14;
-input double InpAdxTrendThreshold           = 20.0;
+input group "=== EMA13/EMA47/Pivot Confluence Entries: M5, fade the touch ==="
+// "Overlap" = the spread between the highest and lowest of the three
+// references is within InpConfluenceClusterTolerancePoints - i.e. all
+// three are clustered close together. A touch of that cluster (price
+// entering within InpConfluenceTouchTolerancePoints of it) is then
+// FADED: touch from above -> expect a bounce back up -> BUY; touch from
+// below -> expect a rejection back down -> SELL. Same envelope-crossing
+// touch detection (previous-vs-current-tick) proven this session, so a
+// fast move through the zone is never missed. Pivot is the classic
+// daily formula (prevDayHigh+prevDayLow+prevDayClose)/3, recalculated
+// only on a new D1 bar close, never intra-bar.
+input bool   InpEnableConfluenceEntries      = true;
+input int    InpEmaFastPeriod                = 13;
+input int    InpEmaSlowPeriod                = 47;
+input double InpConfluenceClusterTolerancePoints = 50.0;
+input double InpConfluenceTouchTolerancePoints   = 30.0;
+input int    InpConfluenceReentrySeconds     = 60;
 
-input group "=== Range Entries: M5 Bollinger Mean-Reversion ==="
-input int    InpBandsPeriod                 = 20;
-input double InpBandsDeviation              = 1.5;
-
-input group "=== Trend Entries: M5 EMA20 Pullback Continuation ==="
-input int    InpEmaPeriod                   = 20;
-
-input group "=== Level-Touch Entries: multi-timeframe S/R, raw touch, no confluence ==="
-// Learned from the old EzyMap "EVERY_ZERO_CONF_LEVEL_NO_ENTRY_GOVERNORS"
-// build per explicit user request: track a handful of swing high/low
-// levels across H1/H4/D1/W1 and fire an immediate fade on ANY tick that
-// touches one, with no reclaim/confirmation requirement at all - the
-// highest-frequency trigger source in this file by design. Levels rebuild
-// only on that timeframe's own new bar close (never intra-bar), matching
-// this session's standing rule for level-based EAs. Touch detection still
-// uses the previous-vs-current-tick envelope crossing check proven this
-// session, so a fast tick move through a level is never missed.
-input bool   InpEnableLevelTouchEntries     = true;
-input double InpLevelTouchTolerancePoints   = 30.0;
-input int    InpLevelReentrySeconds         = 60;
-input int    InpLevelLookbackH1             = 24;
-input int    InpLevelLookbackH4             = 30;
-input int    InpLevelLookbackD1             = 20;
-input int    InpLevelLookbackW1             = 12;
-
-input group "=== Stops (ATR-based, both regimes) ==="
-input int    InpAtrPeriod                   = 14;
-input double InpAtrSlMultiplier             = 1.5;
-
-input group "=== Risk / Sizing ==="
-input double InpRiskPercentPerTrade         = 0.25;
-input int    InpMaxConcurrentPositions      = 50;
-input double InpMaxLotsAbsolute             = 5.0;
-// On a small account, the broker's minimum lot can itself risk more than
-// InpRiskPercentPerTrade at a wide ATR-based SL (confirmed live: XAUUSD's
-// 100oz contract makes even 0.01 lot risk ~$8.75 on an $8.75 SL, well over
-// 0.25% of a $1000 account, which rounds risk-based sizing down to 0 lots
-// and silently rejects the trade). When that happens, fall back to the
-// broker minimum lot instead of skipping the trade - but only if that
-// minimum lot's real risk still stays under this explicit ceiling.
-input bool   InpAllowMinimumLotFallback       = true;
-input double InpMinimumLotFallbackMaxRiskPct  = 1.0;
-input double InpMaxMarginUsePct             = 40.0;
+input group "=== Stops / Trail (ATR-based, M5) ==="
+input int    InpAtrPeriod                    = 14;
+input double InpAtrSlMultiplier              = 1.5;
+input double InpTrailMinStepPoints           = 20.0;
 
 input group "=== Exit Management ==="
-input double InpRangeTpMinStepPoints        = 20.0;
-input double InpTrendTrailMinStepPoints     = 20.0;
+input int    InpMaxHoldingMinutes            = 60;
+
+input group "=== Risk / Sizing ==="
+input double InpRiskPercentPerTrade          = 0.25;
+input int    InpMaxConcurrentPositions       = 10;
+input double InpMaxLotsAbsolute              = 5.0;
+input double InpMaxMarginUsePct              = 40.0;
+// Confirmed live on V4: leaving this on let a risk% input become
+// dishonest once the real calculated lot rounded below the broker
+// minimum - both a 1% and a 0.25% target quietly landed on the same
+// floor size. Off by default here from day one instead of waiting to
+// find the same bug again.
+input bool   InpAllowMinimumLotFallback      = false;
+input double InpMinimumLotFallbackMaxRiskPct = 1.0;
+
+input group "=== Overall Drawdown Circuit Breaker (peak since attach) ==="
+input bool   InpEnableDrawdownBreaker        = true;
+input double InpMaxEquityDrawdownPct         = 10.0;
+input double InpDrawdownResumeFactor         = 0.5;
 
 input group "=== Modify Backoff (TimeCurrent()-based, never GetTickCount64) ==="
-input int    InpModifyBackoffBaseSeconds    = 5;
-input int    InpModifyBackoffMaxSeconds     = 300;
-input int    InpModifyMaxConsecutiveFail    = 6;
+input int    InpModifyBackoffBaseSeconds     = 5;
+input int    InpModifyBackoffMaxSeconds      = 300;
+input int    InpModifyMaxConsecutiveFail     = 6;
 
 input group "=== Broker Minimum Distance ==="
-input int    InpExecutionStopCushionPoints  = 10;
-input double InpZeroStopsLevelFallbackPct   = 0.05;
+input int    InpExecutionStopCushionPoints   = 10;
+input double InpZeroStopsLevelFallbackPct    = 0.05;
 
 input group "=== Spread Guard (auto-calibrating) ==="
-input bool   InpAutoCalibrateSpreadCap      = true;
-input int    InpSpreadCalibrationTicks      = 200;
-input double InpSpreadCalibrationMultiplier = 2.5;
-input int    InpMaxSpreadPoints             = 350;
+input bool   InpAutoCalibrateSpreadCap       = true;
+input int    InpSpreadCalibrationTicks       = 200;
+input double InpSpreadCalibrationMultiplier  = 2.5;
+input int    InpMaxSpreadPoints              = 350;
 
 input group "=== Cent-Account Handling ==="
 input ENUM_EZY_ACCOUNT_SCALE InpAccountScaleMode = EZY_ACCOUNT_AUTO;
-input double InpCentAccountUnitDivisor      = 100.0;
-input bool   InpTesterAutoModeIsStandard    = true;
-input bool   InpTreatSCSuffixAsCentOnLive   = true;
+input double InpCentAccountUnitDivisor       = 100.0;
+input bool   InpTesterAutoModeIsStandard     = true;
+input bool   InpTreatSCSuffixAsCentOnLive    = true;
 
 input group "=== Execution ==="
-input ulong  InpMagicNumber                 = 190001;
-input int    InpDeviationPoints             = 30;
+input ulong  InpMagicNumber                  = 190001;
+input int    InpDeviationPoints              = 30;
 
 input group "=== Reporting ==="
-input int    InpStatusLogIntervalSeconds    = 60;
+input int    InpStatusLogIntervalSeconds     = 60;
 
 input group "=== Chart Drawing ==="
-input bool   InpDrawBands                   = true;
-input bool   InpDrawEma                     = true;
-input bool   InpDrawStatusLabel             = true;
-input int    InpDrawBarsBack                = 60;
+input bool   InpDrawReferences                = true;
+input bool   InpDrawStatusLabel               = true;
+input int    InpDrawBarsBack                  = 60;
 
 //======================================================================
 // Types
@@ -274,30 +137,17 @@ struct ManagedPositionState
    double   peakPrice;
 };
 
-struct LevelTouchState
-{
-   double   price;
-   int      fadeDirection;   // 1 = support, fade BUY; -1 = resistance, fade SELL
-   bool     inZone;
-   datetime cooldownUntil;
-};
-
 //======================================================================
 // Globals
 //======================================================================
 CTrade trade;
 
-int g_handleAdxH1   = INVALID_HANDLE;
-int g_handleBandsM5 = INVALID_HANDLE;
-int g_handleEmaM5   = INVALID_HANDLE;
-int g_handleAtrM5   = INVALID_HANDLE;
+int g_handleAtrM5     = INVALID_HANDLE;
+int g_handleEmaFastM5 = INVALID_HANDLE;
+int g_handleEmaSlowM5 = INVALID_HANDLE;
 
-datetime g_lastH1BarTime = 0;
-datetime g_lastM5BarTime = 0;
-
-ENUM_EZY_REGIME g_regime         = REGIME_RANGING;
-int             g_trendDirection = 0;   // 1 up, -1 down, 0 undetermined
-double          g_lastAdxValue   = 0.0;
+datetime g_lastPivotD1BarTime = 0;
+double   g_pivotValue         = 0.0;
 
 double g_accountUnitDivisor = 1.0;
 
@@ -316,18 +166,16 @@ int g_gateSpreadRejects      = 0;
 int g_gateConcurrencyRejects = 0;
 int g_gateDistanceRejects    = 0;
 int g_gateSizingRejects      = 0;
+int g_gateDrawdownRejects    = 0;
 
-// 4 timeframes (H1/H4/D1/W1) x 2 levels (swing high=resistance, swing
-// low=support) each.
-LevelTouchState g_levels[8];
-
-datetime g_lastH1LevelBarTime = 0;
-datetime g_lastH4LevelBarTime = 0;
-datetime g_lastD1LevelBarTime = 0;
-datetime g_lastW1LevelBarTime = 0;
+bool     g_confluenceInZone        = false;
+datetime g_confluenceCooldownUntil = 0;
 
 bool   g_hasPreviousCMP = false;
 double g_previousCMP    = 0.0;
+
+double g_peakEquity    = 0.0;
+bool   g_tradingHalted = false;
 
 //======================================================================
 // Forward declarations
@@ -363,32 +211,28 @@ bool   SpreadAllowed();
 int    CountOpenPositions();
 
 int    CopyBufferSeries(int handle,int bufferIndex,int count,double &out[]);
-void   UpdateRegimeOnNewH1Bar();
-bool   UpdateOnNewM5Bar();
-bool   EvaluateRangeEntry(int &direction);
-bool   EvaluateTrendEntry(int &direction);
-void   OpenRangeSignal(int direction,double slDistance);
-void   EvaluateEntries();
-void   TryOpenPosition(int direction,string tag,double slDistance,double initialTp);
+
+void   CloseAllPositions(string reason);
+void   UpdateDrawdownBreaker();
+
+void   TryOpenPosition(int direction,string tag,double slDistance);
 
 int    EnsureManagedSlot(ulong ticket);
 void   PruneManagedSlots();
 void   ModifyPositionSafely(ulong ticket,double sl,double tp);
-void   UpdateRangeTakeProfits();
-void   ManageTrendTrailing();
+void   ManageTrailing();
+void   EnforceMaxHoldingTime();
 
-void   RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback);
-void   UpdateLevelsOnNewBars();
-void   TryLevelEntry(int direction,double levelPrice);
-void   ProcessLevelTouches();
+void   RecalculatePivotOnNewD1Bar();
+void   TryConfluenceEntry(int direction);
+void   CheckConfluenceTouch(double observedLo,double observedHi);
+void   ProcessConfluenceTrigger();
 
-void   DrawSeriesLine(string prefix,double &values[],color clr);
+void   DrawReferences();
 void   DrawStatusLabel();
-void   DrawChart();
 void   RemoveAllDrawings();
 
 void   WriteFinalReport();
-
 void   PeriodicStatusLog();
 
 //======================================================================
@@ -405,17 +249,17 @@ int OnInit()
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpDeviationPoints);
 
-   g_handleAdxH1   = iADX(_Symbol,PERIOD_H1,InpAdxPeriod);
-   g_handleBandsM5 = iBands(_Symbol,PERIOD_M5,InpBandsPeriod,0,InpBandsDeviation,PRICE_CLOSE);
-   g_handleEmaM5   = iMA(_Symbol,PERIOD_M5,InpEmaPeriod,0,MODE_EMA,PRICE_CLOSE);
-   g_handleAtrM5   = iATR(_Symbol,PERIOD_M5,InpAtrPeriod);
-
-   if(g_handleAdxH1==INVALID_HANDLE || g_handleBandsM5==INVALID_HANDLE ||
-      g_handleEmaM5==INVALID_HANDLE || g_handleAtrM5==INVALID_HANDLE)
+   g_handleAtrM5     = iATR(_Symbol,PERIOD_M5,InpAtrPeriod);
+   g_handleEmaFastM5 = iMA(_Symbol,PERIOD_M5,InpEmaFastPeriod,0,MODE_EMA,PRICE_CLOSE);
+   g_handleEmaSlowM5 = iMA(_Symbol,PERIOD_M5,InpEmaSlowPeriod,0,MODE_EMA,PRICE_CLOSE);
+   if(g_handleAtrM5==INVALID_HANDLE || g_handleEmaFastM5==INVALID_HANDLE || g_handleEmaSlowM5==INVALID_HANDLE)
    {
       Log("Indicator handle creation failed.");
       return INIT_FAILED;
    }
+
+   g_lastPivotD1BarTime=0;
+   g_pivotValue=0.0;
 
    g_accountUnitDivisor = ResolveAccountUnitDivisor();
 
@@ -424,30 +268,25 @@ int OnInit()
    g_spreadCalCount        = 0;
    g_spreadCalEffectiveCap = -1.0;
 
-   g_lastH1BarTime    = 0;
-   g_lastM5BarTime    = 0;
-   g_lastStatusLogTime= 0;
+   g_lastStatusLogTime = 0;
 
    ArrayResize(g_managed,0);
 
-   for(int i=0;i<ArraySize(g_levels);i++)
-   {
-      g_levels[i].price=0.0;
-      g_levels[i].fadeDirection=0;
-      g_levels[i].inZone=false;
-      g_levels[i].cooldownUntil=0;
-   }
-   g_lastH1LevelBarTime=0;
-   g_lastH4LevelBarTime=0;
-   g_lastD1LevelBarTime=0;
-   g_lastW1LevelBarTime=0;
+   g_confluenceInZone=false;
+   g_confluenceCooldownUntil=0;
+
    g_hasPreviousCMP=false;
    g_previousCMP=0.0;
 
-   Log("EzyEA V1 initialized on "+_Symbol+
+   g_peakEquity=AccountInfoDouble(ACCOUNT_EQUITY);
+   g_tradingHalted=false;
+
+   Log("EzyEA V1 (confluence rebuild) initialized on "+_Symbol+
        " | account unit divisor="+DoubleToString(g_accountUnitDivisor,2)+
        " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
-       " | max concurrent="+IntegerToString(InpMaxConcurrentPositions));
+       " | max concurrent="+IntegerToString(InpMaxConcurrentPositions)+
+       " | trigger=EMA"+IntegerToString(InpEmaFastPeriod)+"/EMA"+IntegerToString(InpEmaSlowPeriod)+"/Pivot confluence (M5)"+
+       " | drawdown breaker="+(InpEnableDrawdownBreaker?DoubleToString(InpMaxEquityDrawdownPct,1)+"%":"OFF"));
 
    return INIT_SUCCEEDED;
 }
@@ -456,34 +295,26 @@ void OnDeinit(const int reason)
 {
    WriteFinalReport();
 
-   if(g_handleAdxH1!=INVALID_HANDLE)   IndicatorRelease(g_handleAdxH1);
-   if(g_handleBandsM5!=INVALID_HANDLE) IndicatorRelease(g_handleBandsM5);
-   if(g_handleEmaM5!=INVALID_HANDLE)   IndicatorRelease(g_handleEmaM5);
-   if(g_handleAtrM5!=INVALID_HANDLE)   IndicatorRelease(g_handleAtrM5);
+   if(g_handleAtrM5!=INVALID_HANDLE)     IndicatorRelease(g_handleAtrM5);
+   if(g_handleEmaFastM5!=INVALID_HANDLE) IndicatorRelease(g_handleEmaFastM5);
+   if(g_handleEmaSlowM5!=INVALID_HANDLE) IndicatorRelease(g_handleEmaSlowM5);
 
    RemoveAllDrawings();
 }
 
 void OnTick()
 {
-   UpdateRegimeOnNewH1Bar();
+   UpdateDrawdownBreaker();
+   RecalculatePivotOnNewD1Bar();
 
-   bool newM5=UpdateOnNewM5Bar();
-   if(newM5)
+   if(InpEnableConfluenceEntries)
    {
-      PruneManagedSlots();
-      EvaluateEntries();
-      UpdateRangeTakeProfits();
-      DrawChart();
+      ProcessConfluenceTrigger();
+      DrawReferences();
    }
 
-   if(InpEnableLevelTouchEntries)
-   {
-      UpdateLevelsOnNewBars();
-      ProcessLevelTouches();
-   }
-
-   ManageTrendTrailing();
+   ManageTrailing();
+   EnforceMaxHoldingTime();
    PeriodicStatusLog();
 }
 
@@ -538,8 +369,6 @@ double ResolveAccountUnitDivisor()
    if(InpAccountScaleMode==EZY_ACCOUNT_CENT)
       return configured;
 
-   // AUTO: Strategy Tester deposits are normally entered in standard
-   // account currency even when the tested symbol carries a .sc suffix.
    if((bool)MQLInfoInteger(MQL_TESTER) && InpTesterAutoModeIsStandard)
       return 1.0;
 
@@ -609,13 +438,6 @@ double OneLotLoss(int direction,double entry,double sl)
 
 double ComputeLotsForRisk(int direction,double entry,double sl)
 {
-   // Risk budget must stay in the SAME raw account-currency units that
-   // OrderCalcProfit() (via OneLotLoss below) returns. EffectiveAccountEquity()
-   // divides by the cent-account divisor purely for human-readable status
-   // logging - dividing it here while perLotLoss stays undivided undersized
-   // every lot calculation ~100x on a real cent account and silently zeroed
-   // every entry attempt (confirmed live: 23/23 attempts, 0 trades, on a
-   // USC-denominated account).
    double equity=AccountInfoDouble(ACCOUNT_EQUITY);
    double riskBudget=equity*InpRiskPercentPerTrade/100.0;
    if(riskBudget<=0.0) return 0.0;
@@ -644,10 +466,17 @@ double ComputeLotsForRisk(int direction,double entry,double sl)
    ENUM_ORDER_TYPE type=(direction==1)?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
    if(OrderCalcMargin(type,_Symbol,lots,entry,marginRequired))
    {
-      if(equity>0.0 && marginRequired>0.0 && (marginRequired/equity)*100.0>InpMaxMarginUsePct)
+      double usedMargin=AccountInfoDouble(ACCOUNT_MARGIN);
+      double projectedMarginPct=(equity>0.0)
+                                ?((usedMargin+marginRequired)/equity)*100.0
+                                :DBL_MAX;
+
+      if(projectedMarginPct>InpMaxMarginUsePct)
       {
-         double scale=(InpMaxMarginUsePct/100.0*equity)/marginRequired;
-         lots=NormalizeVolumeDown(lots*scale);
+         double remainingBudget=MathMax(0.0,InpMaxMarginUsePct/100.0*equity-usedMargin);
+         lots=(remainingBudget<=0.0 || marginRequired<=0.0)
+              ?0.0
+              :NormalizeVolumeDown(lots*(remainingBudget/marginRequired));
       }
 
       double freeMargin=AccountInfoDouble(ACCOUNT_MARGIN_FREE);
@@ -659,8 +488,7 @@ double ComputeLotsForRisk(int direction,double entry,double sl)
 }
 
 //======================================================================
-// Retcode classification (includes TRADE_RETCODE_MARKET_CLOSED, missing
-// from every prior EA in this codebase until this session's fixes)
+// Retcode classification (includes TRADE_RETCODE_MARKET_CLOSED)
 //======================================================================
 bool TradeRetcodeAccepted(uint code)
 {
@@ -792,10 +620,8 @@ int CountOpenPositions()
 }
 
 //======================================================================
-// Indicator buffer helper. Buffers are read as-series so out[shift]
-// matches the shift language used throughout the regime/entry logic
-// below (shift 0 = forming bar, never used for a signal; shift 1 =
-// last closed bar; shift 2 = the bar before it).
+// Indicator buffer helper (as-series: out[0]=forming/live bar, out[1]=
+// last closed bar, out[2]=the bar before it)
 //======================================================================
 int CopyBufferSeries(int handle,int bufferIndex,int count,double &out[])
 {
@@ -806,142 +632,79 @@ int CopyBufferSeries(int handle,int bufferIndex,int count,double &out[])
 }
 
 //======================================================================
-// Regime read (H1, once per new bar close)
+// Emergency stop: closes every position this EA opened. Used by the
+// overall drawdown breaker.
 //======================================================================
-void UpdateRegimeOnNewH1Bar()
+void CloseAllPositions(string reason)
 {
-   datetime t=iTime(_Symbol,PERIOD_H1,0);
-   if(t==0 || t==g_lastH1BarTime) return;
-   g_lastH1BarTime=t;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
 
-   double adxBuf[],plusBuf[],minusBuf[];
-   if(CopyBufferSeries(g_handleAdxH1,0,3,adxBuf)<3)   return;
-   if(CopyBufferSeries(g_handleAdxH1,1,3,plusBuf)<3)  return;
-   if(CopyBufferSeries(g_handleAdxH1,2,3,minusBuf)<3) return;
-
-   double adx    =adxBuf[1];
-   double plusDI =plusBuf[1];
-   double minusDI=minusBuf[1];
-
-   g_lastAdxValue=adx;
-   g_regime=(adx>=InpAdxTrendThreshold)?REGIME_TRENDING:REGIME_RANGING;
-   g_trendDirection=(plusDI>minusDI)?1:((minusDI>plusDI)?-1:0);
+      bool ok=trade.PositionClose(ticket);
+      uint retcode=trade.ResultRetcode();
+      if(!ok || !TradeRetcodeAccepted(retcode))
+         Log("EMERGENCY CLOSE FAILED ticket="+IntegerToString((int)ticket)+
+             " retcode="+IntegerToString(retcode)+" reason="+reason);
+   }
 }
 
 //======================================================================
-// Entry evaluation (M5, once per new bar close)
+// Overall drawdown circuit breaker: peak equity seen since attach.
+// Closes everything and halts new entries the moment it trips; resumes
+// with hysteresis.
 //======================================================================
-bool UpdateOnNewM5Bar()
+void UpdateDrawdownBreaker()
 {
-   datetime t=iTime(_Symbol,PERIOD_M5,0);
-   if(t==0 || t==g_lastM5BarTime) return false;
-   g_lastM5BarTime=t;
-   return true;
-}
-
-bool EvaluateRangeEntry(int &direction)
-{
-   double upperBuf[],lowerBuf[];
-   if(CopyBufferSeries(g_handleBandsM5,1,2,upperBuf)<2) return false;
-   if(CopyBufferSeries(g_handleBandsM5,2,2,lowerBuf)<2) return false;
-
-   double close1=iClose(_Symbol,PERIOD_M5,1);
-
-   // Simplified per explicit "maximum frequency, remove confluence" request:
-   // fades the confirmed close beyond the band immediately - no longer
-   // waiting for a second bar's reclaim back inside. Still only reads the
-   // last CLOSED bar (never the forming one), so it stays repaint-safe;
-   // it is simply far less selective now, and will whipsaw more.
-   if(close1>upperBuf[1])
+   if(!InpEnableDrawdownBreaker)
    {
-      direction=-1;
-      return true;
+      g_tradingHalted=false;
+      return;
    }
 
-   if(close1<lowerBuf[1])
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   if(equity<=0.0) return;
+
+   g_peakEquity=MathMax(g_peakEquity,equity);
+   if(g_peakEquity<=0.0) return;
+
+   double drawdownPct=(g_peakEquity-equity)/g_peakEquity*100.0;
+   double resumeThreshold=InpMaxEquityDrawdownPct*MathMax(0.0,MathMin(1.0,InpDrawdownResumeFactor));
+
+   if(!g_tradingHalted && drawdownPct>=InpMaxEquityDrawdownPct)
    {
-      direction=1;
-      return true;
+      g_tradingHalted=true;
+      Log("DRAWDOWN BREAKER TRIPPED - closing all positions and halting new entries"+
+          " | drawdown="+DoubleToString(drawdownPct,2)+"%"+
+          " | peakEquity="+DoubleToString(g_peakEquity,2)+
+          " | equity="+DoubleToString(equity,2));
+      CloseAllPositions("drawdown breaker");
    }
-
-   return false;
-}
-
-bool EvaluateTrendEntry(int &direction)
-{
-   if(g_trendDirection==0) return false;
-
-   double emaBuf[];
-   if(CopyBufferSeries(g_handleEmaM5,0,2,emaBuf)<2) return false;
-
-   double close1=iClose(_Symbol,PERIOD_M5,1);
-
-   // Simplified per explicit "maximum frequency, remove confluence" request:
-   // no pullback/touch requirement anymore, just "closed on the trend side
-   // of EMA20 on the last confirmed bar". Still never counter-trend and
-   // still bar-close-confirmed, but fires on most bars of a live trend
-   // instead of only at a discrete pullback event - a deliberate trade of
-   // selectivity for frequency, to be revisited with a drawdown filter.
-   if(g_trendDirection==1 && close1>emaBuf[1])
+   else if(g_tradingHalted && drawdownPct<=resumeThreshold)
    {
-      direction=1;
-      return true;
-   }
-
-   if(g_trendDirection==-1 && close1<emaBuf[1])
-   {
-      direction=-1;
-      return true;
-   }
-
-   return false;
-}
-
-void OpenRangeSignal(int direction,double slDistance)
-{
-   double baseBuf[];
-   double initialTp=0.0;
-   if(CopyBufferSeries(g_handleBandsM5,0,3,baseBuf)>=3)
-      initialTp=RoundPrice(baseBuf[1]);
-
-   TryOpenPosition(direction,"V1R",slDistance,initialTp);
-}
-
-void EvaluateEntries()
-{
-   double atrBuf[];
-   if(CopyBufferSeries(g_handleAtrM5,0,3,atrBuf)<3) return;
-
-   double slDistance=InpAtrSlMultiplier*atrBuf[1];
-   if(slDistance<=0.0) return;
-
-   if(g_regime==REGIME_TRENDING)
-   {
-      int trendDir=0;
-      if(EvaluateTrendEntry(trendDir))
-         TryOpenPosition(trendDir,"V1T",slDistance,0.0);
-
-      // A pullback dip bought WITH the trend is not a counter-trend fade,
-      // so the same Bollinger touch-and-reclaim pattern is also live here -
-      // but only when it agrees with the prevailing trend direction, never
-      // against it. This is the single biggest frequency lever: on a
-      // strongly trending day only the continuation pattern was ever live,
-      // and it alone only qualifies on a small fraction of bars.
-      int rangeDir=0;
-      if(EvaluateRangeEntry(rangeDir) && rangeDir==g_trendDirection)
-         OpenRangeSignal(rangeDir,slDistance);
-   }
-   else
-   {
-      int rangeDir=0;
-      if(EvaluateRangeEntry(rangeDir))
-         OpenRangeSignal(rangeDir,slDistance);
+      g_tradingHalted=false;
+      Log("DRAWDOWN BREAKER RESET - new entries resumed"+
+          " | drawdown="+DoubleToString(drawdownPct,2)+"%"+
+          " | resumeThreshold="+DoubleToString(resumeThreshold,2)+"%");
    }
 }
 
-void TryOpenPosition(int direction,string tag,double slDistance,double initialTp)
+//======================================================================
+// Entry execution
+//======================================================================
+void TryOpenPosition(int direction,string tag,double slDistance)
 {
    g_gateAttempts++;
+
+   if(g_tradingHalted)
+   {
+      g_gateDrawdownRejects++;
+      return;
+   }
 
    if(CountOpenPositions()>=InpMaxConcurrentPositions)
    {
@@ -971,12 +734,6 @@ void TryOpenPosition(int direction,string tag,double slDistance,double initialTp
       return;
    }
 
-   // Defer TP attachment rather than widening it - it will be added by
-   // UpdateRangeTakeProfits() on the next M5 bar once it clears distance.
-   double tp=initialTp;
-   if(tp>0.0 && MathAbs(entry-tp)<minDist)
-      tp=0.0;
-
    double lots=ComputeLotsForRisk(direction,entry,sl);
    if(lots<=0.0)
    {
@@ -989,8 +746,8 @@ void TryOpenPosition(int direction,string tag,double slDistance,double initialTp
    }
 
    bool sent=(direction==1)
-             ? trade.Buy(lots,_Symbol,0.0,sl,tp,tag)
-             : trade.Sell(lots,_Symbol,0.0,sl,tp,tag);
+             ? trade.Buy(lots,_Symbol,0.0,sl,0.0,tag)
+             : trade.Sell(lots,_Symbol,0.0,sl,0.0,tag);
 
    uint retcode=trade.ResultRetcode();
 
@@ -1000,8 +757,7 @@ void TryOpenPosition(int direction,string tag,double slDistance,double initialTp
       Log("ENTRY "+tag+" dir="+IntegerToString(direction)+
           " lots="+DoubleToString(lots,2)+
           " entry="+PriceText(entry)+
-          " sl="+PriceText(sl)+
-          " tp="+(tp>0.0?PriceText(tp):"none"));
+          " sl="+PriceText(sl));
    }
    else
    {
@@ -1012,75 +768,26 @@ void TryOpenPosition(int direction,string tag,double slDistance,double initialTp
 }
 
 //======================================================================
-// Level-touch entries: multi-timeframe swing-high/low levels, raw tick
-// touch, no reclaim/confirmation - learned from the old EzyMap "every
-// zero-confluence level, no entry governors" build per explicit request.
-// Levels only rebuild on their OWN timeframe's new bar close, never
-// intra-bar. Touch detection uses the same previous-vs-current-tick
-// envelope crossing this session settled on, so a fast tick move through
-// a level is never missed.
+// EMA13/EMA47/Pivot confluence entries. Pivot only rebuilds on its own
+// D1 bar close, never intra-bar. EMA values are read LIVE (shift=0) -
+// an EMA is a smoothed lagging price, not a bar pattern, so reading it
+// live carries no repaint risk.
 //======================================================================
-void RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback)
+void RecalculatePivotOnNewD1Bar()
 {
-   double hi=-DBL_MAX, lo=DBL_MAX;
-
-   for(int shift=1;shift<=lookback;shift++)
-   {
-      double h=iHigh(_Symbol,tf,shift);
-      double l=iLow(_Symbol,tf,shift);
-      if(h<=0.0 || l<=0.0) continue;
-      hi=MathMax(hi,h);
-      lo=MathMin(lo,l);
-   }
-
-   if(hi<=-DBL_MAX || lo>=DBL_MAX) return;
-
-   int resIdx=slotIndex*2;
-   int supIdx=slotIndex*2+1;
-
-   g_levels[resIdx].price=RoundPrice(hi);
-   g_levels[resIdx].fadeDirection=-1;
-   g_levels[resIdx].inZone=false;
-   g_levels[resIdx].cooldownUntil=0;
-
-   g_levels[supIdx].price=RoundPrice(lo);
-   g_levels[supIdx].fadeDirection=1;
-   g_levels[supIdx].inZone=false;
-   g_levels[supIdx].cooldownUntil=0;
-}
-
-void UpdateLevelsOnNewBars()
-{
-   datetime h1=iTime(_Symbol,PERIOD_H1,0);
-   if(h1!=0 && h1!=g_lastH1LevelBarTime)
-   {
-      g_lastH1LevelBarTime=h1;
-      RebuildLevelForTimeframe(0,PERIOD_H1,InpLevelLookbackH1);
-   }
-
-   datetime h4=iTime(_Symbol,PERIOD_H4,0);
-   if(h4!=0 && h4!=g_lastH4LevelBarTime)
-   {
-      g_lastH4LevelBarTime=h4;
-      RebuildLevelForTimeframe(1,PERIOD_H4,InpLevelLookbackH4);
-   }
-
    datetime d1=iTime(_Symbol,PERIOD_D1,0);
-   if(d1!=0 && d1!=g_lastD1LevelBarTime)
-   {
-      g_lastD1LevelBarTime=d1;
-      RebuildLevelForTimeframe(2,PERIOD_D1,InpLevelLookbackD1);
-   }
+   if(d1==0 || d1==g_lastPivotD1BarTime) return;
+   g_lastPivotD1BarTime=d1;
 
-   datetime w1=iTime(_Symbol,PERIOD_W1,0);
-   if(w1!=0 && w1!=g_lastW1LevelBarTime)
-   {
-      g_lastW1LevelBarTime=w1;
-      RebuildLevelForTimeframe(3,PERIOD_W1,InpLevelLookbackW1);
-   }
+   double prevHigh =iHigh(_Symbol,PERIOD_D1,1);
+   double prevLow  =iLow(_Symbol,PERIOD_D1,1);
+   double prevClose=iClose(_Symbol,PERIOD_D1,1);
+   if(prevHigh<=0.0 || prevLow<=0.0 || prevClose<=0.0) return;
+
+   g_pivotValue=RoundPrice((prevHigh+prevLow+prevClose)/3.0);
 }
 
-void TryLevelEntry(int direction,double levelPrice)
+void TryConfluenceEntry(int direction)
 {
    double atrBuf[];
    if(CopyBufferSeries(g_handleAtrM5,0,3,atrBuf)<3) return;
@@ -1088,10 +795,54 @@ void TryLevelEntry(int direction,double levelPrice)
    double slDistance=InpAtrSlMultiplier*atrBuf[1];
    if(slDistance<=0.0) return;
 
-   TryOpenPosition(direction,"V1L",slDistance,0.0);
+   TryOpenPosition(direction,"V1CONF",slDistance);
 }
 
-void ProcessLevelTouches()
+void CheckConfluenceTouch(double observedLo,double observedHi)
+{
+   g_confluenceInZone=false;
+
+   if(!InpEnableConfluenceEntries) return;
+   if(g_pivotValue<=0.0) return;
+
+   double emaFastBuf[],emaSlowBuf[];
+   if(CopyBufferSeries(g_handleEmaFastM5,0,1,emaFastBuf)<1) return;
+   if(CopyBufferSeries(g_handleEmaSlowM5,0,1,emaSlowBuf)<1) return;
+
+   double emaFast=emaFastBuf[0];
+   double emaSlow=emaSlowBuf[0];
+   if(emaFast<=0.0 || emaSlow<=0.0) return;
+
+   double clusterHi=MathMax(emaFast,MathMax(emaSlow,g_pivotValue));
+   double clusterLo=MathMin(emaFast,MathMin(emaSlow,g_pivotValue));
+
+   // All three references must be clustered together first - the actual
+   // "confluence" condition - before a touch of that cluster means
+   // anything.
+   double clusterTolerance=InpConfluenceClusterTolerancePoints*_Point;
+   if((clusterHi-clusterLo)>clusterTolerance) return;
+
+   double touchTolerance=InpConfluenceTouchTolerancePoints*_Point;
+   double zoneLo=clusterLo-touchTolerance;
+   double zoneHi=clusterHi+touchTolerance;
+
+   bool touching=(observedHi>=zoneLo && observedLo<=zoneHi);
+   g_confluenceInZone=touching;
+
+   if(!touching) return;
+   if(TimeCurrent()<g_confluenceCooldownUntil) return;
+   if(!g_hasPreviousCMP) return;
+
+   int direction=0;
+   if(g_previousCMP>clusterHi)      direction=1;  // was clearly above -> expect bounce up -> BUY
+   else if(g_previousCMP<clusterLo) direction=-1; // was clearly below -> expect rejection down -> SELL
+   if(direction==0) return; // was already inside the cluster - no clear approach side
+
+   TryConfluenceEntry(direction);
+   g_confluenceCooldownUntil=TimeCurrent()+MathMax(0,InpConfluenceReentrySeconds);
+}
+
+void ProcessConfluenceTrigger()
 {
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol,tick)) return;
@@ -1116,38 +867,14 @@ void ProcessLevelTouches()
       observedHi=MathMax(observedHi,g_previousCMP);
    }
 
-   double tolerance=InpLevelTouchTolerancePoints*_Point;
-
-   for(int i=0;i<ArraySize(g_levels);i++)
-   {
-      if(g_levels[i].price<=0.0) continue;
-
-      bool touching=(observedHi>=g_levels[i].price-tolerance &&
-                     observedLo<=g_levels[i].price+tolerance);
-
-      if(!touching)
-      {
-         g_levels[i].inZone=false;
-         continue;
-      }
-
-      // Edge-triggered: only fires on the tick that FIRST enters the zone,
-      // never repeatedly while price sits inside it.
-      if(g_levels[i].inZone) continue;
-      g_levels[i].inZone=true;
-
-      if(TimeCurrent()<g_levels[i].cooldownUntil) continue;
-
-      TryLevelEntry(g_levels[i].fadeDirection,g_levels[i].price);
-      g_levels[i].cooldownUntil=TimeCurrent()+MathMax(0,InpLevelReentrySeconds);
-   }
+   CheckConfluenceTouch(observedLo,observedHi);
 
    g_previousCMP=cmp;
    g_hasPreviousCMP=true;
 }
 
 //======================================================================
-// Per-position management state (backoff + trend peak tracking)
+// Per-position management state (backoff + peak tracking)
 //======================================================================
 int EnsureManagedSlot(ulong ticket)
 {
@@ -1211,13 +938,13 @@ void ModifyPositionSafely(ulong ticket,double sl,double tp)
 }
 
 //======================================================================
-// RANGING exit: TP tracks the live (last closed bar) middle band
+// Exit 1: trail-only, no TP. Activates once favourable excursion has run
+// the full SL distance. Every candidate stop must land on the CORRECT
+// SIDE of current price, not just far enough from it.
 //======================================================================
-void UpdateRangeTakeProfits()
+void ManageTrailing()
 {
-   double baseBuf[];
-   if(CopyBufferSeries(g_handleBandsM5,0,3,baseBuf)<3) return;
-   double middle=RoundPrice(baseBuf[1]);
+   PruneManagedSlots();
 
    for(int i=PositionsTotal()-1;i>=0;i--)
    {
@@ -1226,42 +953,6 @@ void UpdateRangeTakeProfits()
       if(!PositionSelectByTicket(ticket)) continue;
       if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
       if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
-
-      string comment=PositionGetString(POSITION_COMMENT);
-      if(StringFind(comment,"V1R")!=0) continue;
-
-      double currentTp=PositionGetDouble(POSITION_TP);
-      double minStep=InpRangeTpMinStepPoints*_Point;
-      if(currentTp>0.0 && MathAbs(middle-currentTp)<minStep) continue;
-
-      double currentPrice=PositionGetDouble(POSITION_PRICE_CURRENT);
-      double minDist=MinimumStopDistance(currentPrice);
-      if(MathAbs(middle-currentPrice)<minDist) continue;
-
-      ModifyPositionSafely(ticket,PositionGetDouble(POSITION_SL),middle);
-   }
-}
-
-//======================================================================
-// TRENDING exit: trail-only, activates once favourable excursion has
-// run the full SL distance (never sooner - the activation-floor rule
-// proven this session on the FRESH V3/V4 family).
-//======================================================================
-void ManageTrendTrailing()
-{
-   for(int i=PositionsTotal()-1;i>=0;i--)
-   {
-      ulong ticket=PositionGetTicket(i);
-      if(ticket==0) continue;
-      if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
-      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
-
-      // Trail-only management applies to anything that ISN'T a range TP-
-      // tracked trade (currently "V1T" continuation and "V1L" level-touch
-      // entries) rather than special-casing every tag individually.
-      string comment=PositionGetString(POSITION_COMMENT);
-      if(StringFind(comment,"V1R")==0) continue;
 
       int direction=((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)?1:-1;
       double openPrice   =PositionGetDouble(POSITION_PRICE_OPEN);
@@ -1292,16 +983,9 @@ void ManageTrendTrailing()
       bool improves=(direction==1)?(candidateSl>currentSl):(candidateSl<currentSl);
       if(!improves) continue;
 
-      double minStep=InpTrendTrailMinStepPoints*_Point;
+      double minStep=InpTrailMinStepPoints*_Point;
       if(MathAbs(candidateSl-currentSl)<minStep) continue;
 
-      // The peak only ever grows, so after a pullback the peak-based
-      // candidate can land on the WRONG side of the CURRENT price (above
-      // it for a buy, below it for a sell) even though it's still an
-      // "improvement" over the old stored SL - the broker then rejects it
-      // as [invalid stops] every single attempt until a fresh peak forms.
-      // Distance alone doesn't catch this (MathAbs doesn't know which
-      // side), so the side is checked explicitly before the distance gate.
       bool validSide=(direction==1)?(candidateSl<currentPrice):(candidateSl>currentPrice);
       if(!validSide) continue;
 
@@ -1313,44 +997,128 @@ void ManageTrendTrailing()
 }
 
 //======================================================================
-// Chart drawing (live bands/EMA + regime status label)
+// Exit 2: hard force-close once a position has been open
+// InpMaxHoldingMinutes, regardless of P&L.
 //======================================================================
-void DrawSeriesLine(string prefix,double &values[],color clr)
+void EnforceMaxHoldingTime()
 {
-   int n=ArraySize(values);
-   for(int shift=0;shift<n-1;shift++)
+   if(InpMaxHoldingMinutes<=0) return;
+
+   long cutoffSeconds=(long)InpMaxHoldingMinutes*60;
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
    {
-      string name=prefix+"_"+IntegerToString(shift);
-      datetime t1=iTime(_Symbol,PERIOD_M5,shift+1);
-      datetime t2=iTime(_Symbol,PERIOD_M5,shift);
-      double p1=values[shift+1];
-      double p2=values[shift];
-      if(t1==0 || t2==0) continue;
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
 
-      if(ObjectFind(0,name)<0)
-         ObjectCreate(0,name,OBJ_TREND,0,t1,p1,t2,p2);
+      datetime openTime=(datetime)PositionGetInteger(POSITION_TIME);
+      long heldSeconds=(long)(TimeCurrent()-openTime);
+      if(heldSeconds<cutoffSeconds) continue;
+
+      bool ok=trade.PositionClose(ticket);
+      uint retcode=trade.ResultRetcode();
+
+      if(ok && TradeRetcodeAccepted(retcode))
+         Log("MAX HOLDING TIME EXIT ticket="+IntegerToString((int)ticket)+
+             " heldMinutes="+DoubleToString(heldSeconds/60.0,1));
       else
-      {
-         ObjectMove(0,name,0,t1,p1);
-         ObjectMove(0,name,1,t2,p2);
-      }
-
-      ObjectSetInteger(0,name,OBJPROP_COLOR,clr);
-      ObjectSetInteger(0,name,OBJPROP_WIDTH,1);
-      ObjectSetInteger(0,name,OBJPROP_RAY,false);
-      ObjectSetInteger(0,name,OBJPROP_BACK,true);
-      ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+         Log("MAX HOLDING TIME EXIT FAILED ticket="+IntegerToString((int)ticket)+
+             " retcode="+IntegerToString(retcode)+
+             " desc="+trade.ResultRetcodeDescription());
    }
+}
+
+//======================================================================
+// Chart drawing (EMA13/EMA47/pivot references + status label)
+//======================================================================
+void DrawReferences()
+{
+   if(!InpDrawReferences) return;
+
+   int bars=MathMax(3,InpDrawBarsBack);
+
+   double emaFastBuf[];
+   int nFast=CopyBufferSeries(g_handleEmaFastM5,0,bars,emaFastBuf);
+   if(nFast>=2)
+   {
+      for(int shift=0;shift<nFast-1;shift++)
+      {
+         string name="V1_EMAFAST_"+IntegerToString(shift);
+         datetime t1=iTime(_Symbol,PERIOD_M5,shift+1);
+         datetime t2=iTime(_Symbol,PERIOD_M5,shift);
+         if(t1==0 || t2==0) continue;
+
+         if(ObjectFind(0,name)<0)
+            ObjectCreate(0,name,OBJ_TREND,0,t1,emaFastBuf[shift+1],t2,emaFastBuf[shift]);
+         else
+         {
+            ObjectMove(0,name,0,t1,emaFastBuf[shift+1]);
+            ObjectMove(0,name,1,t2,emaFastBuf[shift]);
+         }
+         ObjectSetInteger(0,name,OBJPROP_COLOR,clrDodgerBlue);
+         ObjectSetInteger(0,name,OBJPROP_WIDTH,1);
+         ObjectSetInteger(0,name,OBJPROP_RAY,false);
+         ObjectSetInteger(0,name,OBJPROP_BACK,true);
+         ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+      }
+   }
+
+   double emaSlowBuf[];
+   int nSlow=CopyBufferSeries(g_handleEmaSlowM5,0,bars,emaSlowBuf);
+   if(nSlow>=2)
+   {
+      for(int shift=0;shift<nSlow-1;shift++)
+      {
+         string name="V1_EMASLOW_"+IntegerToString(shift);
+         datetime t1=iTime(_Symbol,PERIOD_M5,shift+1);
+         datetime t2=iTime(_Symbol,PERIOD_M5,shift);
+         if(t1==0 || t2==0) continue;
+
+         if(ObjectFind(0,name)<0)
+            ObjectCreate(0,name,OBJ_TREND,0,t1,emaSlowBuf[shift+1],t2,emaSlowBuf[shift]);
+         else
+         {
+            ObjectMove(0,name,0,t1,emaSlowBuf[shift+1]);
+            ObjectMove(0,name,1,t2,emaSlowBuf[shift]);
+         }
+         ObjectSetInteger(0,name,OBJPROP_COLOR,clrOrange);
+         ObjectSetInteger(0,name,OBJPROP_WIDTH,1);
+         ObjectSetInteger(0,name,OBJPROP_RAY,false);
+         ObjectSetInteger(0,name,OBJPROP_BACK,true);
+         ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+      }
+   }
+
+   string pivotName="V1_PIVOT";
+   if(g_pivotValue>0.0)
+   {
+      if(ObjectFind(0,pivotName)<0)
+         ObjectCreate(0,pivotName,OBJ_HLINE,0,0,g_pivotValue);
+
+      ObjectSetDouble(0,pivotName,OBJPROP_PRICE,g_pivotValue);
+      ObjectSetInteger(0,pivotName,OBJPROP_COLOR,clrYellow);
+      ObjectSetInteger(0,pivotName,OBJPROP_STYLE,STYLE_DASH);
+      ObjectSetInteger(0,pivotName,OBJPROP_WIDTH,1);
+      ObjectSetInteger(0,pivotName,OBJPROP_BACK,true);
+      ObjectSetInteger(0,pivotName,OBJPROP_SELECTABLE,false);
+   }
+   else
+      ObjectDelete(0,pivotName);
+
+   if(InpDrawStatusLabel) DrawStatusLabel();
 }
 
 void DrawStatusLabel()
 {
    string name="V1_StatusLabel";
-   string text=StringFormat("EzyEA V1 | Regime=%s | ADX=%.1f | Dir=%s | Open=%d/%d",
-                (g_regime==REGIME_TRENDING?"TRENDING":"RANGING"),
-                g_lastAdxValue,
-                (g_trendDirection==1?"UP":(g_trendDirection==-1?"DOWN":"-")),
-                CountOpenPositions(),InpMaxConcurrentPositions);
+   string text=StringFormat("EzyEA V1 | EMA%d/EMA%d/Pivot confluence=%s | Open=%d/%d | %s",
+                InpEmaFastPeriod,InpEmaSlowPeriod,
+                (g_confluenceInZone?"IN-ZONE":"-"),
+                CountOpenPositions(),InpMaxConcurrentPositions,
+                g_tradingHalted?"HALTED (drawdown breaker)":"ACTIVE");
 
    if(ObjectFind(0,name)<0)
    {
@@ -1363,34 +1131,7 @@ void DrawStatusLabel()
    }
 
    ObjectSetString(0,name,OBJPROP_TEXT,text);
-   ObjectSetInteger(0,name,OBJPROP_COLOR,clrWhite);
-}
-
-void DrawChart()
-{
-   int bars=MathMax(3,InpDrawBarsBack);
-
-   if(InpDrawBands)
-   {
-      double upperBuf[],baseBuf[],lowerBuf[];
-      int nU=CopyBufferSeries(g_handleBandsM5,1,bars,upperBuf);
-      int nB=CopyBufferSeries(g_handleBandsM5,0,bars,baseBuf);
-      int nL=CopyBufferSeries(g_handleBandsM5,2,bars,lowerBuf);
-
-      if(nU>=2) DrawSeriesLine("V1_UpperBand",upperBuf,clrDodgerBlue);
-      if(nB>=2) DrawSeriesLine("V1_BaseBand",baseBuf,clrSilver);
-      if(nL>=2) DrawSeriesLine("V1_LowerBand",lowerBuf,clrDodgerBlue);
-   }
-
-   if(InpDrawEma)
-   {
-      double emaBuf[];
-      int nE=CopyBufferSeries(g_handleEmaM5,0,bars,emaBuf);
-      if(nE>=2) DrawSeriesLine("V1_Ema20",emaBuf,clrOrange);
-   }
-
-   if(InpDrawStatusLabel)
-      DrawStatusLabel();
+   ObjectSetInteger(0,name,OBJPROP_COLOR,g_tradingHalted?clrOrange:clrWhite);
 }
 
 void RemoveAllDrawings()
@@ -1414,11 +1155,14 @@ void PeriodicStatusLog()
    if(g_lastStatusLogTime>0 && now-g_lastStatusLogTime<InpStatusLogIntervalSeconds) return;
    g_lastStatusLogTime=now;
 
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   double ddPct =(g_peakEquity>0.0)?(g_peakEquity-equity)/g_peakEquity*100.0:0.0;
+
    Log("V1 LIVE PARITY STATUS"+
-       " | regime="+(g_regime==REGIME_TRENDING?"TRENDING":"RANGING")+
-       " | adx="+DoubleToString(g_lastAdxValue,1)+
-       " | dir="+(g_trendDirection==1?"UP":(g_trendDirection==-1?"DOWN":"-"))+
+       " | confluence="+(g_confluenceInZone?"IN-ZONE":"-")+
+       " | pivot="+(g_pivotValue>0.0?PriceText(g_pivotValue):"n/a")+
        " | open="+IntegerToString(CountOpenPositions())+"/"+IntegerToString(InpMaxConcurrentPositions)+
+       " | drawdown="+DoubleToString(ddPct,2)+"%"+(g_tradingHalted?" (HALTED)":"")+
        " | equity="+DoubleToString(EffectiveAccountEquity(),2)+" "+AccountInfoString(ACCOUNT_CURRENCY));
 
    Log("V1 DEPLOYMENT GATE BREAKDOWN"+
@@ -1428,11 +1172,11 @@ void PeriodicStatusLog()
        " | spreadRejects="+IntegerToString(g_gateSpreadRejects)+
        " | concurrencyRejects="+IntegerToString(g_gateConcurrencyRejects)+
        " | distanceRejects="+IntegerToString(g_gateDistanceRejects)+
-       " | sizingRejects="+IntegerToString(g_gateSizingRejects));
+       " | sizingRejects="+IntegerToString(g_gateSizingRejects)+
+       " | drawdownRejects="+IntegerToString(g_gateDrawdownRejects));
 }
 
-// Summarizes this EA's own deal history (by symbol+magic, so it never
-// picks up manual or other-EA trades sharing the account) at shutdown -
+// Summarizes this EA's own deal history (by symbol+magic) at shutdown -
 // covers both a Strategy Tester run ending and the EA being removed live.
 void WriteFinalReport()
 {
