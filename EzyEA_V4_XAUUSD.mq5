@@ -39,9 +39,25 @@
 //|                                                                    |
 //| CHANGELOG                                                          |
 //| 4.000 - Initial build.                                             |
+//| 4.001 - Confirmed live: reducing InpRiskPercentPerTrade 1.0->0.25   |
+//|         produced no visible change in drawdown across several test |
+//|         dates. Diagnosis: XAUUSD's ATR-based stop is wide enough    |
+//|         in dollar terms that the real risk-based lot calculation    |
+//|         rounds below the 0.01 broker minimum at either setting on   |
+//|         a small account, so both were quietly landing on the same   |
+//|         floor lot size - the risk% dial was not actually            |
+//|         controlling position size. InpAllowMinimumLotFallback now   |
+//|         defaults to false: a trade that can't clear the real target |
+//|         risk at real position size simply doesn't open, instead of  |
+//|         silently trading at an inflated effective risk. Also        |
+//|         tightened InpMaxEquityDrawdownPct 10.0->5.0 - that breaker   |
+//|         tracks the true running peak (not day-start like the daily  |
+//|         loss limit), so it is the right lever to catch the 5%       |
+//|         drawdowns actually observed; at 10% it never engaged before |
+//|         reaching that level.                                        |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "4.000"
+#property version   "4.001"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -101,7 +117,17 @@ input group "=== Risk / Sizing ==="
 input double InpRiskPercentPerTrade         = 1.0;
 input double InpMaxLotsAbsolute             = 5.0;
 input double InpMaxMarginUsePct             = 40.0;
-input bool   InpAllowMinimumLotFallback     = true;
+// Confirmed live: reducing InpRiskPercentPerTrade 1.0->0.25 produced no
+// visible change in drawdown, because BOTH settings were quietly landing
+// on the same 0.01 broker-minimum floor (XAUUSD's ATR-based stop is wide
+// enough in dollar terms that the real risk-based lot calc rounds below
+// 0.01 at either setting on a small account) - so the risk% dial wasn't
+// actually controlling position size. Disabled by default: a trade that
+// can't clear the real target risk at real position size simply doesn't
+// open, rather than silently trading at an inflated effective risk. On
+// a master account, fewer honestly-sized trades beat more falsely-sized
+// ones. Set true to restore the old floor-trading behaviour.
+input bool   InpAllowMinimumLotFallback     = false;
 input double InpMinimumLotFallbackMaxRiskPct = 1.5;
 
 input group "=== Daily Profit Lock / Loss Limit ==="
@@ -114,8 +140,12 @@ input bool   InpEnableDailyLossLimit        = true;
 input double InpDailyLossLimitPct           = 3.0;
 
 input group "=== Overall Drawdown Circuit Breaker (peak since attach) ==="
+// Tightened 10.0->5.0: this tracks the true running peak (not just
+// day-start, unlike the daily loss limit above), so it is the right
+// lever to catch the 5% drawdowns confirmed live across several test
+// dates - at 10% it simply never engaged before reaching that level.
 input bool   InpEnableDrawdownBreaker       = true;
-input double InpMaxEquityDrawdownPct        = 10.0;
+input double InpMaxEquityDrawdownPct        = 5.0;
 input double InpDrawdownResumeFactor        = 0.5;
 
 input group "=== Modify Backoff (TimeCurrent()-based, never GetTickCount64) ==="
