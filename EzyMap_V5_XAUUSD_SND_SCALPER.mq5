@@ -97,6 +97,29 @@
 //  send outcome, so touch detection itself can never again be          |
 //  ambiguous from the journal regardless of what happens afterward.    |
 //                                                                    |
+//  CORRECTION (v5.4, fourth run - still zero triggers): per explicit   |
+//  instruction, the v5.3 SL/TP widening was REVERTED outright (a       |
+//  silently wider stop is a real, unwanted extra loss, not an          |
+//  acceptable tradeoff for hitting more entries) - the fixed 25/37 pip |
+//  bracket is now sent exactly as specified again. Separately, a       |
+//  comparison against how FRESH V3 itself detects a touch              |
+//  (ReadyTouchCMP() / BuildZeroConfluenceTouchEnvelope()) surfaced the  |
+//  REAL bug: this file's touch check only looked at whether the        |
+//  CURRENT tick's price sat inside the tolerance band around a level - |
+//  if price moved from clearly one side of a level to clearly the      |
+//  other side between two consecutive ticks without any single tick    |
+//  happening to land inside that (narrow, 20-point) band, no touch was |
+//  ever registered at all, no matter how many times price visibly      |
+//  crossed the line on the chart. FIX: touch is now detected as a      |
+//  CROSSING between the previous tick's reference price and the        |
+//  current one (LevelState gained hasPrevPrice/prevPrice, replacing    |
+//  the old single-snapshot lastSide field) - the same envelope-between-|
+//  consecutive-CMP technique FRESH V3 already uses. Also added         |
+//  explicit "V5 LEVEL NEW"/"V5 LEVEL REPLACED" logging (previously      |
+//  silent) so level formation/rollover on candle close is directly     |
+//  visible, and a periodic "V5 LEVEL DUMP" line listing every tracked  |
+//  level's exact price against the current bid.                        |
+//                                                                    |
 //  NOT YET VERIFIED: compiles in MetaEditor (no MQL5 toolchain in     |
 //  this environment), or real trading performance. Verified here:    |
 //  brace/paren/bracket balance, and a manual audit that every input   |
@@ -105,7 +128,7 @@
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
 #property link      ""
-#property version   "5.3"
+#property version   "5.4"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -170,7 +193,8 @@ struct LevelState
    double         price;
    datetime       barTime;
    ENUM_TIMEFRAMES sourceTf;
-   int            lastSide;              // +1 above, -1 below, 0 = touching/unknown
+   bool           hasPrevPrice;          // false until one tick has been observed
+   double         prevPrice;             // reference price as of the previous tick
    ulong          openTicket;            // 0 = no live trade bound to this level
    int            entryConsecutiveFailures;
    datetime       entryCooldownUntil;
@@ -204,7 +228,6 @@ double RoundPrice(double v);
 int    VolumeDigits();
 double NormalizeVolumeDown(double vol);
 double ComputeCapitalScaledLot();
-double MinimumBrokerDistance(double referencePrice);
 bool   TradeRetcodeAccepted(uint code);
 bool   TemporaryTradeRetcode(uint code);
 void   Log(string msg);
@@ -335,30 +358,6 @@ double ComputeCapitalScaledLot()
    return NormalizeVolumeDown(lots)>0.0?lots:0.0;
 }
 
-// v5.3: the broker's real minimum clearance for a stop/limit price from
-// the current market price. Unlike the execution-distance CHECK removed
-// in v5.2 (which rejected/skipped a touch outright), this never blocks a
-// trade - it only tells TryFireLevel how far the fixed SL/TP may need to
-// be WIDENED to actually get accepted, which directly serves maximum
-// trigger frequency (a request the broker will reject is zero frequency,
-// not a safe default). Includes the same zero-stops-level percentage-of-
-// price fallback used elsewhere in this codebase: some brokers report
-// SYMBOL_TRADE_STOPS_LEVEL/FREEZE_LEVEL as 0 while still enforcing a real,
-// wider minimum server-side.
-double MinimumBrokerDistance(double referencePrice)
-{
-   long stopsLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
-   long freezeLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL);
-
-   double reported=MathMax(_Point,((double)MathMax(stopsLevel,freezeLevel)+2)*_Point);
-
-   double fallback=0.0;
-   if(stopsLevel<=0 && freezeLevel<=0 && referencePrice>0.0)
-      fallback=referencePrice*0.05/100.0;
-
-   return MathMax(reported,fallback);
-}
-
 //------------------------------ Retcode classification --------------------
 bool TradeRetcodeAccepted(uint code)
 {
@@ -468,11 +467,21 @@ void AddOrEvictLevel(double price,datetime barTime,ENUM_TIMEFRAMES tf)
    if(countForTf>=4)
    {
       if(oldestIdx<0)
+      {
+         Log("V5 LEVEL SKIPPED (all 4 have open trades) | tf="+
+             TimeframeLabel(tf)+" | candidate="+DoubleToString(price,_Digits));
          return; // all 4 have open trades right now - skip, retry later
+      }
+
+      Log("V5 LEVEL REPLACED | tf="+TimeframeLabel(tf)+
+          " | old="+DoubleToString(g_levels[oldestIdx].price,_Digits)+
+          " -> new="+DoubleToString(price,_Digits)+
+          " | barTime="+TimeToString(barTime,TIME_DATE|TIME_MINUTES));
 
       g_levels[oldestIdx].price=price;
       g_levels[oldestIdx].barTime=barTime;
-      g_levels[oldestIdx].lastSide=0;
+      g_levels[oldestIdx].hasPrevPrice=false;
+      g_levels[oldestIdx].prevPrice=0.0;
       g_levels[oldestIdx].openTicket=0;
       g_levels[oldestIdx].entryConsecutiveFailures=0;
       g_levels[oldestIdx].entryCooldownUntil=0;
@@ -484,10 +493,16 @@ void AddOrEvictLevel(double price,datetime barTime,ENUM_TIMEFRAMES tf)
    g_levels[idx].price=price;
    g_levels[idx].barTime=barTime;
    g_levels[idx].sourceTf=tf;
-   g_levels[idx].lastSide=0;
+   g_levels[idx].hasPrevPrice=false;
+   g_levels[idx].prevPrice=0.0;
    g_levels[idx].openTicket=0;
    g_levels[idx].entryConsecutiveFailures=0;
    g_levels[idx].entryCooldownUntil=0;
+
+   Log("V5 LEVEL NEW | tf="+TimeframeLabel(tf)+
+       " | price="+DoubleToString(price,_Digits)+
+       " | barTime="+TimeToString(barTime,TIME_DATE|TIME_MINUTES)+
+       " | index="+IntegerToString(idx));
 }
 
 // Seeds each timeframe with its last 2 closed bars (4 levels) the first
@@ -597,24 +612,14 @@ bool TryFireLevel(int levelIndex,int direction)
    double slDistance=MathMax(0.1,InpStopLossPips)*g_pipSize;
    double tpDistance=MathMax(0.1,InpTakeProfitPips)*g_pipSize;
 
-   double sl=direction==1?entryPrice-slDistance:entryPrice+slDistance;
-   double tp=direction==1?entryPrice+tpDistance:entryPrice-tpDistance;
-
-   // v5.3: widen (never reject) if the fixed pip distance is tighter than
-   // what this broker will actually accept - see the header CORRECTION.
-   double minDist=MinimumBrokerDistance(entryPrice);
-   if(direction==1)
-   {
-      sl=MathMin(sl,entryPrice-minDist);
-      tp=MathMax(tp,entryPrice+minDist);
-   }
-   else
-   {
-      sl=MathMax(sl,entryPrice+minDist);
-      tp=MathMin(tp,entryPrice-minDist);
-   }
-   sl=RoundPrice(sl);
-   tp=RoundPrice(tp);
+   // v5.4: NOT widened to the broker's minimum anymore - reverted per
+   // explicit instruction (a silently wider SL is a real, unwanted extra
+   // loss). The fixed 25/37 pip bracket is sent exactly as specified; if
+   // the broker rejects it as too tight, that shows up as a genuine
+   // "V5 ENTRY FAILED | retcode=10016" in the journal rather than being
+   // masked by widening it.
+   double sl=RoundPrice(direction==1?entryPrice-slDistance:entryPrice+slDistance);
+   double tp=RoundPrice(direction==1?entryPrice+tpDistance:entryPrice-tpDistance);
 
    double lots=ComputeCapitalScaledLot();
    if(lots<=0.0)
@@ -685,12 +690,17 @@ bool TryFireLevel(int levelIndex,int direction)
 
 // Runs every tick. For each level: if it has a live trade bound, verify
 // the position still exists (clear the binding and re-arm the level the
-// instant it does not); otherwise evaluate touch/direction. A level only
-// fires on the tick it freshly enters the touch-tolerance band from a
-// known side (side flips from non-zero to zero) - not on every tick it
-// happens to linger inside the band - which by itself already prevents a
-// stationary whipsaw from firing every single tick, before the cooldown
-// in TryFireLevel() even engages.
+// instant it does not); otherwise evaluate touch/direction.
+//
+// v5.4: touch is now detected as a CROSSING between the previous tick's
+// reference price and the current one, not just "is the current tick
+// inside the tolerance band" - the earlier check missed any touch where
+// price moved from clearly one side of a level to clearly the other side
+// between two consecutive ticks without any single tick happening to land
+// inside a narrow tolerance band (very possible in the Strategy Tester,
+// and in fast markets generally). This mirrors how FRESH V3's own
+// ReadyTouchCMP()/BuildZeroConfluenceTouchEnvelope() treat a touch as the
+// span between the previous and current CMP, not a single snapshot.
 void ProcessLevelTouches()
 {
    MqlTick tick;
@@ -712,31 +722,40 @@ void ProcessLevelTouches()
       }
 
       double lvl=g_levels[i].price;
-      int side;
-      if(refPrice>lvl+tol) side=1;
-      else if(refPrice<lvl-tol) side=-1;
-      else side=0;
 
-      if(side==0 && g_levels[i].lastSide!=0)
+      if(g_levels[i].hasPrevPrice)
       {
-         // lastSide==-1: price was below the level, just rose into it -
-         //   "cmp touch the level above it" -> SELL (direction=-1).
-         // lastSide==+1: price was above the level, just fell into it -
-         //   "cmp touch the level below it" -> BUY (direction=+1).
-         int direction=(g_levels[i].lastSide==-1)?-1:1;
+         double prevPrice=g_levels[i].prevPrice;
+         bool prevBelow=(prevPrice<lvl-tol);
+         bool prevAbove=(prevPrice>lvl+tol);
+         bool nowAtOrAbove=(refPrice>=lvl-tol);
+         bool nowAtOrBelow=(refPrice<=lvl+tol);
 
-         // v5.3: unconditional log at the moment of touch, BEFORE any gate
-         // or order-send outcome, so touch detection itself is never
-         // ambiguous in the journal regardless of what happens next.
-         Log("V5 TOUCH | level="+DoubleToString(lvl,_Digits)+
-             " (tf="+EnumToString(g_levels[i].sourceTf)+")"+
-             " | direction="+(direction==1?"BUY":"SELL")+
-             " | price="+DoubleToString(refPrice,_Digits));
+         int direction=0;
+         // prevBelow && nowAtOrAbove: price rose up into/through the level
+         //   from below - "cmp touch the level above it" -> SELL.
+         // prevAbove && nowAtOrBelow: price fell down into/through the
+         //   level from above - "cmp touch the level below it" -> BUY.
+         if(prevBelow && nowAtOrAbove) direction=-1;
+         else if(prevAbove && nowAtOrBelow) direction=1;
 
-         TryFireLevel(i,direction);
+         if(direction!=0)
+         {
+            // Unconditional log at the moment of touch, BEFORE any gate or
+            // order-send outcome, so touch detection itself is never
+            // ambiguous in the journal regardless of what happens next.
+            Log("V5 TOUCH | level="+DoubleToString(lvl,_Digits)+
+                " (tf="+EnumToString(g_levels[i].sourceTf)+")"+
+                " | direction="+(direction==1?"BUY":"SELL")+
+                " | prevPrice="+DoubleToString(prevPrice,_Digits)+
+                " | price="+DoubleToString(refPrice,_Digits));
+
+            TryFireLevel(i,direction);
+         }
       }
 
-      g_levels[i].lastSide=side;
+      g_levels[i].prevPrice=refPrice;
+      g_levels[i].hasPrevPrice=true;
    }
 }
 
@@ -767,6 +786,22 @@ void ReportLiveParityStatus()
        " | equity="+DoubleToString(EffectiveAccountEquity(),2)+
        " | divisor="+DoubleToString(g_accountUnitDivisor,1)+
        " | pipSize="+DoubleToString(g_pipSize,_Digits));
+
+   // v5.4: the exact tracked price/side of every level, so a run that
+   // produces zero trades can be checked directly against the chart -
+   // e.g. does "current side" ever actually read 0 (touching) for a level
+   // the chart shows price crossing?
+   MqlTick statusTick;
+   double statusBid=(SymbolInfoTick(_Symbol,statusTick))?statusTick.bid:0.0;
+   string dump="V5 LEVEL DUMP | bid="+DoubleToString(statusBid,_Digits);
+   for(int i=0;i<n;i++)
+   {
+      dump+=" | "+TimeframeLabel(g_levels[i].sourceTf)+
+            "="+DoubleToString(g_levels[i].price,_Digits)+
+            "(prev="+(g_levels[i].hasPrevPrice?DoubleToString(g_levels[i].prevPrice,_Digits):"none")+
+            (g_levels[i].openTicket!=0?",OPEN":"")+")";
+   }
+   Log(dump);
 }
 
 void ReportDeploymentGateBreakdown()
