@@ -37,9 +37,22 @@
 //|         price is chopping right at now fires repeatedly every       |
 //|         InpLevelReentrySeconds instead of going silent until price  |
 //|         fully exits and re-enters.                                 |
+//| 2.002 - Frequency confirmed working: 300 trades, but all 300 still  |
+//|         at the 0.01 broker-minimum floor (3.00 total lots) - the    |
+//|         real risk-based calc (riskBudget/perLotLoss) never crossed  |
+//|         the 0.01 threshold at 0.25% risk, so trade count scaling up |
+//|         didn't move total volume at all. Per explicit "adjust       |
+//|         position sizing to get more lot traded" request:            |
+//|         InpRiskPercentPerTrade 0.25->2.5 (still far short of the    |
+//|         V3/V4-style 25-47% aggressive sizing already declined, but  |
+//|         enough for real sizing to clear the floor instead of        |
+//|         flatlining there every trade). InpMinimumLotFallbackMaxRisk |
+//|         Pct 1.0->3.0 to stay above the new target risk - otherwise  |
+//|         an outlier-wide ATR stop could make the safety-net fallback |
+//|         MORE restrictive than the primary risk target it backstops.|
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "2.001"
+#property version   "2.002"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -89,7 +102,12 @@ input double InpAtrSlMultiplier             = 1.5;
 input double InpTrailMinStepPoints          = 20.0;
 
 input group "=== Risk / Sizing ==="
-input double InpRiskPercentPerTrade         = 0.25;
+// 300 trades in the last run, all still at the 0.01 broker-minimum floor
+// - the real risk-based calc (riskBudget/perLotLoss) never crossed the
+// 0.01 threshold at 0.25%, so every trade fell back to the same fixed
+// size regardless of trade count. Raised so real sizing actually scales
+// above the floor instead of flatlining there every time.
+input double InpRiskPercentPerTrade         = 2.5;
 input int    InpMaxConcurrentPositions      = 50;
 input double InpMaxLotsAbsolute             = 5.0;
 input double InpMaxMarginUsePct             = 40.0;
@@ -99,9 +117,12 @@ input double InpMaxMarginUsePct             = 40.0;
 // lot risk far more than 0.25% of a small account). When risk-based
 // sizing rounds to 0, fall back to the broker minimum lot instead of
 // skipping the trade, but only if that minimum lot's real risk still
-// stays under this explicit ceiling.
+// stays under this explicit ceiling. Kept slightly above
+// InpRiskPercentPerTrade so an outlier-wide ATR stop can't make this
+// safety-net fallback MORE restrictive than the primary risk target
+// it's meant to backstop.
 input bool   InpAllowMinimumLotFallback     = true;
-input double InpMinimumLotFallbackMaxRiskPct = 1.0;
+input double InpMinimumLotFallbackMaxRiskPct = 3.0;
 
 input group "=== Modify Backoff (TimeCurrent()-based, never GetTickCount64) ==="
 input int    InpModifyBackoffBaseSeconds    = 5;
