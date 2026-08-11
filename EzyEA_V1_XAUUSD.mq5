@@ -4,12 +4,16 @@
 //| EzyEA V1 (REBUILT) - per explicit instruction, the original ADX-  |
 //| regime + Bollinger mean-reversion + EMA pullback-continuation      |
 //| design is fully replaced with a single new trigger concept:        |
-//| EMA13 / EMA47 / Pivot Point CONFLUENCE. When all three references  |
-//| cluster within a small tolerance of each other on M5 and price      |
-//| touches that cluster, the touch is FADED (mean-reversion), the      |
-//| same "touch a reference, trade the reversion" philosophy already    |
-//| proven this session for SND levels and single-EMA touches - just    |
-//| applied to a 3-way confluence zone instead of one reference.        |
+//| EMA13 / EMA47 OVERLAP. When the two EMAs cluster within a small     |
+//| tolerance of each other on M5 and price touches that cluster, the   |
+//| touch is FADED (mean-reversion), the same "touch a reference, trade |
+//| the reversion" philosophy already proven this session for SND       |
+//| levels and single-EMA touches - applied to a 2-EMA confluence zone  |
+//| instead of one reference. A daily pivot point was originally also   |
+//| required to overlap, but confirmed live to produce zero trades: the |
+//| pivot is a fixed daily value while the EMAs move continuously, so   |
+//| requiring all three to coincide was an extremely rare event. Pivot  |
+//| dropped entirely per explicit follow-up instruction.                |
 //|                                                                     |
 //| This overwrites the original EzyEA V1 by explicit user confirmation |
 //| (they were live-testing the old version on a 200 USC account and    |
@@ -28,10 +32,14 @@
 //| calculated size rounds below the broker minimum.                          |
 //|                                                                             |
 //| CHANGELOG                                                                   |
-//| 1.000 (rebuild) - Initial build of the confluence-fade design.              |
+//| 1.000 (rebuild) - Initial build of the confluence-fade design               |
+//|                   (EMA13/EMA47/Pivot).                                      |
+//| 1.001 (rebuild) - Confirmed live: zero trades taken. Pivot point            |
+//|                   dropped entirely - trigger is now EMA13/EMA47             |
+//|                   overlap only, per explicit instruction.                   |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.000"
+#property version   "1.001"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -49,17 +57,15 @@ enum ENUM_EZY_ACCOUNT_SCALE
 //======================================================================
 // Inputs
 //======================================================================
-input group "=== EMA13/EMA47/Pivot Confluence Entries: M5, fade the touch ==="
-// "Overlap" = the spread between the highest and lowest of the three
-// references is within InpConfluenceClusterTolerancePoints - i.e. all
-// three are clustered close together. A touch of that cluster (price
-// entering within InpConfluenceTouchTolerancePoints of it) is then
-// FADED: touch from above -> expect a bounce back up -> BUY; touch from
-// below -> expect a rejection back down -> SELL. Same envelope-crossing
-// touch detection (previous-vs-current-tick) proven this session, so a
-// fast move through the zone is never missed. Pivot is the classic
-// daily formula (prevDayHigh+prevDayLow+prevDayClose)/3, recalculated
-// only on a new D1 bar close, never intra-bar.
+input group "=== EMA13/EMA47 Confluence Entries: M5, fade the touch ==="
+// "Overlap" = the spread between EMA13 and EMA47 is within
+// InpConfluenceClusterTolerancePoints - i.e. the two are clustered
+// close together. A touch of that cluster (price entering within
+// InpConfluenceTouchTolerancePoints of it) is then FADED: touch from
+// above -> expect a bounce back up -> BUY; touch from below -> expect a
+// rejection back down -> SELL. Same envelope-crossing touch detection
+// (previous-vs-current-tick) proven this session, so a fast move
+// through the zone is never missed.
 input bool   InpEnableConfluenceEntries      = true;
 input int    InpEmaFastPeriod                = 13;
 input int    InpEmaSlowPeriod                = 47;
@@ -146,9 +152,6 @@ int g_handleAtrM5     = INVALID_HANDLE;
 int g_handleEmaFastM5 = INVALID_HANDLE;
 int g_handleEmaSlowM5 = INVALID_HANDLE;
 
-datetime g_lastPivotD1BarTime = 0;
-double   g_pivotValue         = 0.0;
-
 double g_accountUnitDivisor = 1.0;
 
 double g_spreadCalSamples[];
@@ -223,7 +226,6 @@ void   ModifyPositionSafely(ulong ticket,double sl,double tp);
 void   ManageTrailing();
 void   EnforceMaxHoldingTime();
 
-void   RecalculatePivotOnNewD1Bar();
 void   TryConfluenceEntry(int direction);
 void   CheckConfluenceTouch(double observedLo,double observedHi);
 void   ProcessConfluenceTrigger();
@@ -258,9 +260,6 @@ int OnInit()
       return INIT_FAILED;
    }
 
-   g_lastPivotD1BarTime=0;
-   g_pivotValue=0.0;
-
    g_accountUnitDivisor = ResolveAccountUnitDivisor();
 
    int capacity = SpreadCalibrationTicksEffective();
@@ -285,7 +284,7 @@ int OnInit()
        " | account unit divisor="+DoubleToString(g_accountUnitDivisor,2)+
        " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
        " | max concurrent="+IntegerToString(InpMaxConcurrentPositions)+
-       " | trigger=EMA"+IntegerToString(InpEmaFastPeriod)+"/EMA"+IntegerToString(InpEmaSlowPeriod)+"/Pivot confluence (M5)"+
+       " | trigger=EMA"+IntegerToString(InpEmaFastPeriod)+"/EMA"+IntegerToString(InpEmaSlowPeriod)+" confluence (M5)"+
        " | drawdown breaker="+(InpEnableDrawdownBreaker?DoubleToString(InpMaxEquityDrawdownPct,1)+"%":"OFF"));
 
    return INIT_SUCCEEDED;
@@ -305,7 +304,6 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    UpdateDrawdownBreaker();
-   RecalculatePivotOnNewD1Bar();
 
    if(InpEnableConfluenceEntries)
    {
@@ -768,25 +766,10 @@ void TryOpenPosition(int direction,string tag,double slDistance)
 }
 
 //======================================================================
-// EMA13/EMA47/Pivot confluence entries. Pivot only rebuilds on its own
-// D1 bar close, never intra-bar. EMA values are read LIVE (shift=0) -
+// EMA13/EMA47 confluence entries. EMA values are read LIVE (shift=0) -
 // an EMA is a smoothed lagging price, not a bar pattern, so reading it
 // live carries no repaint risk.
 //======================================================================
-void RecalculatePivotOnNewD1Bar()
-{
-   datetime d1=iTime(_Symbol,PERIOD_D1,0);
-   if(d1==0 || d1==g_lastPivotD1BarTime) return;
-   g_lastPivotD1BarTime=d1;
-
-   double prevHigh =iHigh(_Symbol,PERIOD_D1,1);
-   double prevLow  =iLow(_Symbol,PERIOD_D1,1);
-   double prevClose=iClose(_Symbol,PERIOD_D1,1);
-   if(prevHigh<=0.0 || prevLow<=0.0 || prevClose<=0.0) return;
-
-   g_pivotValue=RoundPrice((prevHigh+prevLow+prevClose)/3.0);
-}
-
 void TryConfluenceEntry(int direction)
 {
    double atrBuf[];
@@ -803,7 +786,6 @@ void CheckConfluenceTouch(double observedLo,double observedHi)
    g_confluenceInZone=false;
 
    if(!InpEnableConfluenceEntries) return;
-   if(g_pivotValue<=0.0) return;
 
    double emaFastBuf[],emaSlowBuf[];
    if(CopyBufferSeries(g_handleEmaFastM5,0,1,emaFastBuf)<1) return;
@@ -813,10 +795,10 @@ void CheckConfluenceTouch(double observedLo,double observedHi)
    double emaSlow=emaSlowBuf[0];
    if(emaFast<=0.0 || emaSlow<=0.0) return;
 
-   double clusterHi=MathMax(emaFast,MathMax(emaSlow,g_pivotValue));
-   double clusterLo=MathMin(emaFast,MathMin(emaSlow,g_pivotValue));
+   double clusterHi=MathMax(emaFast,emaSlow);
+   double clusterLo=MathMin(emaFast,emaSlow);
 
-   // All three references must be clustered together first - the actual
+   // The two EMAs must be clustered together first - the actual
    // "confluence" condition - before a touch of that cluster means
    // anything.
    double clusterTolerance=InpConfluenceClusterTolerancePoints*_Point;
@@ -1032,7 +1014,7 @@ void EnforceMaxHoldingTime()
 }
 
 //======================================================================
-// Chart drawing (EMA13/EMA47/pivot references + status label)
+// Chart drawing (EMA13/EMA47 references + status label)
 //======================================================================
 void DrawReferences()
 {
@@ -1092,29 +1074,13 @@ void DrawReferences()
       }
    }
 
-   string pivotName="V1_PIVOT";
-   if(g_pivotValue>0.0)
-   {
-      if(ObjectFind(0,pivotName)<0)
-         ObjectCreate(0,pivotName,OBJ_HLINE,0,0,g_pivotValue);
-
-      ObjectSetDouble(0,pivotName,OBJPROP_PRICE,g_pivotValue);
-      ObjectSetInteger(0,pivotName,OBJPROP_COLOR,clrYellow);
-      ObjectSetInteger(0,pivotName,OBJPROP_STYLE,STYLE_DASH);
-      ObjectSetInteger(0,pivotName,OBJPROP_WIDTH,1);
-      ObjectSetInteger(0,pivotName,OBJPROP_BACK,true);
-      ObjectSetInteger(0,pivotName,OBJPROP_SELECTABLE,false);
-   }
-   else
-      ObjectDelete(0,pivotName);
-
    if(InpDrawStatusLabel) DrawStatusLabel();
 }
 
 void DrawStatusLabel()
 {
    string name="V1_StatusLabel";
-   string text=StringFormat("EzyEA V1 | EMA%d/EMA%d/Pivot confluence=%s | Open=%d/%d | %s",
+   string text=StringFormat("EzyEA V1 | EMA%d/EMA%d confluence=%s | Open=%d/%d | %s",
                 InpEmaFastPeriod,InpEmaSlowPeriod,
                 (g_confluenceInZone?"IN-ZONE":"-"),
                 CountOpenPositions(),InpMaxConcurrentPositions,
@@ -1160,7 +1126,6 @@ void PeriodicStatusLog()
 
    Log("V1 LIVE PARITY STATUS"+
        " | confluence="+(g_confluenceInZone?"IN-ZONE":"-")+
-       " | pivot="+(g_pivotValue>0.0?PriceText(g_pivotValue):"n/a")+
        " | open="+IntegerToString(CountOpenPositions())+"/"+IntegerToString(InpMaxConcurrentPositions)+
        " | drawdown="+DoubleToString(ddPct,2)+"%"+(g_tradingHalted?" (HALTED)":"")+
        " | equity="+DoubleToString(EffectiveAccountEquity(),2)+" "+AccountInfoString(ACCOUNT_CURRENCY));
