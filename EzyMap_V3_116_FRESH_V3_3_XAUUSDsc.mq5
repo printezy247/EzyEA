@@ -159,9 +159,26 @@
 //  ENTRY rectangle logic are removed as superseded - their object      |
 //  names are actively deleted on the drawing path that used to create  |
 //  them, so no stale objects are left on an existing chart.            |
+//                                                                    |
+//  V3.303 - EXIT LOGIC ONLY, per explicit instruction to match the    |
+//  EzyEA V1 XAUUSD build's exit approach. The SL and trailing         |
+//  distance are no longer a fixed pip count (21/7) - both now come    |
+//  from one shared ATR-based distance (InpAtrSlMultiplierExit x       |
+//  ATR(M5,InpAtrPeriodExit)), computed by the new AtrBasedExitDistance|
+//  () and cached per M5 bar (it's read every tick from               |
+//  ManageHybridTrailingPositions("TICK"), so caching avoids           |
+//  recomputing ATR on every tick when it only changes at bar close).  |
+//  Falls back to the fixed InpPresetStopLossPips distance whenever    |
+//  ATR data isn't ready. Everything else about the exit - no TP,      |
+//  trail-only, the activation-floor rule (trail never engages sooner  |
+//  than the full distance itself), broker-safe backoff-protected      |
+//  modify, virtual-stop fallback - is completely unchanged, and no    |
+//  entry/zone/scoring/sizing logic was touched. New inputs:           |
+//  InpUseAtrBasedStops (default true), InpAtrPeriodExit (14),         |
+//  InpAtrSlMultiplierExit (1.5) - matching V1's own defaults exactly. |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "3.302"
+#property version   "3.303"
 
 #include <Trade/Trade.mqh>
 
@@ -679,6 +696,19 @@ input double InpLayer2TakeProfitR              = 0.55;
 input double InpPresetStopLossPips          = 21.0;
 input bool   InpRetryEntryWithoutSLOnReject = true;
 
+// V3.3: same exit-distance logic as the EzyEA V1 XAUUSD build - the SL and
+// trailing distance are no longer a fixed pip count, they scale with
+// current M5 volatility (InpAtrSlMultiplierExit * ATR(M5,InpAtrPeriodExit)),
+// using the same ATRFromRates() helper this file already uses elsewhere.
+// Everything else about the exit (no TP, trail-only, activation floor,
+// backoff-protected broker modify, virtual-stop fallback) is unchanged -
+// only the SOURCE of the distance value changes. Falls back to the fixed
+// InpPresetStopLossPips distance whenever ATR data isn't ready yet (e.g.
+// the first few bars of a test), so a trade never opens with a zero SL.
+input bool   InpUseAtrBasedStops            = true;
+input int    InpAtrPeriodExit               = 14;
+input double InpAtrSlMultiplierExit         = 1.5;
+
 // V3.116 broker/virtual protection with no TP, a 30-pip preset SL and a 10-pip trailing stop.
 // A preset 30-pip SL is requested with every entry. No TP is submitted. The exact virtual
 // SL remains active when broker stop-distance rules require adjustment.
@@ -796,7 +826,7 @@ input bool   InpCounterRequireM1Break          = true;
 
 //----------------------------- Constants ----------------------------
 #define PRODUCT_NAME "EzyMap Scalp Mastery"
-#define PRODUCT_VERSION "V3.3 • Pine Pro V1.4 zone drawing • V3.104 FIXED BASE • BUY2/3 • SELL1/2 • EQUAL-SCORE M1 BIAS"
+#define PRODUCT_VERSION "V3.303 • Pine Pro V1.4 zone drawing • ATR-based exit (V1 parity) • V3.104 FIXED BASE • BUY2/3 • SELL1/2 • EQUAL-SCORE M1 BIAS"
 #define EMA_LEN 13
 #define TREND_MIN_CONFLUENCES 2
 #define COUNTER_MIN_CONFLUENCES 3
@@ -1078,6 +1108,13 @@ ZoneInfo g_buyHigh,g_buyLow,g_sellHigh,g_sellLow;
 int g_buyHighConf=0,g_sellHighConf=0;
 double g_pipSize=0,g_brnStep=0,g_microStep=0;
 double g_accountUnitDivisor=1.0;
+
+// AtrBasedExitDistance() cache - ManageHybridTrailingPositions("TICK") calls
+// it unconditionally every tick, but the ATR value itself only changes on a
+// new M5 bar close, so recomputing CopyRates+ATR every single tick would be
+// pure waste. Refreshed only when the M5 bar time changes.
+double   g_atrExitDistanceCache=0.0;
+datetime g_atrExitDistanceCacheBar=0;
 string g_biasText="NEUTRAL";
 double g_livePrice=0.0;
 bool g_trendBuyRoute=false;
@@ -1191,6 +1228,7 @@ double BrokerTrailMinimumDistance(double current,int backoffSteps);
 double BrokerCompatibleTrailSL(int direction,double current,double virtualStop,int backoffSteps);
 bool ClosePositionAtVirtualTrail(int stateIndex,ulong ticket,string context,double current,double stop,double peak);
 void PruneHybridTrailStates();
+double AtrBasedExitDistance();
 void ResetDailyFrequencyCounter();
 bool PersistentQualityPass(PersistentReadySetup &setup,string &reason);
 bool DeployPersistentSetup(int index);
@@ -1723,7 +1761,7 @@ bool SubmitDirectZeroConfMarket()
       return false;
 
    double entry=(direction==1)?tick.ask:tick.bid;
-   double exactDistance=MathMax(0.1,InpPresetStopLossPips)*StrategyPipSize();
+   double exactDistance=AtrBasedExitDistance();
    double exactSL=RoundPrice(direction==1?entry-exactDistance:entry+exactDistance);
    double brokerSL=BrokerSafeExecutionSL(direction,entry,exactSL);
 
@@ -2231,18 +2269,23 @@ void ManageHybridTrailingPositions(string context)
       return;
 
    double strategyPip=StrategyPipSize();
-   double trailDistance=MathMax(0.1,InpTrailingDistancePips)*strategyPip;
+   // Same exit-distance logic as EzyEA V1: one shared ATR-based distance
+   // drives both the preset SL and the trailing distance (matching V1's
+   // single slDistance value used for both), instead of two independent
+   // fixed-pip inputs that could drift apart.
+   double atrExitDistance=AtrBasedExitDistance();
+   double trailDistance=atrExitDistance;
    // Trail activation floor: activation used to default to InpTrailingActivationPips=0,
    // so the trail armed on virtually the first favourable tick and began improving the
    // (much wider) preset SL immediately - well before price had moved a full trailing
    // distance in profit. Per explicit instruction, activation now never engages sooner
-   // than InpTrailingDistancePips itself (e.g. a 7-pip trailing stop only starts trailing
-   // once the position is running 7 pips in profit); InpTrailingActivationPips can still
-   // require MORE favourable movement than that if set higher, it just can no longer
-   // require less.
+   // than the trailing distance itself (e.g. a trailing stop only starts trailing once
+   // the position is running the full trailing distance in profit);
+   // InpTrailingActivationPips can still require MORE favourable movement than that if
+   // set higher, it just can no longer require less.
    double activationDistance=MathMax(trailDistance,
       MathMax(_Point,MathMax(0.0,InpTrailingActivationPips)*strategyPip));
-   double presetDistance=MathMax(0.1,InpPresetStopLossPips)*strategyPip;
+   double presetDistance=atrExitDistance;
    double minimumStep=MathMax(_Point,MathMax(0.1,InpTrailingStepPips)*strategyPip);
 
    for(int p=PositionsTotal()-1;p>=0;p--)
@@ -2613,6 +2656,40 @@ double ATRFromRates(MqlRates &r[],int total,int period,int shift)
       atr=(atr*(period-1)+tr)/period;
    }
    return atr;
+}
+
+// Same exit-distance logic as EzyEA V1 XAUUSD: SL/trailing distance scales
+// with current M5 ATR instead of a fixed pip count. Falls back to the
+// fixed InpPresetStopLossPips distance whenever ATR data isn't ready yet,
+// so a trade never opens (or trails) with a zero/undefined distance.
+double AtrBasedExitDistance()
+{
+   double fallback=MathMax(0.1,InpPresetStopLossPips)*StrategyPipSize();
+
+   if(!InpUseAtrBasedStops)
+      return fallback;
+
+   datetime barTime=iTime(_Symbol,PERIOD_M5,0);
+   if(barTime!=0 && barTime==g_atrExitDistanceCacheBar && g_atrExitDistanceCache>0.0)
+      return g_atrExitDistanceCache;
+
+   MqlRates rates[];
+   if(!LoadRatesFlexible(PERIOD_M5,InpAtrPeriodExit+10,InpAtrPeriodExit+6,rates))
+      return fallback;
+
+   double atr=ATRFromRates(rates,ArraySize(rates),InpAtrPeriodExit,1);
+   if(atr==EMPTY_VALUE || atr<=0.0)
+      return fallback;
+
+   double distance=MathMax(_Point,InpAtrSlMultiplierExit*atr);
+
+   if(barTime!=0)
+   {
+      g_atrExitDistanceCache=distance;
+      g_atrExitDistanceCacheBar=barTime;
+   }
+
+   return distance;
 }
 
 bool Near(double a,double b,double tol) { return MathAbs(a-b)<=tol; }
@@ -7295,7 +7372,7 @@ bool PlacePersistentLayer(PersistentReadySetup &setup,
    double tp=InpUseTakeProfit
              ? BrokerSafeExecutionTP(setup.direction,estimatedEntry,requestedTP)
              : 0.0;
-   double exactDistance=MathMax(0.1,InpPresetStopLossPips)*StrategyPipSize();
+   double exactDistance=AtrBasedExitDistance();
    double exactSL=RoundPrice(setup.direction==1 ? estimatedEntry-exactDistance
                                                 : estimatedEntry+exactDistance);
    double brokerSL=BrokerSafeExecutionSL(setup.direction,estimatedEntry,exactSL);
@@ -8440,7 +8517,7 @@ bool BuildForcedZeroConfluenceMarketPlan(PersistentReadySetup &setup,LayerPlan &
 
    int direction=setup.direction;
    double marketPrice=(direction==1)?tick.ask:tick.bid;
-   double exactDistance=MathMax(0.1,InpPresetStopLossPips)*StrategyPipSize();
+   double exactDistance=AtrBasedExitDistance();
 
    setup.structuralSL=RoundPrice(direction==1
                                 ? marketPrice-exactDistance
@@ -10396,7 +10473,9 @@ int OnInit()
           " | max open positions="+IntegerToString(InpLiveCentMaximumOpenPositions)+
           " | market-only compatibility input="+string(InpLiveCentMarketOnly?"YES (ignored by V3.024)":"NO")+
           " | TP=NONE"+
-          " | preset SL="+DoubleToString(InpPresetStopLossPips,0)+" pips"+
+          " | preset SL="+(InpUseAtrBasedStops
+                           ?("ATR("+IntegerToString(InpAtrPeriodExit)+")x"+DoubleToString(InpAtrSlMultiplierExit,2))
+                           :(DoubleToString(InpPresetStopLossPips,0)+" pips"))+
           " | trailing="+string(InpEnableTrailingAfterEntry?"ON":"OFF"));
 
       string environmentReason="";
@@ -10447,13 +10526,17 @@ int OnInit()
        DoubleToString(InpDailyVolumeTargetMinLots,2)+"-"+
        DoubleToString(InpDailyVolumeTargetMaxLots,2)+
        " lots; signals are never fabricated to hit the target.");
-   Log("EXIT PROFILE: TP=NONE | preset SL="+
-       DoubleToString(InpPresetStopLossPips,0)+
-       " pips | trailing distance="+
-       DoubleToString(InpTrailingDistancePips,0)+" pips.");
+   Log("EXIT PROFILE: TP=NONE | "+
+       (InpUseAtrBasedStops
+        ?("SL and trailing distance = ATR("+IntegerToString(InpAtrPeriodExit)+
+          ")x"+DoubleToString(InpAtrSlMultiplierExit,2)+" (same exit logic as EzyEA V1)")
+        :("preset SL="+DoubleToString(InpPresetStopLossPips,0)+
+          " pips | trailing distance="+DoubleToString(InpTrailingDistancePips,0)+" pips")));
    Log("PRESET PROTECTION: every route requests "+
-       DoubleToString(InpPresetStopLossPips,0)+
-       " strategy-pip SL; virtual fallback remains active.");
+       (InpUseAtrBasedStops
+        ?("an ATR-based SL (fallback "+DoubleToString(InpPresetStopLossPips,0)+" pips if ATR unavailable)")
+        :(DoubleToString(InpPresetStopLossPips,0)+" strategy-pip SL"))+
+       "; virtual fallback remains active.");
    Log("ENTRY LOGIC: original V2.009M H4 SNR > M15 overlap > M3 reversal > M5 READY retained; active fallback="+
        string(InpActiveSignalMode?"ON":"OFF")+".");
    Log("Smart execution: MARKET/LIMIT/STOP selection="+
