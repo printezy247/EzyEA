@@ -63,9 +63,29 @@
 //|         total portfolio margin usage self-limits at                |
 //|         InpMaxMarginUsePct regardless of how many positions are    |
 //|         already open, instead of only checking one trade at a time.|
+//| 2.004 - Confirmed live: margin call STILL happened on a different,  |
+//|         more strongly trending test date even with the portfolio   |
+//|         margin fix. Root cause is structural, not a sizing bug: V2  |
+//|         has zero trend awareness by design (that's the whole point |
+//|         of dropping ADX), so on a hard trending day it can fade the |
+//|         same direction at level after level, piling up many        |
+//|         correlated losers that all move against the account        |
+//|         together - a margin cap on NEW trades can't do anything     |
+//|         about floating losses on trades already open. Two          |
+//|         complementary fixes, neither reintroducing trend detection |
+//|         into the entry logic itself: (1) InpMaxConcurrentPerDirection|
+//|         (15) caps how many BUY (or SELL) positions can be open at   |
+//|         once, directly limiting the worst-case same-direction       |
+//|         pileup. (2) A drawdown circuit breaker tracks equity's peak |
+//|         since attach and halts ALL new entries once floating+       |
+//|         realized drawdown crosses InpMaxEquityDrawdownPct (15%),    |
+//|         resuming with hysteresis once it recovers to half that -    |
+//|         existing positions keep trailing normally, only new entries |
+//|         pause. This is the hard backstop against margin calls       |
+//|         regardless of what's driving the drawdown.                 |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "2.003"
+#property version   "2.004"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -122,6 +142,14 @@ input group "=== Risk / Sizing ==="
 // above the floor instead of flatlining there every time.
 input double InpRiskPercentPerTrade         = 2.5;
 input int    InpMaxConcurrentPositions      = 50;
+// Confirmed live: on a strongly trending day, V2's level-touch entries
+// have no trend awareness at all (that's the whole point of dropping ADX
+// for V2), so they can pile up many SAME-DIRECTION fades against a real
+// trend, all losing together. A total concurrency cap alone doesn't stop
+// that pileup if every open slot ends up the same direction - this caps
+// how many BUY (or SELL) positions can be open at once, independent of
+// the total cap.
+input int    InpMaxConcurrentPerDirection   = 15;
 input double InpMaxLotsAbsolute             = 5.0;
 input double InpMaxMarginUsePct             = 40.0;
 // On a small account, the broker's minimum lot can itself risk more than
@@ -136,6 +164,21 @@ input double InpMaxMarginUsePct             = 40.0;
 // it's meant to backstop.
 input bool   InpAllowMinimumLotFallback     = true;
 input double InpMinimumLotFallbackMaxRiskPct = 3.0;
+
+input group "=== Drawdown Circuit Breaker ==="
+// Confirmed live: even with a portfolio-level margin cap, floating losses
+// across many already-open correlated positions can crash equity fast
+// enough to trigger a margin call without any single new trade being too
+// big - the margin cap only limits NEW trades, it can't do anything about
+// existing ones moving against the account. This tracks equity's peak
+// since attach and halts ALL new entries once floating+realized drawdown
+// from that peak crosses the threshold - existing positions keep trailing
+// normally, only new entries pause. Resumes once drawdown recovers back
+// to InpDrawdownResumeFactor x the trigger threshold (hysteresis, so it
+// doesn't flap on/off right at the boundary).
+input bool   InpEnableDrawdownBreaker       = true;
+input double InpMaxEquityDrawdownPct        = 15.0;
+input double InpDrawdownResumeFactor        = 0.5;
 
 input group "=== Modify Backoff (TimeCurrent()-based, never GetTickCount64) ==="
 input int    InpModifyBackoffBaseSeconds    = 5;
@@ -213,6 +256,10 @@ int g_gateSpreadRejects      = 0;
 int g_gateConcurrencyRejects = 0;
 int g_gateDistanceRejects    = 0;
 int g_gateSizingRejects      = 0;
+int g_gateDrawdownRejects    = 0;
+
+double g_peakEquity          = 0.0;
+bool   g_tradingHalted       = false;
 
 // 6 timeframes (M5/M15/H1/H4/D1/W1) x 2 levels (swing high=supply,
 // swing low=demand) each.
@@ -260,6 +307,8 @@ double MedianOfSpreadSamples(double &values[],int count);
 bool   SpreadAllowed();
 
 int    CountOpenPositions();
+int    CountOpenPositionsByDirection(int direction);
+void   UpdateDrawdownBreaker();
 
 int    CopyBufferSeries(int handle,int bufferIndex,int count,double &out[]);
 
@@ -332,10 +381,16 @@ int OnInit()
    g_hasPreviousCMP=false;
    g_previousCMP=0.0;
 
+   g_peakEquity=AccountInfoDouble(ACCOUNT_EQUITY);
+   g_tradingHalted=false;
+
    Log("EzyEA V2 initialized on "+_Symbol+
        " | account unit divisor="+DoubleToString(g_accountUnitDivisor,2)+
        " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
        " | max concurrent="+IntegerToString(InpMaxConcurrentPositions)+
+       " (per-direction="+IntegerToString(InpMaxConcurrentPerDirection)+")"+
+       " | drawdown breaker="+string(InpEnableDrawdownBreaker?"ON":"OFF")+
+       " at "+DoubleToString(InpMaxEquityDrawdownPct,1)+"%"+
        " | SND levels=M5/M15/H1/H4/D1/W1 (12 total)");
 
    return INIT_SUCCEEDED;
@@ -352,6 +407,8 @@ void OnDeinit(const int reason)
 
 void OnTick()
 {
+   UpdateDrawdownBreaker();
+
    if(InpEnableLevelTouchEntries)
    {
       UpdateLevelsOnNewBars();
@@ -679,6 +736,64 @@ int CountOpenPositions()
    return count;
 }
 
+int CountOpenPositionsByDirection(int direction)
+{
+   int count=0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+
+      int posDirection=((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)?1:-1;
+      if(posDirection==direction) count++;
+   }
+   return count;
+}
+
+//======================================================================
+// Drawdown circuit breaker: halts new entries once floating+realized
+// drawdown from the peak equity seen since attach crosses the threshold.
+// Existing positions are untouched - ManageTrailing() keeps managing them
+// normally - only new entries pause. Resumes with hysteresis so it
+// doesn't flap on/off right at the boundary.
+//======================================================================
+void UpdateDrawdownBreaker()
+{
+   if(!InpEnableDrawdownBreaker)
+   {
+      g_tradingHalted=false;
+      return;
+   }
+
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   if(equity<=0.0) return;
+
+   g_peakEquity=MathMax(g_peakEquity,equity);
+   if(g_peakEquity<=0.0) return;
+
+   double drawdownPct=(g_peakEquity-equity)/g_peakEquity*100.0;
+   double resumeThreshold=InpMaxEquityDrawdownPct*MathMax(0.0,MathMin(1.0,InpDrawdownResumeFactor));
+
+   if(!g_tradingHalted && drawdownPct>=InpMaxEquityDrawdownPct)
+   {
+      g_tradingHalted=true;
+      Log("DRAWDOWN BREAKER TRIPPED - new entries halted"+
+          " | drawdown="+DoubleToString(drawdownPct,2)+"%"+
+          " | peakEquity="+DoubleToString(g_peakEquity,2)+
+          " | equity="+DoubleToString(equity,2));
+   }
+   else if(g_tradingHalted && drawdownPct<=resumeThreshold)
+   {
+      g_tradingHalted=false;
+      Log("DRAWDOWN BREAKER RESET - new entries resumed"+
+          " | drawdown="+DoubleToString(drawdownPct,2)+"%"+
+          " | resumeThreshold="+DoubleToString(resumeThreshold,2)+"%");
+   }
+}
+
 //======================================================================
 // Indicator buffer helper (as-series: out[0]=forming bar, out[1]=last
 // closed bar, out[2]=the bar before it)
@@ -698,7 +813,19 @@ void TryOpenPosition(int direction,string tag,double slDistance)
 {
    g_gateAttempts++;
 
+   if(g_tradingHalted)
+   {
+      g_gateDrawdownRejects++;
+      return;
+   }
+
    if(CountOpenPositions()>=InpMaxConcurrentPositions)
+   {
+      g_gateConcurrencyRejects++;
+      return;
+   }
+
+   if(CountOpenPositionsByDirection(direction)>=InpMaxConcurrentPerDirection)
    {
       g_gateConcurrencyRejects++;
       return;
@@ -1074,9 +1201,10 @@ void DrawLevels()
 void DrawStatusLabel()
 {
    string name="V2_StatusLabel";
-   string text=StringFormat("EzyEA V2 | SND levels active=%d/%d | Open=%d/%d",
+   string text=StringFormat("EzyEA V2 | SND levels active=%d/%d | Open=%d/%d | %s",
                 CountActiveLevels(),ArraySize(g_levels),
-                CountOpenPositions(),InpMaxConcurrentPositions);
+                CountOpenPositions(),InpMaxConcurrentPositions,
+                g_tradingHalted?"HALTED (drawdown breaker)":"ACTIVE");
 
    if(ObjectFind(0,name)<0)
    {
@@ -1089,7 +1217,7 @@ void DrawStatusLabel()
    }
 
    ObjectSetString(0,name,OBJPROP_TEXT,text);
-   ObjectSetInteger(0,name,OBJPROP_COLOR,clrWhite);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,g_tradingHalted?clrOrange:clrWhite);
 }
 
 int CountActiveLevels()
@@ -1121,9 +1249,13 @@ void PeriodicStatusLog()
    if(g_lastStatusLogTime>0 && now-g_lastStatusLogTime<InpStatusLogIntervalSeconds) return;
    g_lastStatusLogTime=now;
 
+   double equityNow=AccountInfoDouble(ACCOUNT_EQUITY);
+   double drawdownPctNow=(g_peakEquity>0.0)?(g_peakEquity-equityNow)/g_peakEquity*100.0:0.0;
+
    Log("V2 LIVE PARITY STATUS"+
        " | SND levels active="+IntegerToString(CountActiveLevels())+"/"+IntegerToString(ArraySize(g_levels))+
        " | open="+IntegerToString(CountOpenPositions())+"/"+IntegerToString(InpMaxConcurrentPositions)+
+       " | drawdown="+DoubleToString(drawdownPctNow,2)+"%"+(g_tradingHalted?" (HALTED)":"")+
        " | equity="+DoubleToString(EffectiveAccountEquity(),2)+" "+AccountInfoString(ACCOUNT_CURRENCY));
 
    Log("V2 DEPLOYMENT GATE BREAKDOWN"+
@@ -1133,7 +1265,8 @@ void PeriodicStatusLog()
        " | spreadRejects="+IntegerToString(g_gateSpreadRejects)+
        " | concurrencyRejects="+IntegerToString(g_gateConcurrencyRejects)+
        " | distanceRejects="+IntegerToString(g_gateDistanceRejects)+
-       " | sizingRejects="+IntegerToString(g_gateSizingRejects));
+       " | sizingRejects="+IntegerToString(g_gateSizingRejects)+
+       " | drawdownRejects="+IntegerToString(g_gateDrawdownRejects));
 }
 
 // Summarizes this EA's own deal history (by symbol+magic, so it never
