@@ -79,6 +79,24 @@
 //  stops] is visible in the journal on the next run regardless of     |
 //  whether entries succeed.                                           |
 //                                                                    |
+//  CORRECTION (v5.3, third tester run): the drawn level lines were     |
+//  confirmed visible and price visibly crossed them repeatedly, but    |
+//  still zero trades appeared on the chart - consistent with the      |
+//  v5.2 broker-side [invalid stops] rejection continuing to occur      |
+//  silently (removing the pre-check in v5.2 stopped the EA from        |
+//  blocking itself, but never made the broker accept a genuinely too-  |
+//  tight fixed 25-pip SL). FIX: added MinimumBrokerDistance(), which   |
+//  WIDENS the SL/TP to the broker's real minimum (SYMBOL_TRADE_STOPS_  |
+//  LEVEL/FREEZE_LEVEL plus a small cushion, with the same zero-stops-  |
+//  level percentage-of-price fallback used elsewhere this session)     |
+//  instead of rejecting or skipping the trade - this is NOT a          |
+//  reintroduced filter, since nothing is ever blocked; it only         |
+//  changes the price used so the request the broker actually accepts. |
+//  Also added an unconditional "V5 TOUCH" log at the exact moment a    |
+//  level's edge-trigger condition fires, BEFORE any gate or order-     |
+//  send outcome, so touch detection itself can never again be          |
+//  ambiguous from the journal regardless of what happens afterward.    |
+//                                                                    |
 //  NOT YET VERIFIED: compiles in MetaEditor (no MQL5 toolchain in     |
 //  this environment), or real trading performance. Verified here:    |
 //  brace/paren/bracket balance, and a manual audit that every input   |
@@ -87,7 +105,7 @@
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
 #property link      ""
-#property version   "5.2"
+#property version   "5.3"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -186,6 +204,7 @@ double RoundPrice(double v);
 int    VolumeDigits();
 double NormalizeVolumeDown(double vol);
 double ComputeCapitalScaledLot();
+double MinimumBrokerDistance(double referencePrice);
 bool   TradeRetcodeAccepted(uint code);
 bool   TemporaryTradeRetcode(uint code);
 void   Log(string msg);
@@ -314,6 +333,30 @@ double ComputeCapitalScaledLot()
       lots=minVol;
 
    return NormalizeVolumeDown(lots)>0.0?lots:0.0;
+}
+
+// v5.3: the broker's real minimum clearance for a stop/limit price from
+// the current market price. Unlike the execution-distance CHECK removed
+// in v5.2 (which rejected/skipped a touch outright), this never blocks a
+// trade - it only tells TryFireLevel how far the fixed SL/TP may need to
+// be WIDENED to actually get accepted, which directly serves maximum
+// trigger frequency (a request the broker will reject is zero frequency,
+// not a safe default). Includes the same zero-stops-level percentage-of-
+// price fallback used elsewhere in this codebase: some brokers report
+// SYMBOL_TRADE_STOPS_LEVEL/FREEZE_LEVEL as 0 while still enforcing a real,
+// wider minimum server-side.
+double MinimumBrokerDistance(double referencePrice)
+{
+   long stopsLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
+   long freezeLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL);
+
+   double reported=MathMax(_Point,((double)MathMax(stopsLevel,freezeLevel)+2)*_Point);
+
+   double fallback=0.0;
+   if(stopsLevel<=0 && freezeLevel<=0 && referencePrice>0.0)
+      fallback=referencePrice*0.05/100.0;
+
+   return MathMax(reported,fallback);
 }
 
 //------------------------------ Retcode classification --------------------
@@ -554,8 +597,24 @@ bool TryFireLevel(int levelIndex,int direction)
    double slDistance=MathMax(0.1,InpStopLossPips)*g_pipSize;
    double tpDistance=MathMax(0.1,InpTakeProfitPips)*g_pipSize;
 
-   double sl=RoundPrice(direction==1?entryPrice-slDistance:entryPrice+slDistance);
-   double tp=RoundPrice(direction==1?entryPrice+tpDistance:entryPrice-tpDistance);
+   double sl=direction==1?entryPrice-slDistance:entryPrice+slDistance;
+   double tp=direction==1?entryPrice+tpDistance:entryPrice-tpDistance;
+
+   // v5.3: widen (never reject) if the fixed pip distance is tighter than
+   // what this broker will actually accept - see the header CORRECTION.
+   double minDist=MinimumBrokerDistance(entryPrice);
+   if(direction==1)
+   {
+      sl=MathMin(sl,entryPrice-minDist);
+      tp=MathMax(tp,entryPrice+minDist);
+   }
+   else
+   {
+      sl=MathMax(sl,entryPrice+minDist);
+      tp=MathMin(tp,entryPrice-minDist);
+   }
+   sl=RoundPrice(sl);
+   tp=RoundPrice(tp);
 
    double lots=ComputeCapitalScaledLot();
    if(lots<=0.0)
@@ -665,6 +724,15 @@ void ProcessLevelTouches()
          // lastSide==+1: price was above the level, just fell into it -
          //   "cmp touch the level below it" -> BUY (direction=+1).
          int direction=(g_levels[i].lastSide==-1)?-1:1;
+
+         // v5.3: unconditional log at the moment of touch, BEFORE any gate
+         // or order-send outcome, so touch detection itself is never
+         // ambiguous in the journal regardless of what happens next.
+         Log("V5 TOUCH | level="+DoubleToString(lvl,_Digits)+
+             " (tf="+EnumToString(g_levels[i].sourceTf)+")"+
+             " | direction="+(direction==1?"BUY":"SELL")+
+             " | price="+DoubleToString(refPrice,_Digits));
+
          TryFireLevel(i,direction);
       }
 
