@@ -50,9 +50,22 @@
 //|         Pct 1.0->3.0 to stay above the new target risk - otherwise  |
 //|         an outlier-wide ATR stop could make the safety-net fallback |
 //|         MORE restrictive than the primary risk target it backstops.|
+//| 2.003 - 2.5% risk confirmed working (15 lots, no issue). 5% risk    |
+//|         triggered a real margin call - traced to a genuine gap,    |
+//|         not just "risk too high": ComputeLotsForRisk()'s margin    |
+//|         check only validated each NEW trade in isolation against a |
+//|         % of equity. With up to InpMaxConcurrentPositions (50) open |
+//|         at once, each one could individually pass that check while |
+//|         their COMBINED margin usage kept climbing past what the    |
+//|         account could support. Fixed: the cap now applies to       |
+//|         AccountInfoDouble(ACCOUNT_MARGIN) (every other open         |
+//|         position's margin) PLUS this trade's margin together, so   |
+//|         total portfolio margin usage self-limits at                |
+//|         InpMaxMarginUsePct regardless of how many positions are    |
+//|         already open, instead of only checking one trade at a time.|
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "2.002"
+#property version   "2.003"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -504,10 +517,25 @@ double ComputeLotsForRisk(int direction,double entry,double sl)
    ENUM_ORDER_TYPE type=(direction==1)?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
    if(OrderCalcMargin(type,_Symbol,lots,entry,marginRequired))
    {
-      if(equity>0.0 && marginRequired>0.0 && (marginRequired/equity)*100.0>InpMaxMarginUsePct)
+      // Portfolio-level cap, not just this one trade: with up to
+      // InpMaxConcurrentPositions open at once, each individually passing
+      // a per-trade-only check still let COMBINED margin usage climb past
+      // what the account could support - confirmed live as the real cause
+      // of a margin call at 5% risk. usedMargin already reflects every
+      // other open position; the cap now applies to usedMargin+this
+      // trade's margin together, so it self-limits regardless of how many
+      // positions are already open.
+      double usedMargin=AccountInfoDouble(ACCOUNT_MARGIN);
+      double projectedMarginPct=(equity>0.0)
+                                ?((usedMargin+marginRequired)/equity)*100.0
+                                :DBL_MAX;
+
+      if(projectedMarginPct>InpMaxMarginUsePct)
       {
-         double scale=(InpMaxMarginUsePct/100.0*equity)/marginRequired;
-         lots=NormalizeVolumeDown(lots*scale);
+         double remainingBudget=MathMax(0.0,InpMaxMarginUsePct/100.0*equity-usedMargin);
+         lots=(remainingBudget<=0.0 || marginRequired<=0.0)
+              ?0.0
+              :NormalizeVolumeDown(lots*(remainingBudget/marginRequired));
       }
 
       double freeMargin=AccountInfoDouble(ACCOUNT_MARGIN_FREE);
