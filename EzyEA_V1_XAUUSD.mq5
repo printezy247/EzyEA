@@ -76,9 +76,23 @@
 //|         range entries), and widened the trend-entry EMA touch     |
 //|         window from the last 2 closed bars to the last 3. Risk    |
 //|         model, SL/TP structure, and position sizing untouched.    |
+//| 1.005 - Trade count barely moved (21->22) because the test window |
+//|         was one persistent uptrend the whole time: only ONE       |
+//|         pattern type is ever live at once (regime picks either    |
+//|         continuation OR mean-reversion), so 1.004's band/window   |
+//|         loosening had nothing to act on for most of the run. User |
+//|         asked for maximum frequency now, drawdown filter to be    |
+//|         tuned later. Restructured EvaluateEntries(): while         |
+//|         TRENDING, the Bollinger touch-and-reclaim pattern now ALSO|
+//|         fires as a trend-aligned pullback dip-buy alongside the   |
+//|         continuation pattern - not a counter-trend fade (only     |
+//|         accepted when it agrees with g_trendDirection), roughly   |
+//|         doubling the entry surface on trending days. Raised        |
+//|         InpMaxConcurrentPositions 6->10 so the higher signal rate |
+//|         isn't immediately capped out.                             |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.004"
+#property version   "1.005"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -119,7 +133,7 @@ input double InpAtrSlMultiplier             = 1.5;
 
 input group "=== Risk / Sizing ==="
 input double InpRiskPercentPerTrade         = 0.25;
-input int    InpMaxConcurrentPositions      = 6;
+input int    InpMaxConcurrentPositions      = 10;
 input double InpMaxLotsAbsolute             = 5.0;
 // On a small account, the broker's minimum lot can itself risk more than
 // InpRiskPercentPerTrade at a wide ATR-based SL (confirmed live: XAUUSD's
@@ -254,6 +268,7 @@ void   UpdateRegimeOnNewH1Bar();
 bool   UpdateOnNewM5Bar();
 bool   EvaluateRangeEntry(int &direction);
 bool   EvaluateTrendEntry(int &direction);
+void   OpenRangeSignal(int direction,double slDistance);
 void   EvaluateEntries();
 void   TryOpenPosition(int direction,string tag,double slDistance,double initialTp);
 
@@ -771,6 +786,16 @@ bool EvaluateTrendEntry(int &direction)
    return false;
 }
 
+void OpenRangeSignal(int direction,double slDistance)
+{
+   double baseBuf[];
+   double initialTp=0.0;
+   if(CopyBufferSeries(g_handleBandsM5,0,3,baseBuf)>=3)
+      initialTp=RoundPrice(baseBuf[1]);
+
+   TryOpenPosition(direction,"V1R",slDistance,initialTp);
+}
+
 void EvaluateEntries()
 {
    double atrBuf[];
@@ -779,23 +804,27 @@ void EvaluateEntries()
    double slDistance=InpAtrSlMultiplier*atrBuf[1];
    if(slDistance<=0.0) return;
 
-   int direction=0;
-
-   if(g_regime==REGIME_RANGING)
+   if(g_regime==REGIME_TRENDING)
    {
-      if(!EvaluateRangeEntry(direction)) return;
+      int trendDir=0;
+      if(EvaluateTrendEntry(trendDir))
+         TryOpenPosition(trendDir,"V1T",slDistance,0.0);
 
-      double baseBuf[];
-      double initialTp=0.0;
-      if(CopyBufferSeries(g_handleBandsM5,0,3,baseBuf)>=3)
-         initialTp=RoundPrice(baseBuf[1]);
-
-      TryOpenPosition(direction,"V1R",slDistance,initialTp);
+      // A pullback dip bought WITH the trend is not a counter-trend fade,
+      // so the same Bollinger touch-and-reclaim pattern is also live here -
+      // but only when it agrees with the prevailing trend direction, never
+      // against it. This is the single biggest frequency lever: on a
+      // strongly trending day only the continuation pattern was ever live,
+      // and it alone only qualifies on a small fraction of bars.
+      int rangeDir=0;
+      if(EvaluateRangeEntry(rangeDir) && rangeDir==g_trendDirection)
+         OpenRangeSignal(rangeDir,slDistance);
    }
    else
    {
-      if(!EvaluateTrendEntry(direction)) return;
-      TryOpenPosition(direction,"V1T",slDistance,0.0);
+      int rangeDir=0;
+      if(EvaluateRangeEntry(rangeDir))
+         OpenRangeSignal(rangeDir,slDistance);
    }
 }
 
