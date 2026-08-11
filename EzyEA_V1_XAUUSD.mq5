@@ -64,9 +64,21 @@
 //|         WriteFinalReport(): total trades / total lots traded /    |
 //|         net P/L from this EA's own deal history (by symbol+magic),|
 //|         printed from OnDeinit() alongside the run's final balance.|
+//| 1.004 - User asked for 30-70 lots/day on the $1000 tester account,|
+//|         explicitly keeping risk-per-trade conservative (declined  |
+//|         the V3/V4-style aggressive sizing tradeoff). At the       |
+//|         0.01-lot floor that nearly every trade hits on this       |
+//|         account size, that's a trade-COUNT target (~30-70         |
+//|         trades/day), not a total-lot-volume one - 100 trades/day  |
+//|         at 0.01 lots is still only 1.0 lot of volume. Pushed      |
+//|         frequency further toward that: InpBandsDeviation 2.0->1.5 |
+//|         (narrower bands = far more frequent wick touches for      |
+//|         range entries), and widened the trend-entry EMA touch     |
+//|         window from the last 2 closed bars to the last 3. Risk    |
+//|         model, SL/TP structure, and position sizing untouched.    |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.003"
+#property version   "1.004"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -96,7 +108,7 @@ input double InpAdxTrendThreshold           = 20.0;
 
 input group "=== Range Entries: M5 Bollinger Mean-Reversion ==="
 input int    InpBandsPeriod                 = 20;
-input double InpBandsDeviation              = 2.0;
+input double InpBandsDeviation              = 1.5;
 
 input group "=== Trend Entries: M5 EMA20 Pullback Continuation ==="
 input int    InpEmaPeriod                   = 20;
@@ -724,22 +736,24 @@ bool EvaluateTrendEntry(int &direction)
    if(g_trendDirection==0) return false;
 
    double emaBuf[];
-   if(CopyBufferSeries(g_handleEmaM5,0,3,emaBuf)<3) return false;
+   if(CopyBufferSeries(g_handleEmaM5,0,4,emaBuf)<4) return false;
 
    double close1=iClose(_Symbol,PERIOD_M5,1);
    double low1  =iLow(_Symbol,PERIOD_M5,1);
    double high1 =iHigh(_Symbol,PERIOD_M5,1);
    double low2  =iLow(_Symbol,PERIOD_M5,2);
    double high2 =iHigh(_Symbol,PERIOD_M5,2);
+   double low3  =iLow(_Symbol,PERIOD_M5,3);
+   double high3 =iHigh(_Symbol,PERIOD_M5,3);
 
    if(g_trendDirection==1)
    {
-      // Pulled back to/through EMA20 against the uptrend (on either of the
-      // last two closed bars) and reclaimed it on the close -> continuation
+      // Pulled back to/through EMA20 against the uptrend (on any of the
+      // last three closed bars) and reclaimed it on the close -> continuation
       // BUY. Dropped the extra "closed higher than the prior bar" filter -
       // the EMA reclaim on the close is already the real confirmation, and
       // requiring both roughly halved how often a valid pullback qualified.
-      if((low2<=emaBuf[2] || low1<=emaBuf[1]) && close1>emaBuf[1])
+      if((low3<=emaBuf[3] || low2<=emaBuf[2] || low1<=emaBuf[1]) && close1>emaBuf[1])
       {
          direction=1;
          return true;
@@ -747,7 +761,7 @@ bool EvaluateTrendEntry(int &direction)
    }
    else
    {
-      if((high2>=emaBuf[2] || high1>=emaBuf[1]) && close1<emaBuf[1])
+      if((high3>=emaBuf[3] || high2>=emaBuf[2] || high1>=emaBuf[1]) && close1<emaBuf[1])
       {
          direction=-1;
          return true;
