@@ -1,6 +1,6 @@
 //+------------------------------------------------------------------+
 //| EzyMap Scalp Mastery V3.116 - SELL 1/2 + M1 Equal Score          |
-//| High-frequency dual READY + live-cent parity + no TP / 30-pip preset SL / 10-pip trailing stop. |
+//| High-frequency dual READY + live-cent parity + no TP / 21-pip preset SL / 7-pip trailing stop. |
 //| H4 SNR -> M15 HIGH RISK -> M3 reversal -> M5 READY -> CMP layers. |
 //+------------------------------------------------------------------+
 //                                                                    |
@@ -134,7 +134,7 @@
 //     InpTrailBackoffCooldownCapMs.                                   |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "3.122"
+#property version   "3.123"
 
 #include <Trade/Trade.mqh>
 
@@ -649,7 +649,7 @@ input double InpLayer2TakeProfitR              = 0.55;
 // a visible broker SL exactly 30 strategy pips from its entry. If the broker
 // rejects that SL with the opening request, the route is retried without SL
 // and the exact virtual stop protects it immediately after fill. No TP is used.
-input double InpPresetStopLossPips          = 30.0;
+input double InpPresetStopLossPips          = 21.0;
 input bool   InpRetryEntryWithoutSLOnReject = true;
 
 // V3.116 broker/virtual protection with no TP, a 30-pip preset SL and a 10-pip trailing stop.
@@ -663,7 +663,7 @@ input bool   InpRetryEntryWithoutSLOnReject = true;
 input bool   InpUseFixedPipTrail               = true;
 input bool   InpEnableTrailingAfterEntry        = true;  // trail after first favourable broker point
 input double InpTrailingActivationPips         = 0.0;
-input double InpTrailingDistancePips           = 10.0;
+input double InpTrailingDistancePips           = 7.0;
 input double InpTrailingStepPips               = 1.0;
 input bool   InpUseVirtualTrailFallback        = true;
 input bool   InpReconstructTrailFromM1         = true;
