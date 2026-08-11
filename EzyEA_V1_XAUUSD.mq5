@@ -109,9 +109,28 @@
 //|         with a drawdown/quality filter to be layered back on      |
 //|         later. Raised InpMaxConcurrentPositions 10->20 so this     |
 //|         much higher signal rate has room to convert into trades.  |
+//| 1.007 - User attached the old EzyMap "EVERY_ZERO_CONF_LEVEL_NO_    |
+//|         ENTRY_GOVERNORS" build and asked V1 to learn from its      |
+//|         trigger approach: track multi-timeframe swing highs/lows   |
+//|         and fire an immediate fade on ANY tick touch, no reclaim   |
+//|         or confluence at all. Added as a new, independent entry    |
+//|         source (tag "V1L"): 8 static levels (H1/H4/D1/W1 swing     |
+//|         high=resistance + swing low=support), rebuilt only on      |
+//|         each level's own timeframe bar close, checked every tick   |
+//|         using the same previous-vs-current-tick envelope-crossing  |
+//|         check this session already proved catches fast moves a     |
+//|         single-tick snapshot misses. Edge-triggered (fires once     |
+//|         per zone entry, not repeatedly while sitting inside it)     |
+//|         plus a TimeCurrent()-based re-entry cooldown per level.     |
+//|         Routes through the existing TryOpenPosition() pipeline, so  |
+//|         it inherits the same ATR-based SL, 0.25%-risk sizing with   |
+//|         minimum-lot fallback, spread guard, and concurrency cap     |
+//|         unchanged. Generalized ManageTrendTrailing() to trail any   |
+//|         tag that isn't "V1R" (previously hardcoded to "V1T" only)   |
+//|         so "V1L" positions get managed too.                        |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.006"
+#property version   "1.007"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -145,6 +164,24 @@ input double InpBandsDeviation              = 1.5;
 
 input group "=== Trend Entries: M5 EMA20 Pullback Continuation ==="
 input int    InpEmaPeriod                   = 20;
+
+input group "=== Level-Touch Entries: multi-timeframe S/R, raw touch, no confluence ==="
+// Learned from the old EzyMap "EVERY_ZERO_CONF_LEVEL_NO_ENTRY_GOVERNORS"
+// build per explicit user request: track a handful of swing high/low
+// levels across H1/H4/D1/W1 and fire an immediate fade on ANY tick that
+// touches one, with no reclaim/confirmation requirement at all - the
+// highest-frequency trigger source in this file by design. Levels rebuild
+// only on that timeframe's own new bar close (never intra-bar), matching
+// this session's standing rule for level-based EAs. Touch detection still
+// uses the previous-vs-current-tick envelope crossing check proven this
+// session, so a fast tick move through a level is never missed.
+input bool   InpEnableLevelTouchEntries     = true;
+input double InpLevelTouchTolerancePoints   = 30.0;
+input int    InpLevelReentrySeconds         = 60;
+input int    InpLevelLookbackH1             = 24;
+input int    InpLevelLookbackH4             = 30;
+input int    InpLevelLookbackD1             = 20;
+input int    InpLevelLookbackW1             = 12;
 
 input group "=== Stops (ATR-based, both regimes) ==="
 input int    InpAtrPeriod                   = 14;
@@ -214,6 +251,14 @@ struct ManagedPositionState
    double   peakPrice;
 };
 
+struct LevelTouchState
+{
+   double   price;
+   int      fadeDirection;   // 1 = support, fade BUY; -1 = resistance, fade SELL
+   bool     inZone;
+   datetime cooldownUntil;
+};
+
 //======================================================================
 // Globals
 //======================================================================
@@ -248,6 +293,18 @@ int g_gateSpreadRejects      = 0;
 int g_gateConcurrencyRejects = 0;
 int g_gateDistanceRejects    = 0;
 int g_gateSizingRejects      = 0;
+
+// 4 timeframes (H1/H4/D1/W1) x 2 levels (swing high=resistance, swing
+// low=support) each.
+LevelTouchState g_levels[8];
+
+datetime g_lastH1LevelBarTime = 0;
+datetime g_lastH4LevelBarTime = 0;
+datetime g_lastD1LevelBarTime = 0;
+datetime g_lastW1LevelBarTime = 0;
+
+bool   g_hasPreviousCMP = false;
+double g_previousCMP    = 0.0;
 
 //======================================================================
 // Forward declarations
@@ -297,6 +354,11 @@ void   ModifyPositionSafely(ulong ticket,double sl,double tp);
 void   UpdateRangeTakeProfits();
 void   ManageTrendTrailing();
 
+void   RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback);
+void   UpdateLevelsOnNewBars();
+void   TryLevelEntry(int direction,double levelPrice);
+void   ProcessLevelTouches();
+
 void   DrawSeriesLine(string prefix,double &values[],color clr);
 void   DrawStatusLabel();
 void   DrawChart();
@@ -345,6 +407,20 @@ int OnInit()
 
    ArrayResize(g_managed,0);
 
+   for(int i=0;i<ArraySize(g_levels);i++)
+   {
+      g_levels[i].price=0.0;
+      g_levels[i].fadeDirection=0;
+      g_levels[i].inZone=false;
+      g_levels[i].cooldownUntil=0;
+   }
+   g_lastH1LevelBarTime=0;
+   g_lastH4LevelBarTime=0;
+   g_lastD1LevelBarTime=0;
+   g_lastW1LevelBarTime=0;
+   g_hasPreviousCMP=false;
+   g_previousCMP=0.0;
+
    Log("EzyEA V1 initialized on "+_Symbol+
        " | account unit divisor="+DoubleToString(g_accountUnitDivisor,2)+
        " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
@@ -376,6 +452,12 @@ void OnTick()
       EvaluateEntries();
       UpdateRangeTakeProfits();
       DrawChart();
+   }
+
+   if(InpEnableLevelTouchEntries)
+   {
+      UpdateLevelsOnNewBars();
+      ProcessLevelTouches();
    }
 
    ManageTrendTrailing();
@@ -907,6 +989,141 @@ void TryOpenPosition(int direction,string tag,double slDistance,double initialTp
 }
 
 //======================================================================
+// Level-touch entries: multi-timeframe swing-high/low levels, raw tick
+// touch, no reclaim/confirmation - learned from the old EzyMap "every
+// zero-confluence level, no entry governors" build per explicit request.
+// Levels only rebuild on their OWN timeframe's new bar close, never
+// intra-bar. Touch detection uses the same previous-vs-current-tick
+// envelope crossing this session settled on, so a fast tick move through
+// a level is never missed.
+//======================================================================
+void RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback)
+{
+   double hi=-DBL_MAX, lo=DBL_MAX;
+
+   for(int shift=1;shift<=lookback;shift++)
+   {
+      double h=iHigh(_Symbol,tf,shift);
+      double l=iLow(_Symbol,tf,shift);
+      if(h<=0.0 || l<=0.0) continue;
+      hi=MathMax(hi,h);
+      lo=MathMin(lo,l);
+   }
+
+   if(hi<=-DBL_MAX || lo>=DBL_MAX) return;
+
+   int resIdx=slotIndex*2;
+   int supIdx=slotIndex*2+1;
+
+   g_levels[resIdx].price=RoundPrice(hi);
+   g_levels[resIdx].fadeDirection=-1;
+   g_levels[resIdx].inZone=false;
+   g_levels[resIdx].cooldownUntil=0;
+
+   g_levels[supIdx].price=RoundPrice(lo);
+   g_levels[supIdx].fadeDirection=1;
+   g_levels[supIdx].inZone=false;
+   g_levels[supIdx].cooldownUntil=0;
+}
+
+void UpdateLevelsOnNewBars()
+{
+   datetime h1=iTime(_Symbol,PERIOD_H1,0);
+   if(h1!=0 && h1!=g_lastH1LevelBarTime)
+   {
+      g_lastH1LevelBarTime=h1;
+      RebuildLevelForTimeframe(0,PERIOD_H1,InpLevelLookbackH1);
+   }
+
+   datetime h4=iTime(_Symbol,PERIOD_H4,0);
+   if(h4!=0 && h4!=g_lastH4LevelBarTime)
+   {
+      g_lastH4LevelBarTime=h4;
+      RebuildLevelForTimeframe(1,PERIOD_H4,InpLevelLookbackH4);
+   }
+
+   datetime d1=iTime(_Symbol,PERIOD_D1,0);
+   if(d1!=0 && d1!=g_lastD1LevelBarTime)
+   {
+      g_lastD1LevelBarTime=d1;
+      RebuildLevelForTimeframe(2,PERIOD_D1,InpLevelLookbackD1);
+   }
+
+   datetime w1=iTime(_Symbol,PERIOD_W1,0);
+   if(w1!=0 && w1!=g_lastW1LevelBarTime)
+   {
+      g_lastW1LevelBarTime=w1;
+      RebuildLevelForTimeframe(3,PERIOD_W1,InpLevelLookbackW1);
+   }
+}
+
+void TryLevelEntry(int direction,double levelPrice)
+{
+   double atrBuf[];
+   if(CopyBufferSeries(g_handleAtrM5,0,3,atrBuf)<3) return;
+
+   double slDistance=InpAtrSlMultiplier*atrBuf[1];
+   if(slDistance<=0.0) return;
+
+   TryOpenPosition(direction,"V1L",slDistance,0.0);
+}
+
+void ProcessLevelTouches()
+{
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol,tick)) return;
+
+   double cmp=(tick.bid>0.0)?tick.bid:tick.last;
+   if(cmp<=0.0) return;
+
+   double observedLo=cmp, observedHi=cmp;
+   if(tick.bid>0.0)
+   {
+      observedLo=MathMin(observedLo,tick.bid);
+      observedHi=MathMax(observedHi,tick.bid);
+   }
+   if(tick.ask>0.0)
+   {
+      observedLo=MathMin(observedLo,tick.ask);
+      observedHi=MathMax(observedHi,tick.ask);
+   }
+   if(g_hasPreviousCMP && g_previousCMP>0.0)
+   {
+      observedLo=MathMin(observedLo,g_previousCMP);
+      observedHi=MathMax(observedHi,g_previousCMP);
+   }
+
+   double tolerance=InpLevelTouchTolerancePoints*_Point;
+
+   for(int i=0;i<ArraySize(g_levels);i++)
+   {
+      if(g_levels[i].price<=0.0) continue;
+
+      bool touching=(observedHi>=g_levels[i].price-tolerance &&
+                     observedLo<=g_levels[i].price+tolerance);
+
+      if(!touching)
+      {
+         g_levels[i].inZone=false;
+         continue;
+      }
+
+      // Edge-triggered: only fires on the tick that FIRST enters the zone,
+      // never repeatedly while price sits inside it.
+      if(g_levels[i].inZone) continue;
+      g_levels[i].inZone=true;
+
+      if(TimeCurrent()<g_levels[i].cooldownUntil) continue;
+
+      TryLevelEntry(g_levels[i].fadeDirection,g_levels[i].price);
+      g_levels[i].cooldownUntil=TimeCurrent()+MathMax(0,InpLevelReentrySeconds);
+   }
+
+   g_previousCMP=cmp;
+   g_hasPreviousCMP=true;
+}
+
+//======================================================================
 // Per-position management state (backoff + trend peak tracking)
 //======================================================================
 int EnsureManagedSlot(ulong ticket)
@@ -1017,8 +1234,11 @@ void ManageTrendTrailing()
       if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
       if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
 
+      // Trail-only management applies to anything that ISN'T a range TP-
+      // tracked trade (currently "V1T" continuation and "V1L" level-touch
+      // entries) rather than special-casing every tag individually.
       string comment=PositionGetString(POSITION_COMMENT);
-      if(StringFind(comment,"V1T")!=0) continue;
+      if(StringFind(comment,"V1R")==0) continue;
 
       int direction=((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)?1:-1;
       double openPrice   =PositionGetDouble(POSITION_PRICE_OPEN);
