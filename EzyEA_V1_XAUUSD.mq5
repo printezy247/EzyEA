@@ -2,19 +2,19 @@
 //|                                             EzyEA_V1_XAUUSD.mq5  |
 //|                                                                    |
 //| EzyEA V1 (REBUILT #2) - per explicit instruction, trigger is         |
-//| EMA100 + SNR levels, LOOSE zone confluence, paired PER TIMEFRAME:    |
-//| the M5 SNR level pairs only with the M5 EMA100, M15 SNR only with    |
+//| EMA100 + SND levels, LOOSE zone confluence, paired PER TIMEFRAME:    |
+//| the M5 SND level pairs only with the M5 EMA100, M15 SND only with    |
 //| the M15 EMA100, and so on through M30/H1/H4/D1 - six independent     |
 //| same-timeframe pairings, not one EMA checked against every level.    |
-//| For each SNR level, if its own timeframe's live EMA100 value sits    |
+//| For each SND level, if its own timeframe's live EMA100 value sits    |
 //| within InpDecisionRangeRatio of that level's own hi-lo range (a wide |
 //| "decision range" tolerance, not a tight cluster check, and NOT a     |
 //| fixed $ amount - it scales with each timeframe's own realized range  |
 //| since a fixed points value cannot work across timeframes whose       |
 //| ranges differ by an order of magnitude), the pairing becomes an      |
 //| active trigger zone spanning EMA100->level. Price touching anywhere  |
-//| in that zone fades in the level's own direction (resistance ->       |
-//| SELL, support -> BUY) - reusing the level's intrinsic type rather    |
+//| in that zone fades in the level's own direction (supply ->           |
+//| SELL, demand -> BUY) - reusing the level's intrinsic type rather     |
 //| than inferring direction from which side price approached from,      |
 //| since a wide zone makes "which side did price come from" ambiguous   |
 //| far more often than a tight overlap did.                             |
@@ -60,9 +60,15 @@
 //|                      now scales its own zone off its own hi-lo range over   |
 //|                      its lookback window (new LevelTouchState.rangeWidth    |
 //|                      field), so the zone naturally fits every timeframe.    |
+//| 1.007              - Terminology only: "SNR" (support/resistance) renamed   |
+//|                      to "SND" (supply/demand) throughout comments, logs,    |
+//|                      and chart labels (SUPPORT/RESISTANCE -> DEMAND/        |
+//|                      SUPPLY), matching the convention used by EzyEA         |
+//|                      V2/V3/V4 for this same swing-high/low level system.    |
+//|                      No functional change.                                 |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.006"
+#property version   "1.007"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -80,33 +86,34 @@ enum ENUM_EZY_ACCOUNT_SCALE
 //======================================================================
 // Inputs
 //======================================================================
-input group "=== EMA100 + SNR Confluence Entries: per-timeframe pairing, fade the touch ==="
-// Each timeframe's SNR level must pair with THAT SAME timeframe's EMA100
-// to trigger - not a single EMA against a stack of levels. M5 SNR pairs
-// only with M5 EMA100, M15 SNR only with M15 EMA100, and so on through
-// M30/H1/H4/D1. "Loose zone confluence": if the live EMA100 (same TF)
-// value sits within InpDecisionRangeRatio of its matching SNR level's OWN
-// window range (not a fixed $ amount - a fixed points value cannot work
-// across 6 timeframes whose realized ranges differ by an order of
-// magnitude: an M5 100-bar window spans ~8 hours, a D1 100-bar window
-// spans ~100 days. Confirmed live: even a loose 500-point fixed
-// tolerance produced "in decision range=0" on every single timeframe
-// throughout a full test - the fixed-point design cannot work at any
-// single value). Decision range and touch tolerance are now both
-// expressed as a RATIO of that level's own hi-lo range over its lookback
-// window, so the zone naturally scales to each timeframe's own
-// volatility. A touch of that zone is FADED in the LEVEL's own direction
-// (resistance -> SELL, support -> BUY) - not by which side price
-// approached from, since a wide zone makes that ambiguous far more often
-// than a tight overlap would. Same envelope-crossing touch detection
-// (previous-vs-current-tick) proven this session throughout.
+input group "=== EMA100 + SND Confluence Entries: per-timeframe pairing, fade the touch ==="
+// Each timeframe's SND (supply/demand) level must pair with THAT SAME
+// timeframe's EMA100 to trigger - not a single EMA against a stack of
+// levels. M5 SND pairs only with M5 EMA100, M15 SND only with M15
+// EMA100, and so on through M30/H1/H4/D1. "Loose zone confluence": if
+// the live EMA100 (same TF) value sits within InpDecisionRangeRatio of
+// its matching SND level's OWN window range (not a fixed $ amount - a
+// fixed points value cannot work across 6 timeframes whose realized
+// ranges differ by an order of magnitude: an M5 100-bar window spans ~8
+// hours, a D1 100-bar window spans ~100 days. Confirmed live: even a
+// loose 500-point fixed tolerance produced "in decision range=0" on
+// every single timeframe throughout a full test - the fixed-point
+// design cannot work at any single value). Decision range and touch
+// tolerance are now both expressed as a RATIO of that level's own hi-lo
+// range over its lookback window, so the zone naturally scales to each
+// timeframe's own volatility. A touch of that zone is FADED in the
+// LEVEL's own direction (supply -> SELL, demand -> BUY) - not by which
+// side price approached from, since a wide zone makes that ambiguous
+// far more often than a tight overlap would. Same envelope-crossing
+// touch detection (previous-vs-current-tick) proven this session
+// throughout.
 input bool   InpEnableConfluenceEntries          = true;
 input int    InpEmaPeriod                        = 100;
 input double InpDecisionRangeRatio               = 0.50;
 input double InpConfluenceTouchToleranceRatio    = 0.08;
 input int    InpConfluenceReentrySeconds         = 60;
 
-input group "=== SNR Levels: M5/M15/M30/H1/H4/Daily swing high/low, one EMA100 per TF ==="
+input group "=== SND Levels: M5/M15/M30/H1/H4/Daily swing high/low, one EMA100 per TF ==="
 // Lookback matched to InpEmaPeriod (100 bars) on purpose. EMA100 is a
 // slow average over a 100-bar window; a level built from a much shorter
 // window (the original 24/32/20/24/15/8 defaults, 3-12x shorter than the
@@ -192,7 +199,7 @@ struct ManagedPositionState
 struct LevelTouchState
 {
    double   price;
-   int      fadeDirection;   // 1 = demand (support), fade BUY; -1 = supply (resistance), fade SELL
+   int      fadeDirection;   // 1 = demand, fade BUY; -1 = supply, fade SELL
    bool     inZone;          // true when this level is currently within InpDecisionRangeRatio of its own-TF EMA100
    double   rangeWidth;      // this level's own hi-lo range over its lookback window - scales the decision/touch zone
    datetime cooldownUntil;
@@ -376,7 +383,7 @@ int OnInit()
    g_peakEquity=AccountInfoDouble(ACCOUNT_EQUITY);
    g_tradingHalted=false;
 
-   Log("EzyEA V1 (EMA"+IntegerToString(InpEmaPeriod)+" x6TF + SNR confluence) initialized on "+_Symbol+
+   Log("EzyEA V1 (EMA"+IntegerToString(InpEmaPeriod)+" x6TF + SND confluence) initialized on "+_Symbol+
        " | account unit divisor="+DoubleToString(g_accountUnitDivisor,2)+
        " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
        " | max concurrent="+IntegerToString(InpMaxConcurrentPositions)+
@@ -863,7 +870,7 @@ void TryOpenPosition(int direction,string tag,double slDistance)
 }
 
 //======================================================================
-// EMA100 + SNR loose zone confluence, paired per timeframe. SNR levels
+// EMA100 + SND loose zone confluence, paired per timeframe. SND levels
 // only rebuild on their OWN timeframe's new bar close, never intra-bar.
 // EMA100 read LIVE (shift=0) - an EMA is a smoothed lagging price, not a
 // bar pattern, so reading it live carries no repaint risk.
@@ -1051,8 +1058,8 @@ void ProcessConfluenceTriggers()
       // the zone before re-firing, only the cooldown gates it.
       if(TimeCurrent()<g_levels[i].cooldownUntil) continue;
 
-      // Direction comes from the LEVEL's own type (resistance -> SELL,
-      // support -> BUY), not from which side price approached from - a
+      // Direction comes from the LEVEL's own type (supply -> SELL,
+      // demand -> BUY), not from which side price approached from - a
       // wide decision-range zone makes "which side did price come from"
       // ambiguous far more often than a tight overlap check would.
       TryConfluenceEntry(g_levels[i].fadeDirection,g_levels[i].price);
@@ -1222,7 +1229,7 @@ void EnforceMaxHoldingTime()
 }
 
 //======================================================================
-// Chart drawing (EMA100 x6TF + SNR levels + status label)
+// Chart drawing (EMA100 x6TF + SND levels + status label)
 //======================================================================
 int CountActiveLevels()
 {
@@ -1297,7 +1304,7 @@ void DrawReferences()
       ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
       ObjectSetString(0,name,OBJPROP_TEXT,
                       g_levels[i].tfLabel+" "+
-                      (g_levels[i].fadeDirection==1?"SUPPORT":"RESISTANCE")+
+                      (g_levels[i].fadeDirection==1?"DEMAND":"SUPPLY")+
                       (g_levels[i].inZone?" - IN DECISION RANGE":""));
    }
 
@@ -1307,7 +1314,7 @@ void DrawReferences()
 void DrawStatusLabel()
 {
    string name="V1_StatusLabel";
-   string text=StringFormat("EzyEA V1 | EMA%d + SNR | in-range=%d/%d | Open=%d/%d | %s",
+   string text=StringFormat("EzyEA V1 | EMA%d + SND | in-range=%d/%d | Open=%d/%d | %s",
                 InpEmaPeriod,
                 CountLevelsInDecisionRange(),CountActiveLevels(),
                 CountOpenPositions(),InpMaxConcurrentPositions,
@@ -1352,7 +1359,7 @@ void PeriodicStatusLog()
    double ddPct =(g_peakEquity>0.0)?(g_peakEquity-equity)/g_peakEquity*100.0:0.0;
 
    Log("V1 LIVE PARITY STATUS"+
-       " | SNR active="+IntegerToString(CountActiveLevels())+"/"+IntegerToString(ArraySize(g_levels))+
+       " | SND active="+IntegerToString(CountActiveLevels())+"/"+IntegerToString(ArraySize(g_levels))+
        " | in decision range="+IntegerToString(CountLevelsInDecisionRange())+
        " | open="+IntegerToString(CountOpenPositions())+"/"+IntegerToString(InpMaxConcurrentPositions)+
        " | drawdown="+DoubleToString(ddPct,2)+"%"+(g_tradingHalted?" (HALTED)":"")+
