@@ -88,9 +88,12 @@
 //|                      redefined). ProcessConfluenceTriggers() now only        |
 //|                      updates the "in decision range" chart/status display    |
 //|                      per tick; it no longer opens positions.                 |
+//| 1.010              - M5 removed from the SND+EMA100 timeframe stack -        |
+//|                      M15 and above only (M15/M30/H1/H4/D1). EZY_TF_COUNT     |
+//|                      6->5, g_levels 12->10, InpLevelLookbackM5 removed.      |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.009"
+#property version   "1.010"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -164,7 +167,7 @@ input bool   InpEnableTrendFilter                = true;
 input int    InpAdxPeriod                        = 14;
 input double InpAdxTrendThreshold                = 25.0;
 
-input group "=== SND Levels: M5/M15/M30/H1/H4/Daily swing high/low, one EMA100 per TF ==="
+input group "=== SND Levels: M15/M30/H1/H4/Daily swing high/low, one EMA100 per TF (M5 removed) ==="
 // Lookback matched to InpEmaPeriod (100 bars) on purpose. EMA100 is a
 // slow average over a 100-bar window; a level built from a much shorter
 // window (the original 24/32/20/24/15/8 defaults, 3-12x shorter than the
@@ -173,7 +176,6 @@ input group "=== SND Levels: M5/M15/M30/H1/H4/Daily swing high/low, one EMA100 p
 // widening the decision range. Building each level from the SAME
 // 100-bar window the EMA itself averages makes "EMA near its own level"
 // a normal, frequent occurrence instead of a structural near-impossibility.
-input int    InpLevelLookbackM5                  = 100;
 input int    InpLevelLookbackM15                 = 100;
 input int    InpLevelLookbackM30                 = 100;
 input int    InpLevelLookbackH1                  = 100;
@@ -274,13 +276,14 @@ datetime g_lastAdxH1BarTime = 0;
 int      g_trendDirection   = 0;   // 1 up, -1 down, 0 no strong trend
 double   g_lastAdxValue     = 0.0;
 
-// 6 timeframes, one EMA100 handle each, fixed slot order matched 1:1
-// with g_levels' slot order (slot i -> g_levels[i*2]/[i*2+1]).
-#define EZY_TF_COUNT 6
+// 5 timeframes (M5 removed - M15 and above only), one EMA100 handle
+// each, fixed slot order matched 1:1 with g_levels' slot order
+// (slot i -> g_levels[i*2]/[i*2+1]).
+#define EZY_TF_COUNT 5
 int              g_handleEma[EZY_TF_COUNT];
 double           g_emaValue[EZY_TF_COUNT];
-ENUM_TIMEFRAMES  g_emaTf[EZY_TF_COUNT]    = {PERIOD_M5,PERIOD_M15,PERIOD_M30,PERIOD_H1,PERIOD_H4,PERIOD_D1};
-string           g_emaTfLabel[EZY_TF_COUNT] = {"M5","M15","M30","H1","H4","D1"};
+ENUM_TIMEFRAMES  g_emaTf[EZY_TF_COUNT]    = {PERIOD_M15,PERIOD_M30,PERIOD_H1,PERIOD_H4,PERIOD_D1};
+string           g_emaTfLabel[EZY_TF_COUNT] = {"M15","M30","H1","H4","D1"};
 
 double g_accountUnitDivisor = 1.0;
 
@@ -302,12 +305,11 @@ int g_gateSizingRejects      = 0;
 int g_gateDrawdownRejects    = 0;
 int g_gateTrendRejects       = 0;
 
-// 6 timeframes (M5/M15/M30/H1/H4/D1) x 2 levels (swing high=supply,
+// 5 timeframes (M15/M30/H1/H4/D1) x 2 levels (swing high=supply,
 // swing low=demand) each. Slot i's pair lives at g_levels[i*2]/[i*2+1]
 // and is checked against g_emaValue[i] - the SAME timeframe's EMA100.
-LevelTouchState g_levels[12];
+LevelTouchState g_levels[10];
 
-datetime g_lastM5LevelBarTime  = 0;
 datetime g_lastM15LevelBarTime = 0;
 datetime g_lastM30LevelBarTime = 0;
 datetime g_lastH1LevelBarTime  = 0;
@@ -447,7 +449,6 @@ int OnInit()
       g_levels[i].cooldownUntil=0;
       g_levels[i].tfLabel="";
    }
-   g_lastM5LevelBarTime  = 0;
    g_lastM15LevelBarTime = 0;
    g_lastM30LevelBarTime = 0;
    g_lastH1LevelBarTime  = 0;
@@ -1060,52 +1061,44 @@ void RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback,stri
 // exactly where price now is).
 void UpdateLevelsOnNewBars()
 {
-   datetime m5=iTime(_Symbol,PERIOD_M5,0);
-   if(m5!=0 && m5!=g_lastM5LevelBarTime)
-   {
-      g_lastM5LevelBarTime=m5;
-      CheckRejectionEntry(0,PERIOD_M5);
-      RebuildLevelForTimeframe(0,PERIOD_M5,InpLevelLookbackM5,"M5");
-   }
-
    datetime m15=iTime(_Symbol,PERIOD_M15,0);
    if(m15!=0 && m15!=g_lastM15LevelBarTime)
    {
       g_lastM15LevelBarTime=m15;
-      CheckRejectionEntry(1,PERIOD_M15);
-      RebuildLevelForTimeframe(1,PERIOD_M15,InpLevelLookbackM15,"M15");
+      CheckRejectionEntry(0,PERIOD_M15);
+      RebuildLevelForTimeframe(0,PERIOD_M15,InpLevelLookbackM15,"M15");
    }
 
    datetime m30=iTime(_Symbol,PERIOD_M30,0);
    if(m30!=0 && m30!=g_lastM30LevelBarTime)
    {
       g_lastM30LevelBarTime=m30;
-      CheckRejectionEntry(2,PERIOD_M30);
-      RebuildLevelForTimeframe(2,PERIOD_M30,InpLevelLookbackM30,"M30");
+      CheckRejectionEntry(1,PERIOD_M30);
+      RebuildLevelForTimeframe(1,PERIOD_M30,InpLevelLookbackM30,"M30");
    }
 
    datetime h1=iTime(_Symbol,PERIOD_H1,0);
    if(h1!=0 && h1!=g_lastH1LevelBarTime)
    {
       g_lastH1LevelBarTime=h1;
-      CheckRejectionEntry(3,PERIOD_H1);
-      RebuildLevelForTimeframe(3,PERIOD_H1,InpLevelLookbackH1,"H1");
+      CheckRejectionEntry(2,PERIOD_H1);
+      RebuildLevelForTimeframe(2,PERIOD_H1,InpLevelLookbackH1,"H1");
    }
 
    datetime h4=iTime(_Symbol,PERIOD_H4,0);
    if(h4!=0 && h4!=g_lastH4LevelBarTime)
    {
       g_lastH4LevelBarTime=h4;
-      CheckRejectionEntry(4,PERIOD_H4);
-      RebuildLevelForTimeframe(4,PERIOD_H4,InpLevelLookbackH4,"H4");
+      CheckRejectionEntry(3,PERIOD_H4);
+      RebuildLevelForTimeframe(3,PERIOD_H4,InpLevelLookbackH4,"H4");
    }
 
    datetime d1=iTime(_Symbol,PERIOD_D1,0);
    if(d1!=0 && d1!=g_lastD1LevelBarTime)
    {
       g_lastD1LevelBarTime=d1;
-      CheckRejectionEntry(5,PERIOD_D1);
-      RebuildLevelForTimeframe(5,PERIOD_D1,InpLevelLookbackD1,"D1");
+      CheckRejectionEntry(4,PERIOD_D1);
+      RebuildLevelForTimeframe(4,PERIOD_D1,InpLevelLookbackD1,"D1");
    }
 }
 
@@ -1463,7 +1456,7 @@ void DrawReferences()
    // One short EMA100 segment per timeframe (own TF bar times as
    // x-coordinates - valid even on an M5 chart, since object
    // coordinates are just absolute datetimes).
-   color emaColors[EZY_TF_COUNT]={clrOrange,clrYellow,clrGold,clrDeepSkyBlue,clrDodgerBlue,clrMediumPurple};
+   color emaColors[EZY_TF_COUNT]={clrYellow,clrGold,clrDeepSkyBlue,clrDodgerBlue,clrMediumPurple};
    for(int tfi=0;tfi<EZY_TF_COUNT;tfi++)
    {
       double buf[];
