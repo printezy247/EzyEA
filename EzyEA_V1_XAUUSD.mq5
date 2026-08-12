@@ -3,9 +3,9 @@
 //|                                                                    |
 //| EzyEA V1 (REBUILT #2) - per explicit instruction, trigger is         |
 //| EMA100 + SND levels, LOOSE zone confluence, paired PER TIMEFRAME:    |
-//| the M5 SND level pairs only with the M5 EMA100, M15 SND only with    |
-//| the M15 EMA100, and so on through M30/H1/H4/D1 - six independent     |
-//| same-timeframe pairings, not one EMA checked against every level.    |
+//| the M15 SND level pairs only with the M15 EMA100, and so on through  |
+//| H1/H4/D1 (M5, M30 removed) - four independent same-timeframe         |
+//| pairings, not one EMA checked against every level.                   |
 //| For each SND level, if its own timeframe's live EMA100 value sits    |
 //| within InpDecisionRangeRatio of that level's own hi-lo range (a wide |
 //| "decision range" tolerance, not a tight cluster check, and NOT a     |
@@ -91,9 +91,16 @@
 //| 1.010              - M5 removed from the SND+EMA100 timeframe stack -        |
 //|                      M15 and above only (M15/M30/H1/H4/D1). EZY_TF_COUNT     |
 //|                      6->5, g_levels 12->10, InpLevelLookbackM5 removed.      |
+//| 1.011              - M30 also removed - stack is now M15/H1/H4/D1 only       |
+//|                      (EZY_TF_COUNT 5->4, g_levels 10->8). InpEmaPeriod       |
+//|                      default changed 100->47, and the matched SND lookback   |
+//|                      defaults (M15/H1/H4/D1) changed 100->47 to keep them    |
+//|                      in sync with the EMA's own window (the fix from        |
+//|                      1.006 - level and EMA must describe the same window     |
+//|                      or "in decision range" never engages).                 |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.010"
+#property version   "1.011"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -111,17 +118,18 @@ enum ENUM_EZY_ACCOUNT_SCALE
 //======================================================================
 // Inputs
 //======================================================================
-input group "=== EMA100 + SND Confluence Entries: per-timeframe pairing, fade the touch ==="
+input group "=== EMA(period) + SND Confluence Entries: per-timeframe pairing, fade the touch ==="
 // Each timeframe's SND (supply/demand) level must pair with THAT SAME
 // timeframe's EMA100 to trigger - not a single EMA against a stack of
-// levels. M5 SND pairs only with M5 EMA100, M15 SND only with M15
-// EMA100, and so on through M30/H1/H4/D1. "Loose zone confluence": if
-// the live EMA100 (same TF) value sits within InpDecisionRangeRatio of
-// its matching SND level's OWN window range (not a fixed $ amount - a
-// fixed points value cannot work across 6 timeframes whose realized
-// ranges differ by an order of magnitude: an M5 100-bar window spans ~8
-// hours, a D1 100-bar window spans ~100 days. Confirmed live: even a
-// loose 500-point fixed tolerance produced "in decision range=0" on
+// levels. M15 SND pairs only with M15 EMA100, and so on through
+// H1/H4/D1 (M5 and M30 have been removed from the stack). "Loose zone
+// confluence": if the live EMA100 (same TF) value sits within
+// InpDecisionRangeRatio of its matching SND level's OWN window range
+// (not a fixed $ amount - a fixed points value cannot work across
+// timeframes whose realized ranges differ by an order of magnitude: an
+// M15 100-bar window spans ~1 day, a D1 100-bar window spans ~100 days.
+// Confirmed live: even a loose 500-point fixed tolerance produced "in
+// decision range=0" on
 // every single timeframe throughout a full test - the fixed-point
 // design cannot work at any single value). Decision range and touch
 // tolerance are now both expressed as a RATIO of that level's own hi-lo
@@ -134,7 +142,7 @@ input group "=== EMA100 + SND Confluence Entries: per-timeframe pairing, fade th
 // OWN bar close, not on every tick - a rejection pattern only exists
 // once its bar has finished forming.
 input bool   InpEnableConfluenceEntries          = true;
-input int    InpEmaPeriod                        = 100;
+input int    InpEmaPeriod                        = 47;
 input double InpDecisionRangeRatio               = 0.50;
 input double InpConfluenceTouchToleranceRatio    = 0.08;
 input int    InpConfluenceReentrySeconds         = 60;
@@ -167,20 +175,20 @@ input bool   InpEnableTrendFilter                = true;
 input int    InpAdxPeriod                        = 14;
 input double InpAdxTrendThreshold                = 25.0;
 
-input group "=== SND Levels: M15/M30/H1/H4/Daily swing high/low, one EMA100 per TF (M5 removed) ==="
-// Lookback matched to InpEmaPeriod (100 bars) on purpose. EMA100 is a
-// slow average over a 100-bar window; a level built from a much shorter
-// window (the original 24/32/20/24/15/8 defaults, 3-12x shorter than the
-// EMA) almost never sits near that EMA - it's a rare coincidence rather
-// than a real pairing, which is why zero trades fired even after
-// widening the decision range. Building each level from the SAME
-// 100-bar window the EMA itself averages makes "EMA near its own level"
-// a normal, frequent occurrence instead of a structural near-impossibility.
-input int    InpLevelLookbackM15                 = 100;
-input int    InpLevelLookbackM30                 = 100;
-input int    InpLevelLookbackH1                  = 100;
-input int    InpLevelLookbackH4                  = 100;
-input int    InpLevelLookbackD1                  = 100;
+input group "=== SND Levels: M15/H1/H4/Daily swing high/low, one EMA(period) per TF (M5, M30 removed) ==="
+// Lookback matched to InpEmaPeriod (47 bars) on purpose. A slow-ish EMA
+// average over an N-bar window paired against a level built from a much
+// shorter window (the original 24/32/20/24/15/8 defaults, several times
+// shorter than the EMA) almost never sits near that EMA - it's a rare
+// coincidence rather than a real pairing, which is why zero trades fired
+// the first time this was tried. Building each level from the SAME
+// N-bar window the EMA itself averages makes "EMA near its own level" a
+// normal, frequent occurrence instead of a structural near-impossibility.
+// If InpEmaPeriod is changed, change these to match.
+input int    InpLevelLookbackM15                 = 47;
+input int    InpLevelLookbackH1                  = 47;
+input int    InpLevelLookbackH4                  = 47;
+input int    InpLevelLookbackD1                  = 47;
 
 input group "=== Stops / Trail (ATR-based, M5) ==="
 input int    InpAtrPeriod                        = 14;
@@ -276,14 +284,14 @@ datetime g_lastAdxH1BarTime = 0;
 int      g_trendDirection   = 0;   // 1 up, -1 down, 0 no strong trend
 double   g_lastAdxValue     = 0.0;
 
-// 5 timeframes (M5 removed - M15 and above only), one EMA100 handle
+// 4 timeframes (M5, M30 removed - M15/H1/H4/D1 only), one EMA100 handle
 // each, fixed slot order matched 1:1 with g_levels' slot order
 // (slot i -> g_levels[i*2]/[i*2+1]).
-#define EZY_TF_COUNT 5
+#define EZY_TF_COUNT 4
 int              g_handleEma[EZY_TF_COUNT];
 double           g_emaValue[EZY_TF_COUNT];
-ENUM_TIMEFRAMES  g_emaTf[EZY_TF_COUNT]    = {PERIOD_M15,PERIOD_M30,PERIOD_H1,PERIOD_H4,PERIOD_D1};
-string           g_emaTfLabel[EZY_TF_COUNT] = {"M15","M30","H1","H4","D1"};
+ENUM_TIMEFRAMES  g_emaTf[EZY_TF_COUNT]    = {PERIOD_M15,PERIOD_H1,PERIOD_H4,PERIOD_D1};
+string           g_emaTfLabel[EZY_TF_COUNT] = {"M15","H1","H4","D1"};
 
 double g_accountUnitDivisor = 1.0;
 
@@ -305,13 +313,12 @@ int g_gateSizingRejects      = 0;
 int g_gateDrawdownRejects    = 0;
 int g_gateTrendRejects       = 0;
 
-// 5 timeframes (M15/M30/H1/H4/D1) x 2 levels (swing high=supply,
+// 4 timeframes (M15/H1/H4/D1) x 2 levels (swing high=supply,
 // swing low=demand) each. Slot i's pair lives at g_levels[i*2]/[i*2+1]
 // and is checked against g_emaValue[i] - the SAME timeframe's EMA100.
-LevelTouchState g_levels[10];
+LevelTouchState g_levels[8];
 
 datetime g_lastM15LevelBarTime = 0;
-datetime g_lastM30LevelBarTime = 0;
 datetime g_lastH1LevelBarTime  = 0;
 datetime g_lastH4LevelBarTime  = 0;
 datetime g_lastD1LevelBarTime  = 0;
@@ -450,7 +457,6 @@ int OnInit()
       g_levels[i].tfLabel="";
    }
    g_lastM15LevelBarTime = 0;
-   g_lastM30LevelBarTime = 0;
    g_lastH1LevelBarTime  = 0;
    g_lastH4LevelBarTime  = 0;
    g_lastD1LevelBarTime  = 0;
@@ -458,7 +464,7 @@ int OnInit()
    g_peakEquity=AccountInfoDouble(ACCOUNT_EQUITY);
    g_tradingHalted=false;
 
-   Log("EzyEA V1 (EMA"+IntegerToString(InpEmaPeriod)+" x6TF + SND confluence) initialized on "+_Symbol+
+   Log("EzyEA V1 (EMA"+IntegerToString(InpEmaPeriod)+" x"+IntegerToString(EZY_TF_COUNT)+"TF + SND confluence) initialized on "+_Symbol+
        " | account unit divisor="+DoubleToString(g_accountUnitDivisor,2)+
        " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
        " | max concurrent="+IntegerToString(InpMaxConcurrentPositions)+
@@ -1069,36 +1075,28 @@ void UpdateLevelsOnNewBars()
       RebuildLevelForTimeframe(0,PERIOD_M15,InpLevelLookbackM15,"M15");
    }
 
-   datetime m30=iTime(_Symbol,PERIOD_M30,0);
-   if(m30!=0 && m30!=g_lastM30LevelBarTime)
-   {
-      g_lastM30LevelBarTime=m30;
-      CheckRejectionEntry(1,PERIOD_M30);
-      RebuildLevelForTimeframe(1,PERIOD_M30,InpLevelLookbackM30,"M30");
-   }
-
    datetime h1=iTime(_Symbol,PERIOD_H1,0);
    if(h1!=0 && h1!=g_lastH1LevelBarTime)
    {
       g_lastH1LevelBarTime=h1;
-      CheckRejectionEntry(2,PERIOD_H1);
-      RebuildLevelForTimeframe(2,PERIOD_H1,InpLevelLookbackH1,"H1");
+      CheckRejectionEntry(1,PERIOD_H1);
+      RebuildLevelForTimeframe(1,PERIOD_H1,InpLevelLookbackH1,"H1");
    }
 
    datetime h4=iTime(_Symbol,PERIOD_H4,0);
    if(h4!=0 && h4!=g_lastH4LevelBarTime)
    {
       g_lastH4LevelBarTime=h4;
-      CheckRejectionEntry(3,PERIOD_H4);
-      RebuildLevelForTimeframe(3,PERIOD_H4,InpLevelLookbackH4,"H4");
+      CheckRejectionEntry(2,PERIOD_H4);
+      RebuildLevelForTimeframe(2,PERIOD_H4,InpLevelLookbackH4,"H4");
    }
 
    datetime d1=iTime(_Symbol,PERIOD_D1,0);
    if(d1!=0 && d1!=g_lastD1LevelBarTime)
    {
       g_lastD1LevelBarTime=d1;
-      CheckRejectionEntry(4,PERIOD_D1);
-      RebuildLevelForTimeframe(4,PERIOD_D1,InpLevelLookbackD1,"D1");
+      CheckRejectionEntry(3,PERIOD_D1);
+      RebuildLevelForTimeframe(3,PERIOD_D1,InpLevelLookbackD1,"D1");
    }
 }
 
@@ -1431,7 +1429,7 @@ void EnforceMaxHoldingTime()
 }
 
 //======================================================================
-// Chart drawing (EMA100 x6TF + SND levels + status label)
+// Chart drawing (EMA(period) x4TF + SND levels + status label)
 //======================================================================
 int CountActiveLevels()
 {
@@ -1456,7 +1454,7 @@ void DrawReferences()
    // One short EMA100 segment per timeframe (own TF bar times as
    // x-coordinates - valid even on an M5 chart, since object
    // coordinates are just absolute datetimes).
-   color emaColors[EZY_TF_COUNT]={clrYellow,clrGold,clrDeepSkyBlue,clrDodgerBlue,clrMediumPurple};
+   color emaColors[EZY_TF_COUNT]={clrYellow,clrDeepSkyBlue,clrDodgerBlue,clrMediumPurple};
    for(int tfi=0;tfi<EZY_TF_COUNT;tfi++)
    {
       double buf[];
