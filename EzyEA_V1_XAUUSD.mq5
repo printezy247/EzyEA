@@ -1,19 +1,20 @@
 //+------------------------------------------------------------------+
 //|                                             EzyEA_V1_XAUUSD.mq5  |
 //|                                                                    |
-//| EzyEA V1 (REBUILT #2) - per explicit instruction, replaces the      |
-//| EMA13/EMA47-overlap design (drawdown confirmed not good) with a     |
-//| new trigger: EMA200 (M5) + SNR levels (M5-only swing high/low),     |
-//| LOOSE zone confluence rather than exact overlap. For each SNR       |
-//| level, if the live EMA200 value sits within InpDecisionRangePoints  |
-//| of that level (a wide "decision range" tolerance, not a tight       |
-//| cluster check), the pairing becomes an active trigger zone spanning |
-//| from EMA200 to the level. Price touching anywhere in that zone      |
-//| fades in the level's own direction (resistance -> SELL, support ->  |
-//| BUY) - reusing the level's intrinsic type rather than inferring      |
-//| direction from which side price approached from, since a wide zone  |
-//| makes "which side did price come from" ambiguous far more often     |
-//| than the old tight-overlap design did.                              |
+//| EzyEA V1 (REBUILT #2) - per explicit instruction, trigger is         |
+//| EMA100 + SNR levels, LOOSE zone confluence, paired PER TIMEFRAME:    |
+//| the M5 SNR level pairs only with the M5 EMA100, M15 SNR only with    |
+//| the M15 EMA100, and so on through M30/H1/H4/D1 - six independent     |
+//| same-timeframe pairings, not one EMA checked against every level.    |
+//| For each SNR level, if its own timeframe's live EMA100 value sits    |
+//| within InpDecisionRangePoints of it (a wide "decision range"         |
+//| tolerance, not a tight cluster check), the pairing becomes an        |
+//| active trigger zone spanning EMA100->level. Price touching anywhere  |
+//| in that zone fades in the level's own direction (resistance ->       |
+//| SELL, support -> BUY) - reusing the level's intrinsic type rather    |
+//| than inferring direction from which side price approached from,      |
+//| since a wide zone makes "which side did price come from" ambiguous   |
+//| far more often than a tight overlap did.                             |
 //|                                                                      |
 //| Everything else is the same proven infrastructure from this          |
 //| session: risk-based lot sizing via OrderCalcProfit() with a          |
@@ -31,9 +32,15 @@
 //|                     Drawdown confirmed not good.                             |
 //| 1.002 (rebuild 2) - EMA200 + SNR levels, loose zone confluence.              |
 //| 1.003              - SNR levels restricted to M5 only (was M5->W1).          |
+//| 1.004              - Reverted to multi-TF, but each TF's SNR level must      |
+//|                      pair with that SAME TF's own EMA100 (M5/M15/M30/H1/     |
+//|                      H4/D1) rather than a single M5 EMA against a stack of   |
+//|                      levels. Decision range/touch tolerance widened          |
+//|                      (100/30 -> 400/50 pts) since the M5-only build's zero-  |
+//|                      trades result was most likely a too-tight zone.        |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.003"
+#property version   "1.004"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -51,10 +58,13 @@ enum ENUM_EZY_ACCOUNT_SCALE
 //======================================================================
 // Inputs
 //======================================================================
-input group "=== EMA200 + SNR Confluence Entries: loose zone, fade the touch ==="
-// "Loose zone confluence": for each SNR level, if the live EMA200 value
-// sits within InpDecisionRangePoints of that level, the pairing becomes
-// an active trigger zone spanning from EMA200 to the level (not
+input group "=== EMA100 + SNR Confluence Entries: per-timeframe pairing, fade the touch ==="
+// Each timeframe's SNR level must pair with THAT SAME timeframe's EMA100
+// to trigger - not a single EMA against a stack of levels. M5 SNR pairs
+// only with M5 EMA100, M15 SNR only with M15 EMA100, and so on through
+// M30/H1/H4/D1. "Loose zone confluence": if the live EMA100 (same TF)
+// value sits within InpDecisionRangePoints of its matching SNR level,
+// that pairing becomes an active trigger zone spanning EMA100->level (not
 // requiring them to be at the exact same price like a tight overlap
 // check). A touch of that zone (price entering within
 // InpConfluenceTouchTolerancePoints of it) is FADED in the LEVEL's own
@@ -62,14 +72,23 @@ input group "=== EMA200 + SNR Confluence Entries: loose zone, fade the touch ===
 // price approached from, since a wide zone makes that ambiguous far
 // more often than a tight overlap would. Same envelope-crossing touch
 // detection (previous-vs-current-tick) proven this session throughout.
+// Decision range / touch tolerance widened from the M5-only build
+// (100/30 pts) to 400/50 pts - the M5-only build took zero trades, most
+// likely because 100 pts (~$1) is far tighter than XAUUSD's typical
+// EMA-to-level separation even on M5.
 input bool   InpEnableConfluenceEntries          = true;
-input int    InpEmaPeriod                        = 200;
-input double InpDecisionRangePoints              = 100.0;
-input double InpConfluenceTouchTolerancePoints   = 30.0;
+input int    InpEmaPeriod                        = 100;
+input double InpDecisionRangePoints              = 400.0;
+input double InpConfluenceTouchTolerancePoints   = 50.0;
 input int    InpConfluenceReentrySeconds         = 60;
 
-input group "=== SNR Levels: M5 swing high/low only ==="
+input group "=== SNR Levels: M5/M15/M30/H1/H4/Daily swing high/low, one EMA100 per TF ==="
 input int    InpLevelLookbackM5                  = 24;
+input int    InpLevelLookbackM15                 = 32;
+input int    InpLevelLookbackM30                 = 20;
+input int    InpLevelLookbackH1                  = 24;
+input int    InpLevelLookbackH4                  = 15;
+input int    InpLevelLookbackD1                  = 8;
 
 input group "=== Stops / Trail (ATR-based, M5) ==="
 input int    InpAtrPeriod                        = 14;
@@ -126,7 +145,6 @@ input int    InpStatusLogIntervalSeconds         = 60;
 input group "=== Chart Drawing ==="
 input bool   InpDrawReferences                    = true;
 input bool   InpDrawStatusLabel                   = true;
-input int    InpDrawBarsBack                      = 60;
 
 //======================================================================
 // Types
@@ -143,7 +161,7 @@ struct LevelTouchState
 {
    double   price;
    int      fadeDirection;   // 1 = demand (support), fade BUY; -1 = supply (resistance), fade SELL
-   bool     inZone;          // true when this level is currently within InpDecisionRangePoints of EMA200
+   bool     inZone;          // true when this level is currently within InpDecisionRangePoints of its own-TF EMA100
    datetime cooldownUntil;
    string   tfLabel;
 };
@@ -154,7 +172,14 @@ struct LevelTouchState
 CTrade trade;
 
 int g_handleAtrM5 = INVALID_HANDLE;
-int g_handleEmaM5 = INVALID_HANDLE;
+
+// 6 timeframes, one EMA100 handle each, fixed slot order matched 1:1
+// with g_levels' slot order (slot i -> g_levels[i*2]/[i*2+1]).
+#define EZY_TF_COUNT 6
+int              g_handleEma[EZY_TF_COUNT];
+double           g_emaValue[EZY_TF_COUNT];
+ENUM_TIMEFRAMES  g_emaTf[EZY_TF_COUNT]    = {PERIOD_M5,PERIOD_M15,PERIOD_M30,PERIOD_H1,PERIOD_H4,PERIOD_D1};
+string           g_emaTfLabel[EZY_TF_COUNT] = {"M5","M15","M30","H1","H4","D1"};
 
 double g_accountUnitDivisor = 1.0;
 
@@ -175,10 +200,17 @@ int g_gateDistanceRejects    = 0;
 int g_gateSizingRejects      = 0;
 int g_gateDrawdownRejects    = 0;
 
-// M5 only x 2 levels (swing high=supply, swing low=demand).
-LevelTouchState g_levels[2];
+// 6 timeframes (M5/M15/M30/H1/H4/D1) x 2 levels (swing high=supply,
+// swing low=demand) each. Slot i's pair lives at g_levels[i*2]/[i*2+1]
+// and is checked against g_emaValue[i] - the SAME timeframe's EMA100.
+LevelTouchState g_levels[12];
 
 datetime g_lastM5LevelBarTime  = 0;
+datetime g_lastM15LevelBarTime = 0;
+datetime g_lastM30LevelBarTime = 0;
+datetime g_lastH1LevelBarTime  = 0;
+datetime g_lastH4LevelBarTime  = 0;
+datetime g_lastD1LevelBarTime  = 0;
 
 bool   g_hasPreviousCMP = false;
 double g_previousCMP    = 0.0;
@@ -234,6 +266,7 @@ void   EnforceMaxHoldingTime();
 
 void   RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback,string tfLabel);
 void   UpdateLevelsOnNewBars();
+void   UpdateEmaValues();
 void   TryConfluenceEntry(int direction,double levelPrice);
 void   ProcessConfluenceTriggers();
 
@@ -260,11 +293,21 @@ int OnInit()
    trade.SetDeviationInPoints(InpDeviationPoints);
 
    g_handleAtrM5 = iATR(_Symbol,PERIOD_M5,InpAtrPeriod);
-   g_handleEmaM5 = iMA(_Symbol,PERIOD_M5,InpEmaPeriod,0,MODE_EMA,PRICE_CLOSE);
-   if(g_handleAtrM5==INVALID_HANDLE || g_handleEmaM5==INVALID_HANDLE)
+   if(g_handleAtrM5==INVALID_HANDLE)
    {
-      Log("Indicator handle creation failed.");
+      Log("Indicator handle creation failed (ATR).");
       return INIT_FAILED;
+   }
+
+   for(int i=0;i<EZY_TF_COUNT;i++)
+   {
+      g_handleEma[i]=iMA(_Symbol,g_emaTf[i],InpEmaPeriod,0,MODE_EMA,PRICE_CLOSE);
+      g_emaValue[i]=0.0;
+      if(g_handleEma[i]==INVALID_HANDLE)
+      {
+         Log("Indicator handle creation failed (EMA"+IntegerToString(InpEmaPeriod)+" "+g_emaTfLabel[i]+").");
+         return INIT_FAILED;
+      }
    }
 
    g_accountUnitDivisor = ResolveAccountUnitDivisor();
@@ -287,6 +330,11 @@ int OnInit()
       g_levels[i].tfLabel="";
    }
    g_lastM5LevelBarTime  = 0;
+   g_lastM15LevelBarTime = 0;
+   g_lastM30LevelBarTime = 0;
+   g_lastH1LevelBarTime  = 0;
+   g_lastH4LevelBarTime  = 0;
+   g_lastD1LevelBarTime  = 0;
 
    g_hasPreviousCMP=false;
    g_previousCMP=0.0;
@@ -294,7 +342,7 @@ int OnInit()
    g_peakEquity=AccountInfoDouble(ACCOUNT_EQUITY);
    g_tradingHalted=false;
 
-   Log("EzyEA V1 (EMA"+IntegerToString(InpEmaPeriod)+"+SNR confluence) initialized on "+_Symbol+
+   Log("EzyEA V1 (EMA"+IntegerToString(InpEmaPeriod)+" x6TF + SNR confluence) initialized on "+_Symbol+
        " | account unit divisor="+DoubleToString(g_accountUnitDivisor,2)+
        " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
        " | max concurrent="+IntegerToString(InpMaxConcurrentPositions)+
@@ -309,7 +357,8 @@ void OnDeinit(const int reason)
    WriteFinalReport();
 
    if(g_handleAtrM5!=INVALID_HANDLE) IndicatorRelease(g_handleAtrM5);
-   if(g_handleEmaM5!=INVALID_HANDLE) IndicatorRelease(g_handleEmaM5);
+   for(int i=0;i<EZY_TF_COUNT;i++)
+      if(g_handleEma[i]!=INVALID_HANDLE) IndicatorRelease(g_handleEma[i]);
 
    RemoveAllDrawings();
 }
@@ -780,10 +829,10 @@ void TryOpenPosition(int direction,string tag,double slDistance)
 }
 
 //======================================================================
-// EMA200 + SNR loose zone confluence. SNR levels only rebuild on their
-// OWN timeframe's new bar close, never intra-bar. EMA200 read LIVE
-// (shift=0) - an EMA is a smoothed lagging price, not a bar pattern, so
-// reading it live carries no repaint risk.
+// EMA100 + SNR loose zone confluence, paired per timeframe. SNR levels
+// only rebuild on their OWN timeframe's new bar close, never intra-bar.
+// EMA100 read LIVE (shift=0) - an EMA is a smoothed lagging price, not a
+// bar pattern, so reading it live carries no repaint risk.
 //======================================================================
 void RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback,string tfLabel)
 {
@@ -824,6 +873,59 @@ void UpdateLevelsOnNewBars()
       g_lastM5LevelBarTime=m5;
       RebuildLevelForTimeframe(0,PERIOD_M5,InpLevelLookbackM5,"M5");
    }
+
+   datetime m15=iTime(_Symbol,PERIOD_M15,0);
+   if(m15!=0 && m15!=g_lastM15LevelBarTime)
+   {
+      g_lastM15LevelBarTime=m15;
+      RebuildLevelForTimeframe(1,PERIOD_M15,InpLevelLookbackM15,"M15");
+   }
+
+   datetime m30=iTime(_Symbol,PERIOD_M30,0);
+   if(m30!=0 && m30!=g_lastM30LevelBarTime)
+   {
+      g_lastM30LevelBarTime=m30;
+      RebuildLevelForTimeframe(2,PERIOD_M30,InpLevelLookbackM30,"M30");
+   }
+
+   datetime h1=iTime(_Symbol,PERIOD_H1,0);
+   if(h1!=0 && h1!=g_lastH1LevelBarTime)
+   {
+      g_lastH1LevelBarTime=h1;
+      RebuildLevelForTimeframe(3,PERIOD_H1,InpLevelLookbackH1,"H1");
+   }
+
+   datetime h4=iTime(_Symbol,PERIOD_H4,0);
+   if(h4!=0 && h4!=g_lastH4LevelBarTime)
+   {
+      g_lastH4LevelBarTime=h4;
+      RebuildLevelForTimeframe(4,PERIOD_H4,InpLevelLookbackH4,"H4");
+   }
+
+   datetime d1=iTime(_Symbol,PERIOD_D1,0);
+   if(d1!=0 && d1!=g_lastD1LevelBarTime)
+   {
+      g_lastD1LevelBarTime=d1;
+      RebuildLevelForTimeframe(5,PERIOD_D1,InpLevelLookbackD1,"D1");
+   }
+}
+
+// Live EMA100 read (shift=0) for each of the 6 timeframes - an EMA is a
+// smoothed lagging price, not a bar pattern, so reading it live carries
+// no repaint risk (matches the same reasoning used for the old M5-only
+// EMA200 read).
+void UpdateEmaValues()
+{
+   for(int i=0;i<EZY_TF_COUNT;i++)
+   {
+      double buf[];
+      if(CopyBufferSeries(g_handleEma[i],0,1,buf)<1)
+      {
+         g_emaValue[i]=0.0;
+         continue;
+      }
+      g_emaValue[i]=buf[0];
+   }
 }
 
 void TryConfluenceEntry(int direction,double levelPrice)
@@ -839,10 +941,7 @@ void TryConfluenceEntry(int direction,double levelPrice)
 
 void ProcessConfluenceTriggers()
 {
-   double emaBuf[];
-   if(CopyBufferSeries(g_handleEmaM5,0,1,emaBuf)<1) return;
-   double emaValue=emaBuf[0];
-   if(emaValue<=0.0) return;
+   UpdateEmaValues();
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol,tick)) return;
@@ -878,9 +977,19 @@ void ProcessConfluenceTriggers()
          continue;
       }
 
-      // "Loose zone confluence": EMA200 does not need to sit at the
-      // exact same price as the level - only within the wider decision
-      // range. The zone itself spans from EMA200 to the level.
+      // Each level pairs ONLY with its own timeframe's EMA100 - slot
+      // i/2 in g_emaValue[], matching RebuildLevelForTimeframe()'s
+      // slotIndex*2/slotIndex*2+1 layout.
+      double emaValue=g_emaValue[i/2];
+      if(emaValue<=0.0)
+      {
+         g_levels[i].inZone=false;
+         continue;
+      }
+
+      // "Loose zone confluence": the same-TF EMA100 does not need to sit
+      // at the exact same price as the level - only within the wider
+      // decision range. The zone itself spans from EMA100 to the level.
       double spread=MathAbs(emaValue-g_levels[i].price);
       bool inDecisionRange=(spread<=decisionRange);
       g_levels[i].inZone=inDecisionRange;
@@ -1069,7 +1178,7 @@ void EnforceMaxHoldingTime()
 }
 
 //======================================================================
-// Chart drawing (EMA200 + SNR levels + status label)
+// Chart drawing (EMA100 x6TF + SNR levels + status label)
 //======================================================================
 int CountActiveLevels()
 {
@@ -1091,31 +1200,33 @@ void DrawReferences()
 {
    if(!InpDrawReferences) return;
 
-   int bars=MathMax(3,InpDrawBarsBack);
-   double emaBuf[];
-   int n=CopyBufferSeries(g_handleEmaM5,0,bars,emaBuf);
-   if(n>=2)
+   // One short EMA100 segment per timeframe (own TF bar times as
+   // x-coordinates - valid even on an M5 chart, since object
+   // coordinates are just absolute datetimes).
+   color emaColors[EZY_TF_COUNT]={clrOrange,clrYellow,clrGold,clrDeepSkyBlue,clrDodgerBlue,clrMediumPurple};
+   for(int tfi=0;tfi<EZY_TF_COUNT;tfi++)
    {
-      for(int shift=0;shift<n-1;shift++)
-      {
-         string name="V1_EMA_"+IntegerToString(shift);
-         datetime t1=iTime(_Symbol,PERIOD_M5,shift+1);
-         datetime t2=iTime(_Symbol,PERIOD_M5,shift);
-         if(t1==0 || t2==0) continue;
+      double buf[];
+      if(CopyBufferSeries(g_handleEma[tfi],0,2,buf)<2) continue;
 
-         if(ObjectFind(0,name)<0)
-            ObjectCreate(0,name,OBJ_TREND,0,t1,emaBuf[shift+1],t2,emaBuf[shift]);
-         else
-         {
-            ObjectMove(0,name,0,t1,emaBuf[shift+1]);
-            ObjectMove(0,name,1,t2,emaBuf[shift]);
-         }
-         ObjectSetInteger(0,name,OBJPROP_COLOR,clrOrange);
-         ObjectSetInteger(0,name,OBJPROP_WIDTH,1);
-         ObjectSetInteger(0,name,OBJPROP_RAY,false);
-         ObjectSetInteger(0,name,OBJPROP_BACK,true);
-         ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+      string name="V1_EMA_"+g_emaTfLabel[tfi];
+      datetime t1=iTime(_Symbol,g_emaTf[tfi],1);
+      datetime t2=iTime(_Symbol,g_emaTf[tfi],0);
+      if(t1==0 || t2==0) continue;
+
+      if(ObjectFind(0,name)<0)
+         ObjectCreate(0,name,OBJ_TREND,0,t1,buf[1],t2,buf[0]);
+      else
+      {
+         ObjectMove(0,name,0,t1,buf[1]);
+         ObjectMove(0,name,1,t2,buf[0]);
       }
+      ObjectSetInteger(0,name,OBJPROP_COLOR,emaColors[tfi]);
+      ObjectSetInteger(0,name,OBJPROP_WIDTH,1);
+      ObjectSetInteger(0,name,OBJPROP_RAY,true);
+      ObjectSetInteger(0,name,OBJPROP_BACK,true);
+      ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+      ObjectSetString(0,name,OBJPROP_TEXT,g_emaTfLabel[tfi]+" EMA"+IntegerToString(InpEmaPeriod));
    }
 
    for(int i=0;i<ArraySize(g_levels);i++)
