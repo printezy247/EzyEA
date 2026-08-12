@@ -108,9 +108,17 @@
 //|                      distance as the initial SL - that still holds in ATR    |
 //|                      mode, InpUseFixedStops=false, but the whole point of    |
 //|                      this preset is a narrower trail than the SL width).     |
+//| 1.013              - Fixed "no entry traded": the .sc=0.01/standard=0.10     |
+//|                      pip split was wrong for this account. Confirmed via     |
+//|                      Journal (attempts=6, accepted=0, spread/concurrency     |
+//|                      gates clear) that the 25-pip SL at 0.01/pip (~$0.25)     |
+//|                      was tighter than this EA's own zero-stops-level          |
+//|                      fallback minimum, rejecting every attempt at the        |
+//|                      distance gate. Both InpXAUUSDscPipPrice and             |
+//|                      InpStandardXAUUSDPipPrice now default to 0.10.          |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.012"
+#property version   "1.013"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -215,11 +223,17 @@ input group "=== Fixed Pip Preset (overrides ATR sizing when enabled) ==="
 input bool   InpUseFixedStops                    = true;
 input double InpFixedSlPips                      = 25.0;
 input double InpFixedTrailPips                   = 10.0;
-// XAUUSD "pip" size is broker/symbol-dependent - same cent-aware split
-// already proven on this session's other gold EAs: a .sc (cent) suffixed
-// symbol quotes 1 pip = 1 point (0.01), a standard XAUUSD symbol quotes
-// 1 pip = 10 points (0.10).
-input double InpXAUUSDscPipPrice                 = 0.01;
+// Confirmed live: the V5-borrowed assumption that a .sc (cent) suffixed
+// symbol quotes 1 pip = 1 point (0.01) was wrong for this account/broker
+// - it made the 25-pip SL (~$0.25) far tighter than even this EA's own
+// zero-stops-level fallback minimum (0.05% of a ~$4000+ gold price is
+// ~$2+), so every entry attempt was rejected at the distance gate before
+// opening (confirmed via attempts=6/accepted=0 in the Journal, spread
+// and concurrency gates both clear). Both symbol types now default to
+// the standard gold convention, 1 pip = 10 points (0.10) = $0.10, giving
+// a 25-pip SL of ~$2.50 - still tighter than the old ATR sizing (~$8-9)
+// but a plausible, tradeable distance rather than a structural block.
+input double InpXAUUSDscPipPrice                 = 0.10;
 input double InpStandardXAUUSDPipPrice           = 0.10;
 
 input group "=== Exit Management ==="
