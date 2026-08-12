@@ -98,9 +98,19 @@
 //|                      in sync with the EMA's own window (the fix from        |
 //|                      1.006 - level and EMA must describe the same window     |
 //|                      or "in decision range" never engages).                 |
+//| 1.012              - Added a fixed pip preset for SL/trail (InpUseFixedStops |
+//|                      = true by default): 25-pip SL, 10-pip trail, using the  |
+//|                      same cent-aware pip-size split already proven on this   |
+//|                      session's other gold EAs (.sc symbol = 1 pip/0.01,      |
+//|                      standard XAUUSD = 1 pip/0.10). The trail distance is    |
+//|                      intentionally DECOUPLED from the SL distance in this    |
+//|                      mode (ManageTrailing() normally trails at the same      |
+//|                      distance as the initial SL - that still holds in ATR    |
+//|                      mode, InpUseFixedStops=false, but the whole point of    |
+//|                      this preset is a narrower trail than the SL width).     |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.011"
+#property version   "1.012"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -190,10 +200,27 @@ input int    InpLevelLookbackH1                  = 47;
 input int    InpLevelLookbackH4                  = 47;
 input int    InpLevelLookbackD1                  = 47;
 
-input group "=== Stops / Trail (ATR-based, M5) ==="
+input group "=== Stops / Trail (ATR-based, M5) - used only when InpUseFixedStops is OFF ==="
 input int    InpAtrPeriod                        = 14;
 input double InpAtrSlMultiplier                  = 1.5;
 input double InpTrailMinStepPoints               = 20.0;
+
+input group "=== Fixed Pip Preset (overrides ATR sizing when enabled) ==="
+// Trailing is intentionally a SEPARATE, narrower distance from the SL
+// (10 pips vs 25) - ManageTrailing() normally trails at the same
+// distance as the position's initial SL (the proven "activation floor =
+// trail distance" rule), but a fixed preset with a different trail
+// width needs that decoupled, so InpFixedTrailPips is read directly
+// instead of being derived from the open SL distance.
+input bool   InpUseFixedStops                    = true;
+input double InpFixedSlPips                      = 25.0;
+input double InpFixedTrailPips                   = 10.0;
+// XAUUSD "pip" size is broker/symbol-dependent - same cent-aware split
+// already proven on this session's other gold EAs: a .sc (cent) suffixed
+// symbol quotes 1 pip = 1 point (0.01), a standard XAUUSD symbol quotes
+// 1 pip = 10 points (0.10).
+input double InpXAUUSDscPipPrice                 = 0.01;
+input double InpStandardXAUUSDPipPrice           = 0.10;
 
 input group "=== Exit Management ==="
 input int    InpMaxHoldingMinutes                = 60;
@@ -336,6 +363,7 @@ void   OnTick();
 string Upper(string s);
 bool   IsGold();
 bool   IsCentSuffixSymbol();
+double StrategyPipSize();
 double RoundPrice(double v);
 string PriceText(double v);
 void   Log(string msg);
@@ -471,6 +499,9 @@ int OnInit()
        " (per-direction="+IntegerToString(InpMaxConcurrentPerDirection)+")"+
        " | decision range ratio="+DoubleToString(InpDecisionRangeRatio,2)+
        " | trend filter="+(InpEnableTrendFilter?"ON (ADX>="+DoubleToString(InpAdxTrendThreshold,0)+")":"OFF")+
+       " | stops="+(InpUseFixedStops
+                    ?"FIXED "+DoubleToString(InpFixedSlPips,1)+"pip SL/"+DoubleToString(InpFixedTrailPips,1)+"pip trail (pipSize="+DoubleToString(StrategyPipSize(),_Digits)+")"
+                    :"ATR x"+DoubleToString(InpAtrSlMultiplier,2))+
        " | drawdown breaker="+(InpEnableDrawdownBreaker?DoubleToString(InpMaxEquityDrawdownPct,1)+"%":"OFF"));
 
    return INIT_SUCCEEDED;
@@ -524,6 +555,13 @@ bool IsCentSuffixSymbol()
 {
    string s=Upper(_Symbol);
    return (StringFind(s,".SC")>=0 || StringFind(s,"_SC")>=0 || StringFind(s,"CENT")>=0);
+}
+
+double StrategyPipSize()
+{
+   if(IsCentSuffixSymbol())
+      return MathMax(InpXAUUSDscPipPrice,_Point);
+   return MathMax(InpStandardXAUUSDPipPrice,_Point);
 }
 
 double RoundPrice(double v)
@@ -1229,10 +1267,17 @@ void TryConfluenceEntry(int direction,double levelPrice)
       return;
    }
 
-   double atrBuf[];
-   if(CopyBufferSeries(g_handleAtrM5,0,3,atrBuf)<3) return;
-
-   double slDistance=InpAtrSlMultiplier*atrBuf[1];
+   double slDistance;
+   if(InpUseFixedStops)
+   {
+      slDistance=InpFixedSlPips*StrategyPipSize();
+   }
+   else
+   {
+      double atrBuf[];
+      if(CopyBufferSeries(g_handleAtrM5,0,3,atrBuf)<3) return;
+      slDistance=InpAtrSlMultiplier*atrBuf[1];
+   }
    if(slDistance<=0.0) return;
 
    TryOpenPosition(direction,"V1CONF",slDistance);
@@ -1359,6 +1404,15 @@ void ManageTrailing()
       double slDistance=MathAbs(openPrice-currentSl);
       if(slDistance<=0.0) continue;
 
+      // Fixed-preset mode trails at a DIFFERENT (narrower) distance than
+      // the initial SL - e.g. 25-pip SL, 10-pip trail - so the trail
+      // distance is decoupled from the position's own SL distance here.
+      // ATR mode keeps the original "activation floor = trail distance"
+      // rule (trails at the same distance the SL was placed at).
+      double trailDistance=(InpUseFixedStops && InpFixedTrailPips>0.0)
+                           ?InpFixedTrailPips*StrategyPipSize()
+                           :slDistance;
+
       int slot=EnsureManagedSlot(ticket);
       if(slot<0) continue;
 
@@ -1371,11 +1425,11 @@ void ManageTrailing()
                        ?(g_managed[slot].peakPrice-openPrice)
                        :(openPrice-g_managed[slot].peakPrice);
 
-      if(favorable<slDistance) continue;
+      if(favorable<trailDistance) continue;
 
       double candidateSl=RoundPrice((direction==1)
-                         ?g_managed[slot].peakPrice-slDistance
-                         :g_managed[slot].peakPrice+slDistance);
+                         ?g_managed[slot].peakPrice-trailDistance
+                         :g_managed[slot].peakPrice+trailDistance);
 
       bool improves=(direction==1)?(candidateSl>currentSl):(candidateSl<currentSl);
       if(!improves) continue;
