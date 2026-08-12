@@ -3,9 +3,9 @@
 //|                                                                    |
 //| EzyEA V1 (REBUILT #2) - per explicit instruction, trigger is         |
 //| EMA100 + SND levels, LOOSE zone confluence, paired PER TIMEFRAME:    |
-//| the M15 SND level pairs only with the M15 EMA100, and so on through  |
-//| H1/H4/D1 (M5, M30 removed) - four independent same-timeframe         |
-//| pairings, not one EMA checked against every level.                   |
+//| the M5 SND level pairs only with the M5 EMA100, M15 SND only with    |
+//| the M15 EMA100, and so on through M30/H1/H4/D1 - six independent     |
+//| same-timeframe pairings, not one EMA checked against every level.    |
 //| For each SND level, if its own timeframe's live EMA100 value sits    |
 //| within InpDecisionRangeRatio of that level's own hi-lo range (a wide |
 //| "decision range" tolerance, not a tight cluster check, and NOT a     |
@@ -88,37 +88,24 @@
 //|                      redefined). ProcessConfluenceTriggers() now only        |
 //|                      updates the "in decision range" chart/status display    |
 //|                      per tick; it no longer opens positions.                 |
-//| 1.010              - M5 removed from the SND+EMA100 timeframe stack -        |
-//|                      M15 and above only (M15/M30/H1/H4/D1). EZY_TF_COUNT     |
-//|                      6->5, g_levels 12->10, InpLevelLookbackM5 removed.      |
-//| 1.011              - M30 also removed - stack is now M15/H1/H4/D1 only       |
-//|                      (EZY_TF_COUNT 5->4, g_levels 10->8). InpEmaPeriod       |
-//|                      default changed 100->47, and the matched SND lookback   |
-//|                      defaults (M15/H1/H4/D1) changed 100->47 to keep them    |
-//|                      in sync with the EMA's own window (the fix from        |
-//|                      1.006 - level and EMA must describe the same window     |
-//|                      or "in decision range" never engages).                 |
-//| 1.012              - Added a fixed pip preset for SL/trail (InpUseFixedStops |
-//|                      = true by default): 25-pip SL, 10-pip trail, using the  |
-//|                      same cent-aware pip-size split already proven on this   |
-//|                      session's other gold EAs (.sc symbol = 1 pip/0.01,      |
-//|                      standard XAUUSD = 1 pip/0.10). The trail distance is    |
-//|                      intentionally DECOUPLED from the SL distance in this    |
-//|                      mode (ManageTrailing() normally trails at the same      |
-//|                      distance as the initial SL - that still holds in ATR    |
-//|                      mode, InpUseFixedStops=false, but the whole point of    |
-//|                      this preset is a narrower trail than the SL width).     |
-//| 1.013              - Fixed "no entry traded": the .sc=0.01/standard=0.10     |
-//|                      pip split was wrong for this account. Confirmed via     |
-//|                      Journal (attempts=6, accepted=0, spread/concurrency     |
-//|                      gates clear) that the 25-pip SL at 0.01/pip (~$0.25)     |
-//|                      was tighter than this EA's own zero-stops-level          |
-//|                      fallback minimum, rejecting every attempt at the        |
-//|                      distance gate. Both InpXAUUSDscPipPrice and             |
-//|                      InpStandardXAUUSDPipPrice now default to 0.10.          |
+//| 1.014              - Restarted from 1.009 (M5-M30-EMA47 experiment          |
+//|                      dropped per instruction), 6-timeframe M5->D1 EMA100     |
+//|                      confluence + rejection candle stays as-is. Added a      |
+//|                      fixed pip preset (InpUseFixedStops, default ON):        |
+//|                      21-pip SL, 7-pip trail, decoupled from each other       |
+//|                      (trail is narrower than SL, not derived from it).       |
+//|                      Trailing activates as soon as the position is in ANY    |
+//|                      profit (favorable>0), not after a full trail-          |
+//|                      distance's worth like ATR mode - explicit request      |
+//|                      ("start trailing when p/l become positive"). Pip size   |
+//|                      defaults to the standard gold convention (0.10) for     |
+//|                      both cent and standard symbols - confirmed live on an   |
+//|                      earlier attempt that a 0.01 cent-suffix assumption      |
+//|                      made a fixed SL too tight to clear this EA's own        |
+//|                      broker-safety minimum, rejecting every entry.           |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.013"
+#property version   "1.014"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -136,18 +123,17 @@ enum ENUM_EZY_ACCOUNT_SCALE
 //======================================================================
 // Inputs
 //======================================================================
-input group "=== EMA(period) + SND Confluence Entries: per-timeframe pairing, fade the touch ==="
+input group "=== EMA100 + SND Confluence Entries: per-timeframe pairing, fade the touch ==="
 // Each timeframe's SND (supply/demand) level must pair with THAT SAME
 // timeframe's EMA100 to trigger - not a single EMA against a stack of
-// levels. M15 SND pairs only with M15 EMA100, and so on through
-// H1/H4/D1 (M5 and M30 have been removed from the stack). "Loose zone
-// confluence": if the live EMA100 (same TF) value sits within
-// InpDecisionRangeRatio of its matching SND level's OWN window range
-// (not a fixed $ amount - a fixed points value cannot work across
-// timeframes whose realized ranges differ by an order of magnitude: an
-// M15 100-bar window spans ~1 day, a D1 100-bar window spans ~100 days.
-// Confirmed live: even a loose 500-point fixed tolerance produced "in
-// decision range=0" on
+// levels. M5 SND pairs only with M5 EMA100, M15 SND only with M15
+// EMA100, and so on through M30/H1/H4/D1. "Loose zone confluence": if
+// the live EMA100 (same TF) value sits within InpDecisionRangeRatio of
+// its matching SND level's OWN window range (not a fixed $ amount - a
+// fixed points value cannot work across 6 timeframes whose realized
+// ranges differ by an order of magnitude: an M5 100-bar window spans ~8
+// hours, a D1 100-bar window spans ~100 days. Confirmed live: even a
+// loose 500-point fixed tolerance produced "in decision range=0" on
 // every single timeframe throughout a full test - the fixed-point
 // design cannot work at any single value). Decision range and touch
 // tolerance are now both expressed as a RATIO of that level's own hi-lo
@@ -160,7 +146,7 @@ input group "=== EMA(period) + SND Confluence Entries: per-timeframe pairing, fa
 // OWN bar close, not on every tick - a rejection pattern only exists
 // once its bar has finished forming.
 input bool   InpEnableConfluenceEntries          = true;
-input int    InpEmaPeriod                        = 47;
+input int    InpEmaPeriod                        = 100;
 input double InpDecisionRangeRatio               = 0.50;
 input double InpConfluenceTouchToleranceRatio    = 0.08;
 input int    InpConfluenceReentrySeconds         = 60;
@@ -193,20 +179,21 @@ input bool   InpEnableTrendFilter                = true;
 input int    InpAdxPeriod                        = 14;
 input double InpAdxTrendThreshold                = 25.0;
 
-input group "=== SND Levels: M15/H1/H4/Daily swing high/low, one EMA(period) per TF (M5, M30 removed) ==="
-// Lookback matched to InpEmaPeriod (47 bars) on purpose. A slow-ish EMA
-// average over an N-bar window paired against a level built from a much
-// shorter window (the original 24/32/20/24/15/8 defaults, several times
-// shorter than the EMA) almost never sits near that EMA - it's a rare
-// coincidence rather than a real pairing, which is why zero trades fired
-// the first time this was tried. Building each level from the SAME
-// N-bar window the EMA itself averages makes "EMA near its own level" a
-// normal, frequent occurrence instead of a structural near-impossibility.
-// If InpEmaPeriod is changed, change these to match.
-input int    InpLevelLookbackM15                 = 47;
-input int    InpLevelLookbackH1                  = 47;
-input int    InpLevelLookbackH4                  = 47;
-input int    InpLevelLookbackD1                  = 47;
+input group "=== SND Levels: M5/M15/M30/H1/H4/Daily swing high/low, one EMA100 per TF ==="
+// Lookback matched to InpEmaPeriod (100 bars) on purpose. EMA100 is a
+// slow average over a 100-bar window; a level built from a much shorter
+// window (the original 24/32/20/24/15/8 defaults, 3-12x shorter than the
+// EMA) almost never sits near that EMA - it's a rare coincidence rather
+// than a real pairing, which is why zero trades fired even after
+// widening the decision range. Building each level from the SAME
+// 100-bar window the EMA itself averages makes "EMA near its own level"
+// a normal, frequent occurrence instead of a structural near-impossibility.
+input int    InpLevelLookbackM5                  = 100;
+input int    InpLevelLookbackM15                 = 100;
+input int    InpLevelLookbackM30                 = 100;
+input int    InpLevelLookbackH1                  = 100;
+input int    InpLevelLookbackH4                  = 100;
+input int    InpLevelLookbackD1                  = 100;
 
 input group "=== Stops / Trail (ATR-based, M5) - used only when InpUseFixedStops is OFF ==="
 input int    InpAtrPeriod                        = 14;
@@ -214,25 +201,21 @@ input double InpAtrSlMultiplier                  = 1.5;
 input double InpTrailMinStepPoints               = 20.0;
 
 input group "=== Fixed Pip Preset (overrides ATR sizing when enabled) ==="
-// Trailing is intentionally a SEPARATE, narrower distance from the SL
-// (10 pips vs 25) - ManageTrailing() normally trails at the same
-// distance as the position's initial SL (the proven "activation floor =
-// trail distance" rule), but a fixed preset with a different trail
-// width needs that decoupled, so InpFixedTrailPips is read directly
-// instead of being derived from the open SL distance.
+// Trail distance (7 pips) is DECOUPLED from the SL distance (21 pips) -
+// ManageTrailing() normally trails at the same distance the SL was
+// placed at, but a preset with a narrower trail needs that separated.
+// Trailing activates as soon as the position is in ANY profit
+// (favorable > 0), not after a full trail-distance's worth of profit -
+// requested explicitly ("start trailing when p/l become positive"),
+// unlike ATR mode's activation-floor-equals-trail-distance rule, which
+// is unchanged. Pip size: confirmed live that 1 pip = 0.01 (a
+// cent-suffix assumption borrowed from a different EA/broker) made a
+// fixed SL far tighter than this EA's own broker-safety minimum,
+// rejecting every entry - both pip-price inputs below now default to
+// the standard gold convention, 1 pip = 0.10.
 input bool   InpUseFixedStops                    = true;
-input double InpFixedSlPips                      = 25.0;
-input double InpFixedTrailPips                   = 10.0;
-// Confirmed live: the V5-borrowed assumption that a .sc (cent) suffixed
-// symbol quotes 1 pip = 1 point (0.01) was wrong for this account/broker
-// - it made the 25-pip SL (~$0.25) far tighter than even this EA's own
-// zero-stops-level fallback minimum (0.05% of a ~$4000+ gold price is
-// ~$2+), so every entry attempt was rejected at the distance gate before
-// opening (confirmed via attempts=6/accepted=0 in the Journal, spread
-// and concurrency gates both clear). Both symbol types now default to
-// the standard gold convention, 1 pip = 10 points (0.10) = $0.10, giving
-// a 25-pip SL of ~$2.50 - still tighter than the old ATR sizing (~$8-9)
-// but a plausible, tradeable distance rather than a structural block.
+input double InpFixedSlPips                      = 21.0;
+input double InpFixedTrailPips                   = 7.0;
 input double InpXAUUSDscPipPrice                 = 0.10;
 input double InpStandardXAUUSDPipPrice           = 0.10;
 
@@ -325,14 +308,13 @@ datetime g_lastAdxH1BarTime = 0;
 int      g_trendDirection   = 0;   // 1 up, -1 down, 0 no strong trend
 double   g_lastAdxValue     = 0.0;
 
-// 4 timeframes (M5, M30 removed - M15/H1/H4/D1 only), one EMA100 handle
-// each, fixed slot order matched 1:1 with g_levels' slot order
-// (slot i -> g_levels[i*2]/[i*2+1]).
-#define EZY_TF_COUNT 4
+// 6 timeframes, one EMA100 handle each, fixed slot order matched 1:1
+// with g_levels' slot order (slot i -> g_levels[i*2]/[i*2+1]).
+#define EZY_TF_COUNT 6
 int              g_handleEma[EZY_TF_COUNT];
 double           g_emaValue[EZY_TF_COUNT];
-ENUM_TIMEFRAMES  g_emaTf[EZY_TF_COUNT]    = {PERIOD_M15,PERIOD_H1,PERIOD_H4,PERIOD_D1};
-string           g_emaTfLabel[EZY_TF_COUNT] = {"M15","H1","H4","D1"};
+ENUM_TIMEFRAMES  g_emaTf[EZY_TF_COUNT]    = {PERIOD_M5,PERIOD_M15,PERIOD_M30,PERIOD_H1,PERIOD_H4,PERIOD_D1};
+string           g_emaTfLabel[EZY_TF_COUNT] = {"M5","M15","M30","H1","H4","D1"};
 
 double g_accountUnitDivisor = 1.0;
 
@@ -354,12 +336,14 @@ int g_gateSizingRejects      = 0;
 int g_gateDrawdownRejects    = 0;
 int g_gateTrendRejects       = 0;
 
-// 4 timeframes (M15/H1/H4/D1) x 2 levels (swing high=supply,
+// 6 timeframes (M5/M15/M30/H1/H4/D1) x 2 levels (swing high=supply,
 // swing low=demand) each. Slot i's pair lives at g_levels[i*2]/[i*2+1]
 // and is checked against g_emaValue[i] - the SAME timeframe's EMA100.
-LevelTouchState g_levels[8];
+LevelTouchState g_levels[12];
 
+datetime g_lastM5LevelBarTime  = 0;
 datetime g_lastM15LevelBarTime = 0;
+datetime g_lastM30LevelBarTime = 0;
 datetime g_lastH1LevelBarTime  = 0;
 datetime g_lastH4LevelBarTime  = 0;
 datetime g_lastD1LevelBarTime  = 0;
@@ -498,7 +482,9 @@ int OnInit()
       g_levels[i].cooldownUntil=0;
       g_levels[i].tfLabel="";
    }
+   g_lastM5LevelBarTime  = 0;
    g_lastM15LevelBarTime = 0;
+   g_lastM30LevelBarTime = 0;
    g_lastH1LevelBarTime  = 0;
    g_lastH4LevelBarTime  = 0;
    g_lastD1LevelBarTime  = 0;
@@ -506,7 +492,7 @@ int OnInit()
    g_peakEquity=AccountInfoDouble(ACCOUNT_EQUITY);
    g_tradingHalted=false;
 
-   Log("EzyEA V1 (EMA"+IntegerToString(InpEmaPeriod)+" x"+IntegerToString(EZY_TF_COUNT)+"TF + SND confluence) initialized on "+_Symbol+
+   Log("EzyEA V1 (EMA"+IntegerToString(InpEmaPeriod)+" x6TF + SND confluence) initialized on "+_Symbol+
        " | account unit divisor="+DoubleToString(g_accountUnitDivisor,2)+
        " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
        " | max concurrent="+IntegerToString(InpMaxConcurrentPositions)+
@@ -514,7 +500,7 @@ int OnInit()
        " | decision range ratio="+DoubleToString(InpDecisionRangeRatio,2)+
        " | trend filter="+(InpEnableTrendFilter?"ON (ADX>="+DoubleToString(InpAdxTrendThreshold,0)+")":"OFF")+
        " | stops="+(InpUseFixedStops
-                    ?"FIXED "+DoubleToString(InpFixedSlPips,1)+"pip SL/"+DoubleToString(InpFixedTrailPips,1)+"pip trail (pipSize="+DoubleToString(StrategyPipSize(),_Digits)+")"
+                    ?"FIXED "+DoubleToString(InpFixedSlPips,1)+"pip SL/"+DoubleToString(InpFixedTrailPips,1)+"pip trail, activates at breakeven (pipSize="+DoubleToString(StrategyPipSize(),_Digits)+")"
                     :"ATR x"+DoubleToString(InpAtrSlMultiplier,2))+
        " | drawdown breaker="+(InpEnableDrawdownBreaker?DoubleToString(InpMaxEquityDrawdownPct,1)+"%":"OFF"));
 
@@ -1119,36 +1105,52 @@ void RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback,stri
 // exactly where price now is).
 void UpdateLevelsOnNewBars()
 {
+   datetime m5=iTime(_Symbol,PERIOD_M5,0);
+   if(m5!=0 && m5!=g_lastM5LevelBarTime)
+   {
+      g_lastM5LevelBarTime=m5;
+      CheckRejectionEntry(0,PERIOD_M5);
+      RebuildLevelForTimeframe(0,PERIOD_M5,InpLevelLookbackM5,"M5");
+   }
+
    datetime m15=iTime(_Symbol,PERIOD_M15,0);
    if(m15!=0 && m15!=g_lastM15LevelBarTime)
    {
       g_lastM15LevelBarTime=m15;
-      CheckRejectionEntry(0,PERIOD_M15);
-      RebuildLevelForTimeframe(0,PERIOD_M15,InpLevelLookbackM15,"M15");
+      CheckRejectionEntry(1,PERIOD_M15);
+      RebuildLevelForTimeframe(1,PERIOD_M15,InpLevelLookbackM15,"M15");
+   }
+
+   datetime m30=iTime(_Symbol,PERIOD_M30,0);
+   if(m30!=0 && m30!=g_lastM30LevelBarTime)
+   {
+      g_lastM30LevelBarTime=m30;
+      CheckRejectionEntry(2,PERIOD_M30);
+      RebuildLevelForTimeframe(2,PERIOD_M30,InpLevelLookbackM30,"M30");
    }
 
    datetime h1=iTime(_Symbol,PERIOD_H1,0);
    if(h1!=0 && h1!=g_lastH1LevelBarTime)
    {
       g_lastH1LevelBarTime=h1;
-      CheckRejectionEntry(1,PERIOD_H1);
-      RebuildLevelForTimeframe(1,PERIOD_H1,InpLevelLookbackH1,"H1");
+      CheckRejectionEntry(3,PERIOD_H1);
+      RebuildLevelForTimeframe(3,PERIOD_H1,InpLevelLookbackH1,"H1");
    }
 
    datetime h4=iTime(_Symbol,PERIOD_H4,0);
    if(h4!=0 && h4!=g_lastH4LevelBarTime)
    {
       g_lastH4LevelBarTime=h4;
-      CheckRejectionEntry(2,PERIOD_H4);
-      RebuildLevelForTimeframe(2,PERIOD_H4,InpLevelLookbackH4,"H4");
+      CheckRejectionEntry(4,PERIOD_H4);
+      RebuildLevelForTimeframe(4,PERIOD_H4,InpLevelLookbackH4,"H4");
    }
 
    datetime d1=iTime(_Symbol,PERIOD_D1,0);
    if(d1!=0 && d1!=g_lastD1LevelBarTime)
    {
       g_lastD1LevelBarTime=d1;
-      CheckRejectionEntry(3,PERIOD_D1);
-      RebuildLevelForTimeframe(3,PERIOD_D1,InpLevelLookbackD1,"D1");
+      CheckRejectionEntry(5,PERIOD_D1);
+      RebuildLevelForTimeframe(5,PERIOD_D1,InpLevelLookbackD1,"D1");
    }
 }
 
@@ -1419,13 +1421,18 @@ void ManageTrailing()
       if(slDistance<=0.0) continue;
 
       // Fixed-preset mode trails at a DIFFERENT (narrower) distance than
-      // the initial SL - e.g. 25-pip SL, 10-pip trail - so the trail
+      // the initial SL - e.g. 21-pip SL, 7-pip trail - so the trail
       // distance is decoupled from the position's own SL distance here.
       // ATR mode keeps the original "activation floor = trail distance"
-      // rule (trails at the same distance the SL was placed at).
+      // rule (trails at the same distance the SL was placed at). Fixed
+      // mode instead activates as soon as the position is in ANY profit
+      // (favorable > 0), per explicit request ("start trailing when p/l
+      // become positive") rather than waiting for a full trail-distance
+      // worth of profit first.
       double trailDistance=(InpUseFixedStops && InpFixedTrailPips>0.0)
                            ?InpFixedTrailPips*StrategyPipSize()
                            :slDistance;
+      double activationFloor=InpUseFixedStops?0.0:trailDistance;
 
       int slot=EnsureManagedSlot(ticket);
       if(slot<0) continue;
@@ -1439,7 +1446,7 @@ void ManageTrailing()
                        ?(g_managed[slot].peakPrice-openPrice)
                        :(openPrice-g_managed[slot].peakPrice);
 
-      if(favorable<trailDistance) continue;
+      if(favorable<activationFloor) continue;
 
       double candidateSl=RoundPrice((direction==1)
                          ?g_managed[slot].peakPrice-trailDistance
@@ -1497,7 +1504,7 @@ void EnforceMaxHoldingTime()
 }
 
 //======================================================================
-// Chart drawing (EMA(period) x4TF + SND levels + status label)
+// Chart drawing (EMA100 x6TF + SND levels + status label)
 //======================================================================
 int CountActiveLevels()
 {
@@ -1522,7 +1529,7 @@ void DrawReferences()
    // One short EMA100 segment per timeframe (own TF bar times as
    // x-coordinates - valid even on an M5 chart, since object
    // coordinates are just absolute datetimes).
-   color emaColors[EZY_TF_COUNT]={clrYellow,clrDeepSkyBlue,clrDodgerBlue,clrMediumPurple};
+   color emaColors[EZY_TF_COUNT]={clrOrange,clrYellow,clrGold,clrDeepSkyBlue,clrDodgerBlue,clrMediumPurple};
    for(int tfi=0;tfi<EZY_TF_COUNT;tfi++)
    {
       double buf[];
