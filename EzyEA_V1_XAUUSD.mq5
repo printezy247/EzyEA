@@ -66,9 +66,18 @@
 //|                      SUPPLY), matching the convention used by EzyEA         |
 //|                      V2/V3/V4 for this same swing-high/low level system.    |
 //|                      No functional change.                                 |
+//| 1.008              - Fixed the early correlated-pile crash seen on the      |
+//|                      equity graph (sharp drop right after the first burst   |
+//|                      of entries, then flat/dead for the rest of the test):  |
+//|                      added an H1 ADX trend filter (blocks a fade running    |
+//|                      directly against a confirmed strong trend - the same   |
+//|                      fix already proven on EzyEA V2 for this identical      |
+//|                      symptom) and InpMaxConcurrentPerDirection (3) to cap   |
+//|                      how many same-direction positions can pile up from     |
+//|                      repeated touches within the re-entry cooldown.         |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.007"
+#property version   "1.008"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -113,6 +122,19 @@ input double InpDecisionRangeRatio               = 0.50;
 input double InpConfluenceTouchToleranceRatio    = 0.08;
 input int    InpConfluenceReentrySeconds         = 60;
 
+input group "=== Trend Filter (H1 ADX) - blocks fades against a strong trend ==="
+// The equity graph showed a sharp early crash: a burst of same-direction
+// entries piled up while price was in one confluence zone, all
+// correlated, and lost together when the move continued. This is the
+// exact mechanism diagnosed on EzyEA V2 earlier this session and fixed
+// the same way there: block a fade that runs directly against a
+// confirmed strong H1 trend. Does not change which mechanism generates
+// entries (SND+EMA100 confluence is still the only trigger) - it only
+// blocks the ones fighting a real trend.
+input bool   InpEnableTrendFilter                = true;
+input int    InpAdxPeriod                        = 14;
+input double InpAdxTrendThreshold                = 25.0;
+
 input group "=== SND Levels: M5/M15/M30/H1/H4/Daily swing high/low, one EMA100 per TF ==="
 // Lookback matched to InpEmaPeriod (100 bars) on purpose. EMA100 is a
 // slow average over a 100-bar window; a level built from a much shorter
@@ -140,6 +162,11 @@ input int    InpMaxHoldingMinutes                = 60;
 input group "=== Risk / Sizing ==="
 input double InpRiskPercentPerTrade              = 0.25;
 input int    InpMaxConcurrentPositions           = 10;
+// Caps how many same-direction positions can pile up from repeated
+// touches of the same (or different) confluence zones within the
+// re-entry cooldown window - the other half of the fix for the
+// correlated-pile crash seen on the equity graph.
+input int    InpMaxConcurrentPerDirection        = 3;
 input double InpMaxLotsAbsolute                  = 5.0;
 input double InpMaxMarginUsePct                  = 40.0;
 // Confirmed live on V4: leaving this on let a risk% input become
@@ -212,6 +239,11 @@ struct LevelTouchState
 CTrade trade;
 
 int g_handleAtrM5 = INVALID_HANDLE;
+int g_handleAdxH1 = INVALID_HANDLE;
+
+datetime g_lastAdxH1BarTime = 0;
+int      g_trendDirection   = 0;   // 1 up, -1 down, 0 no strong trend
+double   g_lastAdxValue     = 0.0;
 
 // 6 timeframes, one EMA100 handle each, fixed slot order matched 1:1
 // with g_levels' slot order (slot i -> g_levels[i*2]/[i*2+1]).
@@ -239,6 +271,7 @@ int g_gateConcurrencyRejects = 0;
 int g_gateDistanceRejects    = 0;
 int g_gateSizingRejects      = 0;
 int g_gateDrawdownRejects    = 0;
+int g_gateTrendRejects       = 0;
 
 // 6 timeframes (M5/M15/M30/H1/H4/D1) x 2 levels (swing high=supply,
 // swing low=demand) each. Slot i's pair lives at g_levels[i*2]/[i*2+1]
@@ -290,11 +323,15 @@ double MedianOfSpreadSamples(double &values[],int count);
 bool   SpreadAllowed();
 
 int    CountOpenPositions();
+int    CountOpenPositionsByDirection(int direction);
 
 int    CopyBufferSeries(int handle,int bufferIndex,int count,double &out[]);
 
 void   CloseAllPositions(string reason);
 void   UpdateDrawdownBreaker();
+
+void   UpdateTrendFilterOnNewH1Bar();
+bool   TrendFilterAllows(int direction);
 
 void   TryOpenPosition(int direction,string tag,double slDistance);
 
@@ -350,6 +387,16 @@ int OnInit()
       }
    }
 
+   g_handleAdxH1 = iADX(_Symbol,PERIOD_H1,InpAdxPeriod);
+   if(g_handleAdxH1==INVALID_HANDLE)
+   {
+      Log("Indicator handle creation failed (ADX H1).");
+      return INIT_FAILED;
+   }
+   g_lastAdxH1BarTime=0;
+   g_trendDirection=0;
+   g_lastAdxValue=0.0;
+
    g_accountUnitDivisor = ResolveAccountUnitDivisor();
 
    int capacity = SpreadCalibrationTicksEffective();
@@ -387,7 +434,9 @@ int OnInit()
        " | account unit divisor="+DoubleToString(g_accountUnitDivisor,2)+
        " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
        " | max concurrent="+IntegerToString(InpMaxConcurrentPositions)+
+       " (per-direction="+IntegerToString(InpMaxConcurrentPerDirection)+")"+
        " | decision range ratio="+DoubleToString(InpDecisionRangeRatio,2)+
+       " | trend filter="+(InpEnableTrendFilter?"ON (ADX>="+DoubleToString(InpAdxTrendThreshold,0)+")":"OFF")+
        " | drawdown breaker="+(InpEnableDrawdownBreaker?DoubleToString(InpMaxEquityDrawdownPct,1)+"%":"OFF"));
 
    return INIT_SUCCEEDED;
@@ -398,6 +447,7 @@ void OnDeinit(const int reason)
    WriteFinalReport();
 
    if(g_handleAtrM5!=INVALID_HANDLE) IndicatorRelease(g_handleAtrM5);
+   if(g_handleAdxH1!=INVALID_HANDLE) IndicatorRelease(g_handleAdxH1);
    for(int i=0;i<EZY_TF_COUNT;i++)
       if(g_handleEma[i]!=INVALID_HANDLE) IndicatorRelease(g_handleEma[i]);
 
@@ -407,6 +457,7 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    UpdateDrawdownBreaker();
+   UpdateTrendFilterOnNewH1Bar();
 
    if(InpEnableConfluenceEntries)
    {
@@ -721,6 +772,23 @@ int CountOpenPositions()
    return count;
 }
 
+int CountOpenPositionsByDirection(int direction)
+{
+   int count=0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+
+      int posDirection=((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)?1:-1;
+      if(posDirection==direction) count++;
+   }
+   return count;
+}
+
 //======================================================================
 // Indicator buffer helper (as-series: out[0]=forming/live bar, out[1]=
 // last closed bar, out[2]=the bar before it)
@@ -796,6 +864,44 @@ void UpdateDrawdownBreaker()
 }
 
 //======================================================================
+// H1 ADX trend filter: does not change which mechanism generates
+// entries (SND+EMA100 confluence is still the only trigger) - it only
+// blocks a fade that runs directly against a confirmed strong trend.
+// Same fix proven on EzyEA V2 for the identical correlated-pile symptom.
+//======================================================================
+void UpdateTrendFilterOnNewH1Bar()
+{
+   if(!InpEnableTrendFilter) return;
+
+   datetime h1=iTime(_Symbol,PERIOD_H1,0);
+   if(h1==0 || h1==g_lastAdxH1BarTime) return;
+   g_lastAdxH1BarTime=h1;
+
+   double adxBuf[],plusBuf[],minusBuf[];
+   if(CopyBufferSeries(g_handleAdxH1,0,3,adxBuf)<3)   return;
+   if(CopyBufferSeries(g_handleAdxH1,1,3,plusBuf)<3)  return;
+   if(CopyBufferSeries(g_handleAdxH1,2,3,minusBuf)<3) return;
+
+   double adx    =adxBuf[1];
+   double plusDI =plusBuf[1];
+   double minusDI=minusBuf[1];
+
+   g_lastAdxValue=adx;
+
+   if(adx>=InpAdxTrendThreshold)
+      g_trendDirection=(plusDI>minusDI)?1:((minusDI>plusDI)?-1:0);
+   else
+      g_trendDirection=0;
+}
+
+bool TrendFilterAllows(int direction)
+{
+   if(!InpEnableTrendFilter) return true;
+   if(g_trendDirection==0) return true;
+   return direction==g_trendDirection;
+}
+
+//======================================================================
 // Entry execution
 //======================================================================
 void TryOpenPosition(int direction,string tag,double slDistance)
@@ -809,6 +915,12 @@ void TryOpenPosition(int direction,string tag,double slDistance)
    }
 
    if(CountOpenPositions()>=InpMaxConcurrentPositions)
+   {
+      g_gateConcurrencyRejects++;
+      return;
+   }
+
+   if(CountOpenPositionsByDirection(direction)>=InpMaxConcurrentPerDirection)
    {
       g_gateConcurrencyRejects++;
       return;
@@ -975,6 +1087,12 @@ void UpdateEmaValues()
 
 void TryConfluenceEntry(int direction,double levelPrice)
 {
+   if(!TrendFilterAllows(direction))
+   {
+      g_gateTrendRejects++;
+      return;
+   }
+
    double atrBuf[];
    if(CopyBufferSeries(g_handleAtrM5,0,3,atrBuf)<3) return;
 
@@ -1358,10 +1476,13 @@ void PeriodicStatusLog()
    double equity=AccountInfoDouble(ACCOUNT_EQUITY);
    double ddPct =(g_peakEquity>0.0)?(g_peakEquity-equity)/g_peakEquity*100.0:0.0;
 
+   string trendText=(g_trendDirection==1?"UP":(g_trendDirection==-1?"DOWN":"NONE"));
+
    Log("V1 LIVE PARITY STATUS"+
        " | SND active="+IntegerToString(CountActiveLevels())+"/"+IntegerToString(ArraySize(g_levels))+
        " | in decision range="+IntegerToString(CountLevelsInDecisionRange())+
        " | open="+IntegerToString(CountOpenPositions())+"/"+IntegerToString(InpMaxConcurrentPositions)+
+       " | adx="+DoubleToString(g_lastAdxValue,1)+" trend="+trendText+
        " | drawdown="+DoubleToString(ddPct,2)+"%"+(g_tradingHalted?" (HALTED)":"")+
        " | equity="+DoubleToString(EffectiveAccountEquity(),2)+" "+AccountInfoString(ACCOUNT_CURRENCY));
 
@@ -1373,7 +1494,8 @@ void PeriodicStatusLog()
        " | concurrencyRejects="+IntegerToString(g_gateConcurrencyRejects)+
        " | distanceRejects="+IntegerToString(g_gateDistanceRejects)+
        " | sizingRejects="+IntegerToString(g_gateSizingRejects)+
-       " | drawdownRejects="+IntegerToString(g_gateDrawdownRejects));
+       " | drawdownRejects="+IntegerToString(g_gateDrawdownRejects)+
+       " | trendRejects="+IntegerToString(g_gateTrendRejects));
 }
 
 // Summarizes this EA's own deal history (by symbol+magic) at shutdown -
