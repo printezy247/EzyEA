@@ -38,9 +38,15 @@
 //|                      levels. Decision range/touch tolerance widened          |
 //|                      (100/30 -> 400/50 pts) since the M5-only build's zero-  |
 //|                      trades result was most likely a too-tight zone.        |
+//| 1.005              - Still zero trades. Root cause: EMA100 averages a        |
+//|                      100-bar window but levels used a much shorter          |
+//|                      lookback (24/32/20/24/15/8 bars, 3-12x shorter) -       |
+//|                      a slow EMA almost never sits near a fast extreme.       |
+//|                      All 6 lookbacks now match the EMA period (100 bars)    |
+//|                      so the level and its EMA describe the same window.     |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.004"
+#property version   "1.005"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -83,12 +89,20 @@ input double InpConfluenceTouchTolerancePoints   = 50.0;
 input int    InpConfluenceReentrySeconds         = 60;
 
 input group "=== SNR Levels: M5/M15/M30/H1/H4/Daily swing high/low, one EMA100 per TF ==="
-input int    InpLevelLookbackM5                  = 24;
-input int    InpLevelLookbackM15                 = 32;
-input int    InpLevelLookbackM30                 = 20;
-input int    InpLevelLookbackH1                  = 24;
-input int    InpLevelLookbackH4                  = 15;
-input int    InpLevelLookbackD1                  = 8;
+// Lookback matched to InpEmaPeriod (100 bars) on purpose. EMA100 is a
+// slow average over a 100-bar window; a level built from a much shorter
+// window (the original 24/32/20/24/15/8 defaults, 3-12x shorter than the
+// EMA) almost never sits near that EMA - it's a rare coincidence rather
+// than a real pairing, which is why zero trades fired even after
+// widening the decision range. Building each level from the SAME
+// 100-bar window the EMA itself averages makes "EMA near its own level"
+// a normal, frequent occurrence instead of a structural near-impossibility.
+input int    InpLevelLookbackM5                  = 100;
+input int    InpLevelLookbackM15                 = 100;
+input int    InpLevelLookbackM30                 = 100;
+input int    InpLevelLookbackH1                  = 100;
+input int    InpLevelLookbackH4                  = 100;
+input int    InpLevelLookbackD1                  = 100;
 
 input group "=== Stops / Trail (ATR-based, M5) ==="
 input int    InpAtrPeriod                        = 14;
