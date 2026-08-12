@@ -7,8 +7,11 @@
 //| the M15 EMA100, and so on through M30/H1/H4/D1 - six independent     |
 //| same-timeframe pairings, not one EMA checked against every level.    |
 //| For each SNR level, if its own timeframe's live EMA100 value sits    |
-//| within InpDecisionRangePoints of it (a wide "decision range"         |
-//| tolerance, not a tight cluster check), the pairing becomes an        |
+//| within InpDecisionRangeRatio of that level's own hi-lo range (a wide |
+//| "decision range" tolerance, not a tight cluster check, and NOT a     |
+//| fixed $ amount - it scales with each timeframe's own realized range  |
+//| since a fixed points value cannot work across timeframes whose       |
+//| ranges differ by an order of magnitude), the pairing becomes an      |
 //| active trigger zone spanning EMA100->level. Price touching anywhere  |
 //| in that zone fades in the level's own direction (resistance ->       |
 //| SELL, support -> BUY) - reusing the level's intrinsic type rather    |
@@ -44,9 +47,22 @@
 //|                      a slow EMA almost never sits near a fast extreme.       |
 //|                      All 6 lookbacks now match the EMA period (100 bars)    |
 //|                      so the level and its EMA describe the same window.     |
+//| 1.006              - STILL zero trades - confirmed via live Journal log:    |
+//|                      "in decision range=0" on EVERY line, all 6 TFs, even   |
+//|                      with a 500-point cached tolerance. Root cause: a       |
+//|                      FIXED points decision range/tolerance cannot work      |
+//|                      across 6 timeframes whose realized ranges differ by    |
+//|                      an order of magnitude (M5 100-bar window ~8h vs D1     |
+//|                      100-bar window ~100 days). Replaced                    |
+//|                      InpDecisionRangePoints/InpConfluenceTouchTolerance-    |
+//|                      Points with InpDecisionRangeRatio (0.50) /             |
+//|                      InpConfluenceTouchToleranceRatio (0.08), each level    |
+//|                      now scales its own zone off its own hi-lo range over   |
+//|                      its lookback window (new LevelTouchState.rangeWidth    |
+//|                      field), so the zone naturally fits every timeframe.    |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.005"
+#property version   "1.006"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -69,23 +85,25 @@ input group "=== EMA100 + SNR Confluence Entries: per-timeframe pairing, fade th
 // to trigger - not a single EMA against a stack of levels. M5 SNR pairs
 // only with M5 EMA100, M15 SNR only with M15 EMA100, and so on through
 // M30/H1/H4/D1. "Loose zone confluence": if the live EMA100 (same TF)
-// value sits within InpDecisionRangePoints of its matching SNR level,
-// that pairing becomes an active trigger zone spanning EMA100->level (not
-// requiring them to be at the exact same price like a tight overlap
-// check). A touch of that zone (price entering within
-// InpConfluenceTouchTolerancePoints of it) is FADED in the LEVEL's own
-// direction (resistance -> SELL, support -> BUY) - not by which side
-// price approached from, since a wide zone makes that ambiguous far
-// more often than a tight overlap would. Same envelope-crossing touch
-// detection (previous-vs-current-tick) proven this session throughout.
-// Decision range / touch tolerance widened from the M5-only build
-// (100/30 pts) to 400/50 pts - the M5-only build took zero trades, most
-// likely because 100 pts (~$1) is far tighter than XAUUSD's typical
-// EMA-to-level separation even on M5.
+// value sits within InpDecisionRangeRatio of its matching SNR level's OWN
+// window range (not a fixed $ amount - a fixed points value cannot work
+// across 6 timeframes whose realized ranges differ by an order of
+// magnitude: an M5 100-bar window spans ~8 hours, a D1 100-bar window
+// spans ~100 days. Confirmed live: even a loose 500-point fixed
+// tolerance produced "in decision range=0" on every single timeframe
+// throughout a full test - the fixed-point design cannot work at any
+// single value). Decision range and touch tolerance are now both
+// expressed as a RATIO of that level's own hi-lo range over its lookback
+// window, so the zone naturally scales to each timeframe's own
+// volatility. A touch of that zone is FADED in the LEVEL's own direction
+// (resistance -> SELL, support -> BUY) - not by which side price
+// approached from, since a wide zone makes that ambiguous far more often
+// than a tight overlap would. Same envelope-crossing touch detection
+// (previous-vs-current-tick) proven this session throughout.
 input bool   InpEnableConfluenceEntries          = true;
 input int    InpEmaPeriod                        = 100;
-input double InpDecisionRangePoints              = 400.0;
-input double InpConfluenceTouchTolerancePoints   = 50.0;
+input double InpDecisionRangeRatio               = 0.50;
+input double InpConfluenceTouchToleranceRatio    = 0.08;
 input int    InpConfluenceReentrySeconds         = 60;
 
 input group "=== SNR Levels: M5/M15/M30/H1/H4/Daily swing high/low, one EMA100 per TF ==="
@@ -175,7 +193,8 @@ struct LevelTouchState
 {
    double   price;
    int      fadeDirection;   // 1 = demand (support), fade BUY; -1 = supply (resistance), fade SELL
-   bool     inZone;          // true when this level is currently within InpDecisionRangePoints of its own-TF EMA100
+   bool     inZone;          // true when this level is currently within InpDecisionRangeRatio of its own-TF EMA100
+   double   rangeWidth;      // this level's own hi-lo range over its lookback window - scales the decision/touch zone
    datetime cooldownUntil;
    string   tfLabel;
 };
@@ -340,6 +359,7 @@ int OnInit()
       g_levels[i].price=0.0;
       g_levels[i].fadeDirection=0;
       g_levels[i].inZone=false;
+      g_levels[i].rangeWidth=0.0;
       g_levels[i].cooldownUntil=0;
       g_levels[i].tfLabel="";
    }
@@ -360,7 +380,7 @@ int OnInit()
        " | account unit divisor="+DoubleToString(g_accountUnitDivisor,2)+
        " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
        " | max concurrent="+IntegerToString(InpMaxConcurrentPositions)+
-       " | decision range="+DoubleToString(InpDecisionRangePoints,0)+" pts"+
+       " | decision range ratio="+DoubleToString(InpDecisionRangeRatio,2)+
        " | drawdown breaker="+(InpEnableDrawdownBreaker?DoubleToString(InpMaxEquityDrawdownPct,1)+"%":"OFF"));
 
    return INIT_SUCCEEDED;
@@ -863,18 +883,22 @@ void RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback,stri
 
    if(hi<=-DBL_MAX || lo>=DBL_MAX) return;
 
+   double width=hi-lo;
+
    int supplyIdx=slotIndex*2;
    int demandIdx=slotIndex*2+1;
 
    g_levels[supplyIdx].price=RoundPrice(hi);
    g_levels[supplyIdx].fadeDirection=-1;
    g_levels[supplyIdx].inZone=false;
+   g_levels[supplyIdx].rangeWidth=width;
    g_levels[supplyIdx].cooldownUntil=0;
    g_levels[supplyIdx].tfLabel=tfLabel;
 
    g_levels[demandIdx].price=RoundPrice(lo);
    g_levels[demandIdx].fadeDirection=1;
    g_levels[demandIdx].inZone=false;
+   g_levels[demandIdx].rangeWidth=width;
    g_levels[demandIdx].cooldownUntil=0;
    g_levels[demandIdx].tfLabel=tfLabel;
 }
@@ -980,12 +1004,9 @@ void ProcessConfluenceTriggers()
       observedHi=MathMax(observedHi,g_previousCMP);
    }
 
-   double decisionRange=InpDecisionRangePoints*_Point;
-   double touchTolerance=InpConfluenceTouchTolerancePoints*_Point;
-
    for(int i=0;i<ArraySize(g_levels);i++)
    {
-      if(g_levels[i].price<=0.0)
+      if(g_levels[i].price<=0.0 || g_levels[i].rangeWidth<=0.0)
       {
          g_levels[i].inZone=false;
          continue;
@@ -1000,6 +1021,15 @@ void ProcessConfluenceTriggers()
          g_levels[i].inZone=false;
          continue;
       }
+
+      // Decision range/touch tolerance scale with THIS level's own
+      // hi-lo range over its lookback window, not a fixed $ amount - a
+      // fixed points value cannot work across 6 timeframes whose
+      // realized ranges differ by an order of magnitude (confirmed live:
+      // a fixed 500-point tolerance produced zero in-range events on
+      // every single timeframe).
+      double decisionRange=InpDecisionRangeRatio*g_levels[i].rangeWidth;
+      double touchTolerance=InpConfluenceTouchToleranceRatio*g_levels[i].rangeWidth;
 
       // "Loose zone confluence": the same-TF EMA100 does not need to sit
       // at the exact same price as the level - only within the wider
