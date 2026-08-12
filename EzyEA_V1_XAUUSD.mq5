@@ -75,9 +75,22 @@
 //|                      symptom) and InpMaxConcurrentPerDirection (3) to cap   |
 //|                      how many same-direction positions can pile up from     |
 //|                      repeated touches within the re-entry cooldown.         |
+//| 1.009              - Added a 3rd confluence: rejection candle (pin bar OR    |
+//|                      engulfing) required on the SAME bar that touches the    |
+//|                      EMA100/SND zone, in the fade direction. Requested       |
+//|                      after inconsistent day-to-day results with only 2       |
+//|                      confluences. Entries moved from tick-based touch        |
+//|                      detection to bar-close evaluation per timeframe         |
+//|                      (CheckRejectionEntry(), called from                     |
+//|                      UpdateLevelsOnNewBars() BEFORE that slot's level is     |
+//|                      rebuilt, so the zone being judged is the one price      |
+//|                      actually returned to, not one the new bar just          |
+//|                      redefined). ProcessConfluenceTriggers() now only        |
+//|                      updates the "in decision range" chart/status display    |
+//|                      per tick; it no longer opens positions.                 |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.008"
+#property version   "1.009"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -113,14 +126,30 @@ input group "=== EMA100 + SND Confluence Entries: per-timeframe pairing, fade th
 // timeframe's own volatility. A touch of that zone is FADED in the
 // LEVEL's own direction (supply -> SELL, demand -> BUY) - not by which
 // side price approached from, since a wide zone makes that ambiguous
-// far more often than a tight overlap would. Same envelope-crossing
-// touch detection (previous-vs-current-tick) proven this session
-// throughout.
+// far more often than a tight overlap would. As of the 3rd confluence
+// (rejection candle, below), this is now evaluated on each timeframe's
+// OWN bar close, not on every tick - a rejection pattern only exists
+// once its bar has finished forming.
 input bool   InpEnableConfluenceEntries          = true;
 input int    InpEmaPeriod                        = 100;
 input double InpDecisionRangeRatio               = 0.50;
 input double InpConfluenceTouchToleranceRatio    = 0.08;
 input int    InpConfluenceReentrySeconds         = 60;
+
+input group "=== Rejection Candle Confirmation (3rd confluence) ==="
+// A touch of the EMA100/SND zone is no longer enough by itself - the
+// closed bar that touches the zone must ALSO show a visible rejection:
+// either a pin bar (long wick opposite the fade direction, small body,
+// close on the favourable side) or an engulfing candle (this bar's body
+// fully engulfs the prior bar's body, in the fade direction). Requested
+// after a same-TF EMA+SND-only system produced inconsistent, sometimes
+// worse-than-V3 day-to-day results - this adds real price-action
+// confirmation instead of firing on proximity alone. Entries are
+// necessarily rarer and later (bar-close, not tick) as a result.
+input bool   InpRequireRejectionCandle           = true;
+input double InpRejectionMaxBodyRatio            = 0.35;
+input double InpRejectionMinWickRatio            = 0.50;
+input double InpRejectionMaxOppositeWickRatio    = 0.25;
 
 input group "=== Trend Filter (H1 ADX) - blocks fades against a strong trend ==="
 // The equity graph showed a sharp early crash: a burst of same-direction
@@ -285,9 +314,6 @@ datetime g_lastH1LevelBarTime  = 0;
 datetime g_lastH4LevelBarTime  = 0;
 datetime g_lastD1LevelBarTime  = 0;
 
-bool   g_hasPreviousCMP = false;
-double g_previousCMP    = 0.0;
-
 double g_peakEquity    = 0.0;
 bool   g_tradingHalted = false;
 
@@ -344,6 +370,10 @@ void   EnforceMaxHoldingTime();
 void   RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback,string tfLabel);
 void   UpdateLevelsOnNewBars();
 void   UpdateEmaValues();
+bool   IsRejectionPinBar(double o,double h,double l,double c,int direction);
+bool   IsEngulfingPattern(double prevOpen,double prevClose,double o,double c,int direction);
+bool   IsRejectionCandle(double prevOpen,double prevClose,double o,double h,double l,double c,int direction);
+void   CheckRejectionEntry(int slotIndex,ENUM_TIMEFRAMES tf);
 void   TryConfluenceEntry(int direction,double levelPrice);
 void   ProcessConfluenceTriggers();
 
@@ -423,9 +453,6 @@ int OnInit()
    g_lastH1LevelBarTime  = 0;
    g_lastH4LevelBarTime  = 0;
    g_lastD1LevelBarTime  = 0;
-
-   g_hasPreviousCMP=false;
-   g_previousCMP=0.0;
 
    g_peakEquity=AccountInfoDouble(ACCOUNT_EQUITY);
    g_tradingHalted=false;
@@ -1007,27 +1034,37 @@ void RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback,stri
    int supplyIdx=slotIndex*2;
    int demandIdx=slotIndex*2+1;
 
+   // cooldownUntil deliberately NOT reset here - CheckRejectionEntry()
+   // runs immediately before this call (same new-bar event) and may have
+   // just set it; resetting it here would silently defeat the re-entry
+   // cooldown on every single bar close.
    g_levels[supplyIdx].price=RoundPrice(hi);
    g_levels[supplyIdx].fadeDirection=-1;
    g_levels[supplyIdx].inZone=false;
    g_levels[supplyIdx].rangeWidth=width;
-   g_levels[supplyIdx].cooldownUntil=0;
    g_levels[supplyIdx].tfLabel=tfLabel;
 
    g_levels[demandIdx].price=RoundPrice(lo);
    g_levels[demandIdx].fadeDirection=1;
    g_levels[demandIdx].inZone=false;
    g_levels[demandIdx].rangeWidth=width;
-   g_levels[demandIdx].cooldownUntil=0;
    g_levels[demandIdx].tfLabel=tfLabel;
 }
 
+// Entry evaluation happens BEFORE the level is rebuilt for this new bar -
+// using the level's PRIOR state (established from earlier bars) against
+// the bar that JUST closed. This checks "did price return to an
+// already-existing zone and reject it", not "does the zone trivially
+// match wherever price just went" (which is what checking AFTER rebuild
+// would risk, since a new extreme bar can redefine the level to sit
+// exactly where price now is).
 void UpdateLevelsOnNewBars()
 {
    datetime m5=iTime(_Symbol,PERIOD_M5,0);
    if(m5!=0 && m5!=g_lastM5LevelBarTime)
    {
       g_lastM5LevelBarTime=m5;
+      CheckRejectionEntry(0,PERIOD_M5);
       RebuildLevelForTimeframe(0,PERIOD_M5,InpLevelLookbackM5,"M5");
    }
 
@@ -1035,6 +1072,7 @@ void UpdateLevelsOnNewBars()
    if(m15!=0 && m15!=g_lastM15LevelBarTime)
    {
       g_lastM15LevelBarTime=m15;
+      CheckRejectionEntry(1,PERIOD_M15);
       RebuildLevelForTimeframe(1,PERIOD_M15,InpLevelLookbackM15,"M15");
    }
 
@@ -1042,6 +1080,7 @@ void UpdateLevelsOnNewBars()
    if(m30!=0 && m30!=g_lastM30LevelBarTime)
    {
       g_lastM30LevelBarTime=m30;
+      CheckRejectionEntry(2,PERIOD_M30);
       RebuildLevelForTimeframe(2,PERIOD_M30,InpLevelLookbackM30,"M30");
    }
 
@@ -1049,6 +1088,7 @@ void UpdateLevelsOnNewBars()
    if(h1!=0 && h1!=g_lastH1LevelBarTime)
    {
       g_lastH1LevelBarTime=h1;
+      CheckRejectionEntry(3,PERIOD_H1);
       RebuildLevelForTimeframe(3,PERIOD_H1,InpLevelLookbackH1,"H1");
    }
 
@@ -1056,6 +1096,7 @@ void UpdateLevelsOnNewBars()
    if(h4!=0 && h4!=g_lastH4LevelBarTime)
    {
       g_lastH4LevelBarTime=h4;
+      CheckRejectionEntry(4,PERIOD_H4);
       RebuildLevelForTimeframe(4,PERIOD_H4,InpLevelLookbackH4,"H4");
    }
 
@@ -1063,14 +1104,18 @@ void UpdateLevelsOnNewBars()
    if(d1!=0 && d1!=g_lastD1LevelBarTime)
    {
       g_lastD1LevelBarTime=d1;
+      CheckRejectionEntry(5,PERIOD_D1);
       RebuildLevelForTimeframe(5,PERIOD_D1,InpLevelLookbackD1,"D1");
    }
 }
 
-// Live EMA100 read (shift=0) for each of the 6 timeframes - an EMA is a
-// smoothed lagging price, not a bar pattern, so reading it live carries
-// no repaint risk (matches the same reasoning used for the old M5-only
-// EMA200 read).
+// Live EMA100 read (shift=0) for each of the 6 timeframes - used for the
+// chart lines and the per-tick "in decision range" status display only.
+// Entry decisions use the bar-close EMA value read fresh inside
+// CheckRejectionEntry(), not this live value (an EMA is a smoothed
+// lagging price, not a bar pattern, so reading it live carries no
+// repaint risk either way - this split is about consistency between the
+// zone and the candle being judged, not about repaint safety).
 void UpdateEmaValues()
 {
    for(int i=0;i<EZY_TF_COUNT;i++)
@@ -1082,6 +1127,106 @@ void UpdateEmaValues()
          continue;
       }
       g_emaValue[i]=buf[0];
+   }
+}
+
+// Pin bar: small body, a long wick opposite the fade direction (the
+// side being rejected), and a small wick on the favourable side.
+// direction=1 (BUY/demand): long LOWER wick, close in the upper part.
+// direction=-1 (SELL/supply): long UPPER wick, close in the lower part.
+bool IsRejectionPinBar(double o,double h,double l,double c,int direction)
+{
+   double range=h-l;
+   if(range<=0.0) return false;
+
+   double body=MathAbs(c-o);
+   if(body>range*InpRejectionMaxBodyRatio) return false;
+
+   double upperWick=h-MathMax(o,c);
+   double lowerWick=MathMin(o,c)-l;
+
+   if(direction==1)
+      return lowerWick>=range*InpRejectionMinWickRatio &&
+             upperWick<=range*InpRejectionMaxOppositeWickRatio;
+
+   return upperWick>=range*InpRejectionMinWickRatio &&
+          lowerWick<=range*InpRejectionMaxOppositeWickRatio;
+}
+
+// Engulfing: this bar's body fully engulfs the PRIOR bar's body, in the
+// fade direction. direction=1: prior bar bearish, this bar bullish and
+// engulfing. direction=-1: prior bar bullish, this bar bearish and
+// engulfing.
+bool IsEngulfingPattern(double prevOpen,double prevClose,double o,double c,int direction)
+{
+   if(direction==1)
+   {
+      bool priorBearish=(prevClose<prevOpen);
+      bool thisBullish =(c>o);
+      if(!priorBearish || !thisBullish) return false;
+      return (o<=prevClose && c>=prevOpen);
+   }
+
+   bool priorBullish=(prevClose>prevOpen);
+   bool thisBearish =(c<o);
+   if(!priorBullish || !thisBearish) return false;
+   return (o>=prevClose && c<=prevOpen);
+}
+
+bool IsRejectionCandle(double prevOpen,double prevClose,double o,double h,double l,double c,int direction)
+{
+   return IsRejectionPinBar(o,h,l,c,direction) ||
+          IsEngulfingPattern(prevOpen,prevClose,o,c,direction);
+}
+
+// Evaluates BOTH levels of this timeframe slot (supply and demand)
+// against the bar that just closed, using the level's PRE-rebuild state.
+// Fires only when: the level is in decision range of its own-TF EMA100
+// (bar-close value, not live), the closed bar's range touched the zone,
+// and (if enabled) that same bar is a rejection candle in the level's
+// fade direction.
+void CheckRejectionEntry(int slotIndex,ENUM_TIMEFRAMES tf)
+{
+   double emaBuf[];
+   if(CopyBufferSeries(g_handleEma[slotIndex],0,2,emaBuf)<2) return;
+   double emaValue=emaBuf[1];
+   if(emaValue<=0.0) return;
+
+   double o=iOpen(_Symbol,tf,1);
+   double h=iHigh(_Symbol,tf,1);
+   double l=iLow(_Symbol,tf,1);
+   double c=iClose(_Symbol,tf,1);
+   double prevO=iOpen(_Symbol,tf,2);
+   double prevC=iClose(_Symbol,tf,2);
+   if(h<=0.0 || l<=0.0 || h<l) return;
+
+   int supplyIdx=slotIndex*2;
+   int demandIdx=slotIndex*2+1;
+
+   for(int k=0;k<2;k++)
+   {
+      int i=(k==0)?supplyIdx:demandIdx;
+      if(g_levels[i].price<=0.0 || g_levels[i].rangeWidth<=0.0) continue;
+      if(TimeCurrent()<g_levels[i].cooldownUntil) continue;
+
+      double decisionRange=InpDecisionRangeRatio*g_levels[i].rangeWidth;
+      double spread=MathAbs(emaValue-g_levels[i].price);
+      if(spread>decisionRange) continue;
+
+      double touchTolerance=InpConfluenceTouchToleranceRatio*g_levels[i].rangeWidth;
+      double zoneLo=MathMin(emaValue,g_levels[i].price)-touchTolerance;
+      double zoneHi=MathMax(emaValue,g_levels[i].price)+touchTolerance;
+
+      bool touching=(h>=zoneLo && l<=zoneHi);
+      if(!touching) continue;
+
+      int direction=g_levels[i].fadeDirection;
+
+      if(InpRequireRejectionCandle && !IsRejectionCandle(prevO,prevC,o,h,l,c,direction))
+         continue;
+
+      TryConfluenceEntry(direction,g_levels[i].price);
+      g_levels[i].cooldownUntil=TimeCurrent()+MathMax(0,InpConfluenceReentrySeconds);
    }
 }
 
@@ -1102,32 +1247,13 @@ void TryConfluenceEntry(int direction,double levelPrice)
    TryOpenPosition(direction,"V1CONF",slDistance);
 }
 
+// Entry decisions now happen in CheckRejectionEntry() on each timeframe's
+// own bar close (called from UpdateLevelsOnNewBars()). This function only
+// updates the live "in decision range" status per tick, for the chart
+// level coloring and the status label/log - it does not open positions.
 void ProcessConfluenceTriggers()
 {
    UpdateEmaValues();
-
-   MqlTick tick;
-   if(!SymbolInfoTick(_Symbol,tick)) return;
-
-   double cmp=(tick.bid>0.0)?tick.bid:tick.last;
-   if(cmp<=0.0) return;
-
-   double observedLo=cmp, observedHi=cmp;
-   if(tick.bid>0.0)
-   {
-      observedLo=MathMin(observedLo,tick.bid);
-      observedHi=MathMax(observedHi,tick.bid);
-   }
-   if(tick.ask>0.0)
-   {
-      observedLo=MathMin(observedLo,tick.ask);
-      observedHi=MathMax(observedHi,tick.ask);
-   }
-   if(g_hasPreviousCMP && g_previousCMP>0.0)
-   {
-      observedLo=MathMin(observedLo,g_previousCMP);
-      observedHi=MathMax(observedHi,g_previousCMP);
-   }
 
    for(int i=0;i<ArraySize(g_levels);i++)
    {
@@ -1147,45 +1273,10 @@ void ProcessConfluenceTriggers()
          continue;
       }
 
-      // Decision range/touch tolerance scale with THIS level's own
-      // hi-lo range over its lookback window, not a fixed $ amount - a
-      // fixed points value cannot work across 6 timeframes whose
-      // realized ranges differ by an order of magnitude (confirmed live:
-      // a fixed 500-point tolerance produced zero in-range events on
-      // every single timeframe).
       double decisionRange=InpDecisionRangeRatio*g_levels[i].rangeWidth;
-      double touchTolerance=InpConfluenceTouchToleranceRatio*g_levels[i].rangeWidth;
-
-      // "Loose zone confluence": the same-TF EMA100 does not need to sit
-      // at the exact same price as the level - only within the wider
-      // decision range. The zone itself spans from EMA100 to the level.
       double spread=MathAbs(emaValue-g_levels[i].price);
-      bool inDecisionRange=(spread<=decisionRange);
-      g_levels[i].inZone=inDecisionRange;
-
-      if(!inDecisionRange) continue;
-
-      double zoneLo=MathMin(emaValue,g_levels[i].price)-touchTolerance;
-      double zoneHi=MathMax(emaValue,g_levels[i].price)+touchTolerance;
-
-      bool touching=(observedHi>=zoneLo && observedLo<=zoneHi);
-      if(!touching) continue;
-
-      // Cooldown-only re-arm, matching the "no entry governors"
-      // philosophy proven this session: no requirement to fully leave
-      // the zone before re-firing, only the cooldown gates it.
-      if(TimeCurrent()<g_levels[i].cooldownUntil) continue;
-
-      // Direction comes from the LEVEL's own type (supply -> SELL,
-      // demand -> BUY), not from which side price approached from - a
-      // wide decision-range zone makes "which side did price come from"
-      // ambiguous far more often than a tight overlap check would.
-      TryConfluenceEntry(g_levels[i].fadeDirection,g_levels[i].price);
-      g_levels[i].cooldownUntil=TimeCurrent()+MathMax(0,InpConfluenceReentrySeconds);
+      g_levels[i].inZone=(spread<=decisionRange);
    }
-
-   g_previousCMP=cmp;
-   g_hasPreviousCMP=true;
 }
 
 //======================================================================
