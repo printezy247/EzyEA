@@ -274,6 +274,7 @@ struct ManagedPositionState
    int      consecutiveFailures;
    datetime cooldownUntil;
    double   peakPrice;
+   double   slDistance;       // ATR-derived distance, captured once, never re-derived from a mutated SL
    double   virtualStop;      // tight logical stop, checked every tick, enforced by direct close
    bool     peakReconstructed;
 };
