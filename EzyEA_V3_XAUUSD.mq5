@@ -32,9 +32,22 @@
 //|                                                                    |
 //| CHANGELOG                                                          |
 //| 3.000 - Initial build.                                             |
+//| 3.001 - Added InpScaleRiskByCentDivisor (default true, EXPLICIT      |
+//|         REQUEST after confirming the real-money consequence): on a   |
+//|         cent account, multiplies the risk budget by the cent         |
+//|         divisor so a small cent account sizes trades the same as a   |
+//|         same-raw-number standard account would - confirmed live      |
+//|         that a 500 USD tester deposit traded 78.65 lots while the    |
+//|         same EA on a real 500 USC account traded only 1.33 lots      |
+//|         over a comparable stretch. Real per-trade risk becomes       |
+//|         roughly (divisor)x larger than InpRiskPercentPerTrade alone  |
+//|         implies. The portfolio margin-percentage and free-margin     |
+//|         checks are UNCHANGED (still use real, unscaled equity) - a   |
+//|         genuinely undersized account still gets capped/rejected by   |
+//|         real margin availability regardless of this setting.         |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "3.000"
+#property version   "3.001"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -88,6 +101,20 @@ input int    InpMaxHoldingMinutes           = 30;
 
 input group "=== Risk / Sizing ==="
 input double InpRiskPercentPerTrade         = 0.25;
+// EXPLICIT REQUEST, CONFIRMED KNOWING THE REAL-MONEY CONSEQUENCE: on a
+// cent account, multiplies the risk budget by the cent divisor (e.g.
+// 100x) so a "500 USC" account sizes trades the same as a "500 USD"
+// account would - matching a Strategy Tester run using a same-raw-
+// number standard-currency deposit. This makes REAL risk per trade
+// roughly (divisor)x LARGER than InpRiskPercentPerTrade alone implies -
+// confirmed live: a 500 USD tester run traded 78.65 lots while the same
+// EA on a real 500 USC account traded only 1.33 lots over a comparable
+// stretch (~59x gap, consistent with a ~100x cent-scaling difference,
+// not a units bug - both were internally self-consistent for their own
+// account's real value). Set to false to size honestly for the
+// account's real economic value instead (a genuinely tiny account
+// trades genuinely tiny size).
+input bool   InpScaleRiskByCentDivisor      = true;
 // "No cap" per explicit request - kept as a large technical ceiling
 // only (MQL5 arrays/loops still need SOME bound for basic sanity), not
 // a strategic limit like V2's per-direction cap, which is dropped here.
@@ -466,7 +493,13 @@ double OneLotLoss(int direction,double entry,double sl)
 double ComputeLotsForRisk(int direction,double entry,double sl)
 {
    double equity=AccountInfoDouble(ACCOUNT_EQUITY);
-   double riskBudget=equity*InpRiskPercentPerTrade/100.0;
+   // See InpScaleRiskByCentDivisor's declaration comment: this is a
+   // deliberate, confirmed choice to size a cent account's trades as if
+   // it had (divisor)x more real buying power than it actually does.
+   double sizingEquity=(InpScaleRiskByCentDivisor)
+                       ?equity*MathMax(1.0,g_accountUnitDivisor)
+                       :equity;
+   double riskBudget=sizingEquity*InpRiskPercentPerTrade/100.0;
    if(riskBudget<=0.0) return 0.0;
 
    double perLotLoss=OneLotLoss(direction,entry,sl);
