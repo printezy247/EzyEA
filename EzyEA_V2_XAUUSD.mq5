@@ -1,110 +1,53 @@
 //+------------------------------------------------------------------+
-//|                                             EzyEA_V2_XAUUSD.mq5  |
+//|                                            EzyEA_V3a_XAUUSD.mq5  |
 //|                                                                    |
-//| EzyEA V2 - ground-up, entry-only rebuild of EzyEA V1's regime      |
-//| design per explicit request. V1's ADX-regime + Bollinger mean-     |
-//| reversion + EMA pullback-continuation entries are dropped          |
-//| entirely. In their place: a pure multi-timeframe supply/demand     |
-//| (SND) level-touch trigger, learned from the old EzyMap "EVERY_     |
-//| ZERO_CONF_LEVEL_NO_ENTRY_GOVERNORS" build and already proven this  |
-//| session as V1's biggest frequency driver by a wide margin (V1.007) |
-//| - here it is the ONLY entry mechanism, not a supplement, and       |
-//| covers six timeframes instead of four: M5, M15, H1, H4, D1, W1.    |
+//| EzyEA V3a - fixed TP/SL + breakeven-lock variant of                |
+//| EzyEA_V3_XAUUSD.mq5, built as a SEPARATE file per explicit request |
+//| so the original V3 (currently live-tested) is untouched.           |
 //|                                                                    |
-//| Everything else is the exact proven infrastructure from V1/this    |
-//| session: risk-based lot sizing via OrderCalcProfit() with a capped |
-//| minimum-lot fallback, ATR-based SL/trail-only exit with the        |
-//| activation-floor rule and the trailing-side-validation fix,        |
-//| TimeCurrent()-based (never GetTickCount64()) modify backoff, the   |
-//| zero-stops-level broker fallback, an auto-calibrating spread       |
-//| guard, and cent-account-aware equity handling.                     |
+//| Same entry logic as V3, unchanged: two independent zero-confluence |
+//| entry sources fire in parallel, no filtering between them - SND    |
+//| level touch (M5/M15/H1/H4/D1/W1) and EMA13 (M5) touch, both        |
+//| "touch = immediate trade, no confirmation required".               |
+//|                                                                    |
+//| Exit management REPLACED (this is the whole point of this variant):|
+//|   - SL: fixed InpFixedSlPips (30) from entry, no longer ATR-based. |
+//|   - TP: fixed InpFixedTpPips (50) from entry - V3 had NO take      |
+//|     profit at all (trail-only); this variant adds one.             |
+//|   - Breakeven lock: once floating profit reaches                   |
+//|     InpBreakevenTriggerPips (10), the SL moves ONE TIME to         |
+//|     InpBreakevenLockPips (3) in profit and stays there - this is a |
+//|     single step, not continuous trailing. If price reverses after  |
+//|     the lock without reaching TP, the position exits at that       |
+//|     locked +3 pips, not at breakeven and not at the original -30.  |
+//|                                                                    |
+//| Pip size uses the same cent-aware convention already corrected     |
+//| live on EzyEA V1 this session (both InpXAUUSDscPipPrice and        |
+//| InpStandardXAUUSDPipPrice default to the standard gold convention, |
+//| 0.10 - a 0.01 cent-suffix assumption was tried and confirmed live  |
+//| to make fixed-pip stops far tighter than the broker's real minimum |
+//| distance, rejecting every entry).                                  |
+//|                                                                    |
+//| Everything else unchanged from V3: risk-based lot sizing via       |
+//| OrderCalcProfit() with a capped minimum-lot fallback, portfolio-    |
+//| aware margin check, TimeCurrent()-based modify backoff, the zero-  |
+//| stops-level broker fallback, an auto-calibrating spread guard,     |
+//| cent-account-aware equity handling, and the hard                   |
+//| InpMaxHoldingMinutes force-close backstop. ATR is no longer used   |
+//| anywhere in this file (SL/TP are fixed-pip, not ATR-based) -       |
+//| InpAtrPeriod/InpAtrSlMultiplier and the ATR indicator handle are   |
+//| removed. Distinct magic number (190013) and order-comment prefix   |
+//| (V3aSND/V3aEMA) so this can run alongside V3 XAUUSD without        |
+//| cross-talk.                                                        |
 //|                                                                    |
 //| CHANGELOG                                                          |
-//| 2.000 - Initial build.                                             |
-//| 2.001 - First live run: only 2 lots total volume, still short of   |
-//|         target. Two structural fixes, both aimed at frequency:     |
-//|         (1) H4/D1/W1 lookback shortened 30/20/12 -> 15/8/5. A swing |
-//|         high/low over a long lookback on a higher timeframe can    |
-//|         sit far from where price actually trades, so it may never  |
-//|         get touched in a normal test window at all - the real      |
-//|         bottleneck, not a settings issue. Shorter lookbacks keep    |
-//|         these levels closer to recent price action. (2) Switched   |
-//|         ProcessLevelTouches() from edge-triggered (must fully leave |
-//|         the zone before re-firing) to cooldown-only re-arm, per     |
-//|         explicit "maximum trade frequency" request - the reference |
-//|         file's "no entry governors" design doesn't require a full  |
-//|         round-trip out of the zone either, only a cooldown. A level |
-//|         price is chopping right at now fires repeatedly every       |
-//|         InpLevelReentrySeconds instead of going silent until price  |
-//|         fully exits and re-enters.                                 |
-//| 2.002 - Frequency confirmed working: 300 trades, but all 300 still  |
-//|         at the 0.01 broker-minimum floor (3.00 total lots) - the    |
-//|         real risk-based calc (riskBudget/perLotLoss) never crossed  |
-//|         the 0.01 threshold at 0.25% risk, so trade count scaling up |
-//|         didn't move total volume at all. Per explicit "adjust       |
-//|         position sizing to get more lot traded" request:            |
-//|         InpRiskPercentPerTrade 0.25->2.5 (still far short of the    |
-//|         V3/V4-style 25-47% aggressive sizing already declined, but  |
-//|         enough for real sizing to clear the floor instead of        |
-//|         flatlining there every trade). InpMinimumLotFallbackMaxRisk |
-//|         Pct 1.0->3.0 to stay above the new target risk - otherwise  |
-//|         an outlier-wide ATR stop could make the safety-net fallback |
-//|         MORE restrictive than the primary risk target it backstops.|
-//| 2.003 - 2.5% risk confirmed working (15 lots, no issue). 5% risk    |
-//|         triggered a real margin call - traced to a genuine gap,    |
-//|         not just "risk too high": ComputeLotsForRisk()'s margin    |
-//|         check only validated each NEW trade in isolation against a |
-//|         % of equity. With up to InpMaxConcurrentPositions (50) open |
-//|         at once, each one could individually pass that check while |
-//|         their COMBINED margin usage kept climbing past what the    |
-//|         account could support. Fixed: the cap now applies to       |
-//|         AccountInfoDouble(ACCOUNT_MARGIN) (every other open         |
-//|         position's margin) PLUS this trade's margin together, so   |
-//|         total portfolio margin usage self-limits at                |
-//|         InpMaxMarginUsePct regardless of how many positions are    |
-//|         already open, instead of only checking one trade at a time.|
-//| 2.004 - Confirmed live: margin call STILL happened on a different,  |
-//|         more strongly trending test date even with the portfolio   |
-//|         margin fix. Root cause is structural, not a sizing bug: V2  |
-//|         has zero trend awareness by design (that's the whole point |
-//|         of dropping ADX), so on a hard trending day it can fade the |
-//|         same direction at level after level, piling up many        |
-//|         correlated losers that all move against the account        |
-//|         together - a margin cap on NEW trades can't do anything     |
-//|         about floating losses on trades already open. Two          |
-//|         complementary fixes, neither reintroducing trend detection |
-//|         into the entry logic itself: (1) InpMaxConcurrentPerDirection|
-//|         (15) caps how many BUY (or SELL) positions can be open at   |
-//|         once, directly limiting the worst-case same-direction       |
-//|         pileup. (2) A drawdown circuit breaker tracks equity's peak |
-//|         since attach and halts ALL new entries once floating+       |
-//|         realized drawdown crosses InpMaxEquityDrawdownPct (15%),    |
-//|         resuming with hysteresis once it recovers to half that -    |
-//|         existing positions keep trailing normally, only new entries |
-//|         pause. This is the hard backstop against margin calls       |
-//|         regardless of what's driving the drawdown.                 |
-//| 2.005 - Confirmed live: margin calls STILL happened on both test    |
-//|         dates with 2.004, and the equity graph showed why - many    |
-//|         same-direction positions floating deeply underwater for an  |
-//|         extended stretch before individually hitting their stop.    |
-//|         Halting new entries alone can't stop an existing pile of    |
-//|         correlated losers from bleeding out. User explicitly        |
-//|         approved bringing back ADX ("you can add adx if you want"). |
-//|         Two fixes: (1) UpdateDrawdownBreaker() now calls the new     |
-//|         CloseAllPositions() the moment it trips, instead of only     |
-//|         blocking new entries - an actual emergency stop. (2) Added  |
-//|         an H1 ADX trend FILTER (InpEnableTrendFilter, threshold 25) |
-//|         that blocks a fade running directly against a confirmed     |
-//|         strong trend - SND levels remain the ONLY entry mechanism   |
-//|         and both directions still trade freely outside a strong     |
-//|         trend, this does not bring back V1's regime system, it only |
-//|         removes the specific correlated-loss scenario that caused   |
-//|         both margin calls.                                          |
+//| 3.500 - Initial build: fixed 30-pip SL / 50-pip TP / breakeven      |
+//|         lock (+3 pips once +10 pips favourable), forked from        |
+//|         EzyEA_V3_XAUUSD.mq5 3.002.                                  |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "2.005"
+#property version   "3.500"
 #property strict
-
 #include <Trade/Trade.mqh>
 
 //======================================================================
@@ -120,96 +63,81 @@ enum ENUM_EZY_ACCOUNT_SCALE
 //======================================================================
 // Inputs
 //======================================================================
-input group "=== Trend Filter (H1 ADX) - blocks counter-trend fades only ==="
-// Confirmed live: with zero trend awareness, V2 can fade the SAME
-// direction at level after level through a strong trend, piling up
-// correlated losers that caused two separate margin calls. This does
-// NOT bring back V1's regime system - SND levels are still the only
-// entry mechanism and both directions still trade freely in normal
-// conditions. It only blocks a fade that runs directly against an
-// H1 ADX-confirmed strong trend (e.g. no BUY demand-fades while H1 is
-// strongly trending down), which is exactly the correlated-loss
-// scenario that caused the margin calls.
-input bool   InpEnableTrendFilter           = true;
-input int    InpAdxPeriod                   = 14;
-input double InpAdxTrendThreshold           = 25.0;
-
 input group "=== SND Level-Touch Entries: M5 -> Weekly, raw touch, no confluence ==="
-// Learned from the old EzyMap "EVERY_ZERO_CONF_LEVEL_NO_ENTRY_GOVERNORS"
-// build per explicit request: track swing high/low (supply/demand)
-// levels across six timeframes and fire an immediate fade on ANY tick
-// that touches one, with no reclaim/confirmation requirement at all -
-// this is the ONLY entry source in V2, not a supplement. Each level
-// rebuilds only on its OWN timeframe's new bar close (never intra-bar).
-// Touch detection uses the previous-vs-current-tick envelope-crossing
-// check proven this session, so a fast tick move through a level is
-// never missed.
 input bool   InpEnableLevelTouchEntries     = true;
 input double InpLevelTouchTolerancePoints   = 30.0;
 input int    InpLevelReentrySeconds         = 60;
 input int    InpLevelLookbackM5             = 24;
 input int    InpLevelLookbackM15            = 32;
 input int    InpLevelLookbackH1             = 24;
-// H4/D1/W1 shortened from 30/20/12: a swing high/low over a long lookback
-// on a higher timeframe can sit far from where price actually trades,
-// so it may never get touched in a normal test window at all - the real
-// bottleneck behind the first V2 run's low frequency. Shorter lookbacks
-// keep these levels closer to recent price action, and still update the
-// moment their own timeframe closes a new bar.
 input int    InpLevelLookbackH4             = 15;
 input int    InpLevelLookbackD1             = 8;
 input int    InpLevelLookbackW1             = 5;
 
-input group "=== Stops / Trail (ATR-based, M5) ==="
-input int    InpAtrPeriod                   = 14;
-input double InpAtrSlMultiplier             = 1.5;
-input double InpTrailMinStepPoints          = 20.0;
+input group "=== EMA13 Touch Entries: M5, raw touch, no confluence ==="
+// Zero-confluence, same philosophy as SND: price returning to touch the
+// EMA from either side is treated as an immediate fade toward it, no
+// reclaim/confirmation bar required. Direction is which side price
+// approached FROM (previous tick's CMP vs the EMA), not a crossing/
+// momentum signal - touch from above -> BUY (expect a bounce away from
+// it), touch from below -> SELL.
+input bool   InpEnableEmaTouchEntries       = true;
+input int    InpEmaPeriod                   = 13;
+input double InpEmaTouchTolerancePoints     = 30.0;
+input int    InpEmaReentrySeconds           = 60;
+
+input group "=== Fixed TP/SL + Breakeven Lock ==="
+input double InpFixedSlPips                 = 30.0;
+input double InpFixedTpPips                 = 50.0;
+// Once floating profit reaches InpBreakevenTriggerPips, the SL moves
+// ONE TIME to InpBreakevenLockPips in profit and stays there - a single
+// step, not continuous trailing. If price reverses after the lock
+// without reaching TP, the exit is at the locked profit, not breakeven
+// and not the original SL.
+input double InpBreakevenTriggerPips        = 10.0;
+input double InpBreakevenLockPips           = 3.0;
+// Pip size is broker/symbol-dependent - confirmed live on EzyEA V1 that
+// assuming 1 pip = 0.01 for a .sc (cent) suffixed symbol made a fixed
+// SL far tighter than the broker's real minimum stop distance,
+// rejecting every entry. Both default to the standard gold convention.
+input double InpXAUUSDscPipPrice            = 0.10;
+input double InpStandardXAUUSDPipPrice      = 0.10;
+
+input group "=== Exit Management ==="
+// Hard, unconditional force-close regardless of P&L - the direct fix for
+// positions sitting open for an extended stretch the way V2's did. Set
+// to 0 to disable (not recommended without another safety net in place).
+input int    InpMaxHoldingMinutes           = 30;
 
 input group "=== Risk / Sizing ==="
-// 300 trades in the last run, all still at the 0.01 broker-minimum floor
-// - the real risk-based calc (riskBudget/perLotLoss) never crossed the
-// 0.01 threshold at 0.25%, so every trade fell back to the same fixed
-// size regardless of trade count. Raised so real sizing actually scales
-// above the floor instead of flatlining there every time.
-input double InpRiskPercentPerTrade         = 2.5;
-input int    InpMaxConcurrentPositions      = 50;
-// Confirmed live: on a strongly trending day, V2's level-touch entries
-// have no trend awareness at all (that's the whole point of dropping ADX
-// for V2), so they can pile up many SAME-DIRECTION fades against a real
-// trend, all losing together. A total concurrency cap alone doesn't stop
-// that pileup if every open slot ends up the same direction - this caps
-// how many BUY (or SELL) positions can be open at once, independent of
-// the total cap.
-input int    InpMaxConcurrentPerDirection   = 15;
+input double InpRiskPercentPerTrade         = 0.25;
+// EXPLICIT REQUEST, CONFIRMED KNOWING THE REAL-MONEY CONSEQUENCE: on a
+// cent account, multiplies the risk budget by the cent divisor (e.g.
+// 100x) so a "500 USC" account sizes trades the same as a "500 USD"
+// account would - matching a Strategy Tester run using a same-raw-
+// number standard-currency deposit. This makes REAL risk per trade
+// roughly (divisor)x LARGER than InpRiskPercentPerTrade alone implies.
+// Tried live and reverted: a 500 USD tester run traded 78.65 lots while
+// the same EA on a real 500 USC account traded only 1.33 lots over a
+// comparable stretch (~59x gap, consistent with a ~100x cent-scaling
+// difference, not a units bug). Turning this on then confirmed the
+// predicted consequence live: the account dropped from ~700 to ~146
+// USC once the lot size scaled up to match. DEFAULTS FALSE - size
+// honestly for the account's real economic value (a genuinely tiny
+// account trades genuinely tiny size). Only re-enable with a full
+// understanding that it multiplies real per-trade risk by the divisor.
+input bool   InpScaleRiskByCentDivisor      = false;
+// "No cap" per explicit request - kept as a large technical ceiling
+// only (MQL5 arrays/loops still need SOME bound for basic sanity), not
+// a strategic limit like V2's per-direction cap, which is dropped here.
+input int    InpMaxConcurrentPositions      = 500;
 input double InpMaxLotsAbsolute             = 5.0;
+// Portfolio-aware (not per-trade-only) margin cap - this is basic
+// execution correctness, not a strategic filter, so it stays even
+// though ADX/per-direction/drawdown-breaker were dropped this round.
 input double InpMaxMarginUsePct             = 40.0;
-// On a small account, the broker's minimum lot can itself risk more than
-// InpRiskPercentPerTrade at a wide ATR-based SL (see EzyEA V1's own
-// changelog - confirmed live: XAUUSD's 100oz contract makes even 0.01
-// lot risk far more than 0.25% of a small account). When risk-based
-// sizing rounds to 0, fall back to the broker minimum lot instead of
-// skipping the trade, but only if that minimum lot's real risk still
-// stays under this explicit ceiling. Kept slightly above
-// InpRiskPercentPerTrade so an outlier-wide ATR stop can't make this
-// safety-net fallback MORE restrictive than the primary risk target
-// it's meant to backstop.
 input bool   InpAllowMinimumLotFallback     = true;
-input double InpMinimumLotFallbackMaxRiskPct = 3.0;
-
-input group "=== Drawdown Circuit Breaker ==="
-// Confirmed live: even with a portfolio-level margin cap, floating losses
-// across many already-open correlated positions can crash equity fast
-// enough to trigger a margin call without any single new trade being too
-// big - the margin cap only limits NEW trades, it can't do anything about
-// existing ones moving against the account. This tracks equity's peak
-// since attach and halts ALL new entries once floating+realized drawdown
-// from that peak crosses the threshold - existing positions keep trailing
-// normally, only new entries pause. Resumes once drawdown recovers back
-// to InpDrawdownResumeFactor x the trigger threshold (hysteresis, so it
-// doesn't flap on/off right at the boundary).
-input bool   InpEnableDrawdownBreaker       = true;
-input double InpMaxEquityDrawdownPct        = 15.0;
-input double InpDrawdownResumeFactor        = 0.5;
+input double InpMinimumLotFallbackMaxRiskPct = 1.0;
 
 input group "=== Modify Backoff (TimeCurrent()-based, never GetTickCount64) ==="
 input int    InpModifyBackoffBaseSeconds    = 5;
@@ -233,7 +161,7 @@ input bool   InpTesterAutoModeIsStandard    = true;
 input bool   InpTreatSCSuffixAsCentOnLive   = true;
 
 input group "=== Execution ==="
-input ulong  InpMagicNumber                 = 190002;
+input ulong  InpMagicNumber                 = 190013;
 input int    InpDeviationPoints             = 30;
 
 input group "=== Reporting ==="
@@ -241,7 +169,9 @@ input int    InpStatusLogIntervalSeconds    = 60;
 
 input group "=== Chart Drawing ==="
 input bool   InpDrawLevels                  = true;
+input bool   InpDrawEma                     = true;
 input bool   InpDrawStatusLabel             = true;
+input int    InpDrawBarsBack                = 60;
 
 //======================================================================
 // Types
@@ -268,12 +198,7 @@ struct LevelTouchState
 //======================================================================
 CTrade trade;
 
-int g_handleAtrM5 = INVALID_HANDLE;
-int g_handleAdxH1 = INVALID_HANDLE;
-
-datetime g_lastAdxH1BarTime = 0;
-int      g_trendDirection   = 0;   // 1 up, -1 down, 0 no strong trend
-double   g_lastAdxValue     = 0.0;
+int g_handleEmaM5 = INVALID_HANDLE;
 
 double g_accountUnitDivisor = 1.0;
 
@@ -292,10 +217,6 @@ int g_gateSpreadRejects      = 0;
 int g_gateConcurrencyRejects = 0;
 int g_gateDistanceRejects    = 0;
 int g_gateSizingRejects      = 0;
-int g_gateDrawdownRejects    = 0;
-
-double g_peakEquity          = 0.0;
-bool   g_tradingHalted       = false;
 
 // 6 timeframes (M5/M15/H1/H4/D1/W1) x 2 levels (swing high=supply,
 // swing low=demand) each.
@@ -307,6 +228,9 @@ datetime g_lastH1LevelBarTime  = 0;
 datetime g_lastH4LevelBarTime  = 0;
 datetime g_lastD1LevelBarTime  = 0;
 datetime g_lastW1LevelBarTime  = 0;
+
+bool     g_emaInZone        = false;
+datetime g_emaCooldownUntil = 0;
 
 bool   g_hasPreviousCMP = false;
 double g_previousCMP    = 0.0;
@@ -321,6 +245,7 @@ void   OnTick();
 string Upper(string s);
 bool   IsGold();
 bool   IsCentSuffixSymbol();
+double StrategyPipSize();
 double RoundPrice(double v);
 string PriceText(double v);
 void   Log(string msg);
@@ -343,27 +268,26 @@ double MedianOfSpreadSamples(double &values[],int count);
 bool   SpreadAllowed();
 
 int    CountOpenPositions();
-int    CountOpenPositionsByDirection(int direction);
-void   UpdateDrawdownBreaker();
-void   UpdateTrendFilterOnNewH1Bar();
-bool   TrendFilterAllows(int direction);
-void   CloseAllPositions(string reason);
 
 int    CopyBufferSeries(int handle,int bufferIndex,int count,double &out[]);
 
-void   TryOpenPosition(int direction,string tag,double slDistance);
+void   TryOpenPosition(int direction,string tag,double slDistance,double tpDistance);
 
 int    EnsureManagedSlot(ulong ticket);
 void   PruneManagedSlots();
 void   ModifyPositionSafely(ulong ticket,double sl,double tp);
-void   ManageTrailing();
+void   ManageBreakevenLock();
+void   EnforceMaxHoldingTime();
 
 void   RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback,string tfLabel);
 void   UpdateLevelsOnNewBars();
 void   TryLevelEntry(int direction,double levelPrice);
-void   ProcessLevelTouches();
+void   CheckEmaTouch(double observedLo,double observedHi);
+void   TryEmaEntry(int direction,double emaValue);
+void   ProcessTouchTriggers();
 
 void   DrawLevels();
+void   DrawEmaLine();
 void   DrawStatusLabel();
 int    CountActiveLevels();
 void   RemoveAllDrawings();
@@ -378,24 +302,19 @@ int OnInit()
 {
    if(!IsGold())
    {
-      Log("EzyEA V2 is XAUUSD-only. Attach to a XAUUSD/XAUUSD.sc chart. Current symbol="+_Symbol);
+      Log("EzyEA V3a is XAUUSD-only. Attach to a XAUUSD/XAUUSD.sc chart. Current symbol="+_Symbol);
       return INIT_FAILED;
    }
 
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpDeviationPoints);
 
-   g_handleAtrM5 = iATR(_Symbol,PERIOD_M5,InpAtrPeriod);
-   g_handleAdxH1 = iADX(_Symbol,PERIOD_H1,InpAdxPeriod);
-   if(g_handleAtrM5==INVALID_HANDLE || g_handleAdxH1==INVALID_HANDLE)
+   g_handleEmaM5 = iMA(_Symbol,PERIOD_M5,InpEmaPeriod,0,MODE_EMA,PRICE_CLOSE);
+   if(g_handleEmaM5==INVALID_HANDLE)
    {
       Log("Indicator handle creation failed.");
       return INIT_FAILED;
    }
-
-   g_lastAdxH1BarTime=0;
-   g_trendDirection=0;
-   g_lastAdxValue=0.0;
 
    g_accountUnitDivisor = ResolveAccountUnitDivisor();
 
@@ -422,20 +341,19 @@ int OnInit()
    g_lastH4LevelBarTime  = 0;
    g_lastD1LevelBarTime  = 0;
    g_lastW1LevelBarTime  = 0;
+
+   g_emaInZone=false;
+   g_emaCooldownUntil=0;
+
    g_hasPreviousCMP=false;
    g_previousCMP=0.0;
 
-   g_peakEquity=AccountInfoDouble(ACCOUNT_EQUITY);
-   g_tradingHalted=false;
-
-   Log("EzyEA V2 initialized on "+_Symbol+
+   Log("EzyEA V3a initialized on "+_Symbol+
        " | account unit divisor="+DoubleToString(g_accountUnitDivisor,2)+
        " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
-       " | max concurrent="+IntegerToString(InpMaxConcurrentPositions)+
-       " (per-direction="+IntegerToString(InpMaxConcurrentPerDirection)+")"+
-       " | drawdown breaker="+string(InpEnableDrawdownBreaker?"ON":"OFF")+
-       " at "+DoubleToString(InpMaxEquityDrawdownPct,1)+"%"+
-       " | SND levels=M5/M15/H1/H4/D1/W1 (12 total)");
+       " | max concurrent="+IntegerToString(InpMaxConcurrentPositions)+" (no strategic cap)"+
+       " | max holding="+IntegerToString(InpMaxHoldingMinutes)+" min"+
+       " | SND levels=M5/M15/H1/H4/D1/W1 (12) + EMA"+IntegerToString(InpEmaPeriod)+" (M5)");
 
    return INIT_SUCCEEDED;
 }
@@ -444,25 +362,23 @@ void OnDeinit(const int reason)
 {
    WriteFinalReport();
 
-   if(g_handleAtrM5!=INVALID_HANDLE) IndicatorRelease(g_handleAtrM5);
-   if(g_handleAdxH1!=INVALID_HANDLE) IndicatorRelease(g_handleAdxH1);
+   if(g_handleEmaM5!=INVALID_HANDLE) IndicatorRelease(g_handleEmaM5);
 
    RemoveAllDrawings();
 }
 
 void OnTick()
 {
-   UpdateDrawdownBreaker();
-   UpdateTrendFilterOnNewH1Bar();
-
-   if(InpEnableLevelTouchEntries)
+   if(InpEnableLevelTouchEntries || InpEnableEmaTouchEntries)
    {
       UpdateLevelsOnNewBars();
-      ProcessLevelTouches();
+      ProcessTouchTriggers();
       DrawLevels();
+      DrawEmaLine();
    }
 
-   ManageTrailing();
+   ManageBreakevenLock();
+   EnforceMaxHoldingTime();
    PeriodicStatusLog();
 }
 
@@ -487,6 +403,13 @@ bool IsCentSuffixSymbol()
    return (StringFind(s,".SC")>=0 || StringFind(s,"_SC")>=0 || StringFind(s,"CENT")>=0);
 }
 
+double StrategyPipSize()
+{
+   if(IsCentSuffixSymbol())
+      return MathMax(InpXAUUSDscPipPrice,_Point);
+   return MathMax(InpStandardXAUUSDPipPrice,_Point);
+}
+
 double RoundPrice(double v)
 {
    int digits=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
@@ -501,7 +424,7 @@ string PriceText(double v)
 
 void Log(string msg)
 {
-   Print("EzyEA V2 | ",msg);
+   Print("EzyEA V3a | ",msg);
 }
 
 //======================================================================
@@ -517,8 +440,6 @@ double ResolveAccountUnitDivisor()
    if(InpAccountScaleMode==EZY_ACCOUNT_CENT)
       return configured;
 
-   // AUTO: Strategy Tester deposits are normally entered in standard
-   // account currency even when the tested symbol carries a .sc suffix.
    if((bool)MQLInfoInteger(MQL_TESTER) && InpTesterAutoModeIsStandard)
       return 1.0;
 
@@ -588,12 +509,14 @@ double OneLotLoss(int direction,double entry,double sl)
 
 double ComputeLotsForRisk(int direction,double entry,double sl)
 {
-   // Risk budget must stay in the SAME raw account-currency units that
-   // OrderCalcProfit() (via OneLotLoss below) returns - dividing it by
-   // the cent-account divisor while perLotLoss stays undivided was a
-   // real, confirmed bug in V1's first tester run.
    double equity=AccountInfoDouble(ACCOUNT_EQUITY);
-   double riskBudget=equity*InpRiskPercentPerTrade/100.0;
+   // See InpScaleRiskByCentDivisor's declaration comment: this is a
+   // deliberate, confirmed choice to size a cent account's trades as if
+   // it had (divisor)x more real buying power than it actually does.
+   double sizingEquity=(InpScaleRiskByCentDivisor)
+                       ?equity*MathMax(1.0,g_accountUnitDivisor)
+                       :equity;
+   double riskBudget=sizingEquity*InpRiskPercentPerTrade/100.0;
    if(riskBudget<=0.0) return 0.0;
 
    double perLotLoss=OneLotLoss(direction,entry,sl);
@@ -620,14 +543,9 @@ double ComputeLotsForRisk(int direction,double entry,double sl)
    ENUM_ORDER_TYPE type=(direction==1)?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
    if(OrderCalcMargin(type,_Symbol,lots,entry,marginRequired))
    {
-      // Portfolio-level cap, not just this one trade: with up to
-      // InpMaxConcurrentPositions open at once, each individually passing
-      // a per-trade-only check still let COMBINED margin usage climb past
-      // what the account could support - confirmed live as the real cause
-      // of a margin call at 5% risk. usedMargin already reflects every
-      // other open position; the cap now applies to usedMargin+this
-      // trade's margin together, so it self-limits regardless of how many
-      // positions are already open.
+      // Portfolio-level: usedMargin already reflects every other open
+      // position, so the cap applies to usedMargin+this trade together,
+      // not just this trade in isolation.
       double usedMargin=AccountInfoDouble(ACCOUNT_MARGIN);
       double projectedMarginPct=(equity>0.0)
                                 ?((usedMargin+marginRequired)/equity)*100.0
@@ -650,8 +568,7 @@ double ComputeLotsForRisk(int direction,double entry,double sl)
 }
 
 //======================================================================
-// Retcode classification (includes TRADE_RETCODE_MARKET_CLOSED, missing
-// from every prior EA in this codebase until this session's fixes)
+// Retcode classification (includes TRADE_RETCODE_MARKET_CLOSED)
 //======================================================================
 bool TradeRetcodeAccepted(uint code)
 {
@@ -782,133 +699,9 @@ int CountOpenPositions()
    return count;
 }
 
-int CountOpenPositionsByDirection(int direction)
-{
-   int count=0;
-   for(int i=PositionsTotal()-1;i>=0;i--)
-   {
-      ulong ticket=PositionGetTicket(i);
-      if(ticket==0) continue;
-      if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
-      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
-
-      int posDirection=((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)?1:-1;
-      if(posDirection==direction) count++;
-   }
-   return count;
-}
-
 //======================================================================
-// H1 ADX trend filter: does NOT change which mechanism generates entries
-// (SND level touches are still the only trigger) - it only blocks a fade
-// that runs directly against a confirmed strong trend. Recomputed once
-// per new H1 bar, same cadence V1 used.
-//======================================================================
-void UpdateTrendFilterOnNewH1Bar()
-{
-   if(!InpEnableTrendFilter) return;
-
-   datetime h1=iTime(_Symbol,PERIOD_H1,0);
-   if(h1==0 || h1==g_lastAdxH1BarTime) return;
-   g_lastAdxH1BarTime=h1;
-
-   double adxBuf[],plusBuf[],minusBuf[];
-   if(CopyBufferSeries(g_handleAdxH1,0,3,adxBuf)<3)   return;
-   if(CopyBufferSeries(g_handleAdxH1,1,3,plusBuf)<3)  return;
-   if(CopyBufferSeries(g_handleAdxH1,2,3,minusBuf)<3) return;
-
-   double adx    =adxBuf[1];
-   double plusDI =plusBuf[1];
-   double minusDI=minusBuf[1];
-
-   g_lastAdxValue=adx;
-
-   if(adx>=InpAdxTrendThreshold)
-      g_trendDirection=(plusDI>minusDI)?1:((minusDI>plusDI)?-1:0);
-   else
-      g_trendDirection=0; // no confirmed strong trend - both directions free to trade
-}
-
-bool TrendFilterAllows(int direction)
-{
-   if(!InpEnableTrendFilter) return true;
-   if(g_trendDirection==0) return true;      // not strongly trending - no restriction
-   return direction==g_trendDirection;        // strongly trending - only the trend side fades
-}
-
-//======================================================================
-// Emergency stop: closes every position this EA opened. Used by the
-// drawdown breaker below so a hard equity threshold actually stops the
-// bleeding instead of just blocking new entries while an existing pile
-// of correlated losers keeps moving against the account.
-//======================================================================
-void CloseAllPositions(string reason)
-{
-   for(int i=PositionsTotal()-1;i>=0;i--)
-   {
-      ulong ticket=PositionGetTicket(i);
-      if(ticket==0) continue;
-      if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
-      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
-
-      bool ok=trade.PositionClose(ticket);
-      uint retcode=trade.ResultRetcode();
-      if(!ok || !TradeRetcodeAccepted(retcode))
-         Log("EMERGENCY CLOSE FAILED ticket="+IntegerToString((int)ticket)+
-             " retcode="+IntegerToString(retcode)+" reason="+reason);
-   }
-}
-
-//======================================================================
-// Drawdown circuit breaker: once floating+realized drawdown from the
-// peak equity seen since attach crosses the threshold, this closes EVERY
-// open position immediately and halts new entries - confirmed live that
-// halting new entries alone isn't enough, since an existing pile of
-// correlated losers keeps bleeding regardless of whether new trades are
-// blocked. Resumes with hysteresis once equity recovers (positions were
-// already flattened, so "resume" just means new entries are allowed
-// again - there's no existing state to reconcile).
-//======================================================================
-void UpdateDrawdownBreaker()
-{
-   if(!InpEnableDrawdownBreaker)
-   {
-      g_tradingHalted=false;
-      return;
-   }
-
-   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
-   if(equity<=0.0) return;
-
-   g_peakEquity=MathMax(g_peakEquity,equity);
-   if(g_peakEquity<=0.0) return;
-
-   double drawdownPct=(g_peakEquity-equity)/g_peakEquity*100.0;
-   double resumeThreshold=InpMaxEquityDrawdownPct*MathMax(0.0,MathMin(1.0,InpDrawdownResumeFactor));
-
-   if(!g_tradingHalted && drawdownPct>=InpMaxEquityDrawdownPct)
-   {
-      g_tradingHalted=true;
-      Log("DRAWDOWN BREAKER TRIPPED - closing all positions and halting new entries"+
-          " | drawdown="+DoubleToString(drawdownPct,2)+"%"+
-          " | peakEquity="+DoubleToString(g_peakEquity,2)+
-          " | equity="+DoubleToString(equity,2));
-      CloseAllPositions("drawdown breaker");
-   }
-   else if(g_tradingHalted && drawdownPct<=resumeThreshold)
-   {
-      g_tradingHalted=false;
-      Log("DRAWDOWN BREAKER RESET - new entries resumed"+
-          " | drawdown="+DoubleToString(drawdownPct,2)+"%"+
-          " | resumeThreshold="+DoubleToString(resumeThreshold,2)+"%");
-   }
-}
-
-//======================================================================
-// Indicator buffer helper (as-series: out[0]=forming bar, out[1]=last
-// closed bar, out[2]=the bar before it)
+// Indicator buffer helper (as-series: out[0]=forming/live bar, out[1]=
+// last closed bar, out[2]=the bar before it)
 //======================================================================
 int CopyBufferSeries(int handle,int bufferIndex,int count,double &out[])
 {
@@ -919,25 +712,13 @@ int CopyBufferSeries(int handle,int bufferIndex,int count,double &out[])
 }
 
 //======================================================================
-// Entry execution (shared by the level-touch trigger)
+// Entry execution (shared by both trigger sources)
 //======================================================================
-void TryOpenPosition(int direction,string tag,double slDistance)
+void TryOpenPosition(int direction,string tag,double slDistance,double tpDistance)
 {
    g_gateAttempts++;
 
-   if(g_tradingHalted)
-   {
-      g_gateDrawdownRejects++;
-      return;
-   }
-
    if(CountOpenPositions()>=InpMaxConcurrentPositions)
-   {
-      g_gateConcurrencyRejects++;
-      return;
-   }
-
-   if(CountOpenPositionsByDirection(direction)>=InpMaxConcurrentPerDirection)
    {
       g_gateConcurrencyRejects++;
       return;
@@ -954,13 +735,15 @@ void TryOpenPosition(int direction,string tag,double slDistance)
 
    double entry=(direction==1)?tick.ask:tick.bid;
    double sl=RoundPrice((direction==1)?entry-slDistance:entry+slDistance);
+   double tp=RoundPrice((direction==1)?entry+tpDistance:entry-tpDistance);
 
    double minDist=MinimumStopDistance(entry);
-   if(MathAbs(entry-sl)<minDist)
+   if(MathAbs(entry-sl)<minDist || MathAbs(entry-tp)<minDist)
    {
       g_gateDistanceRejects++;
-      Log("ENTRY REJECTED "+tag+" reason=SL_DISTANCE_TOO_TIGHT"+
+      Log("ENTRY REJECTED "+tag+" reason=SL_TP_DISTANCE_TOO_TIGHT"+
           " slDistance="+PriceText(slDistance)+
+          " tpDistance="+PriceText(tpDistance)+
           " minDist="+PriceText(minDist));
       return;
    }
@@ -977,8 +760,8 @@ void TryOpenPosition(int direction,string tag,double slDistance)
    }
 
    bool sent=(direction==1)
-             ? trade.Buy(lots,_Symbol,0.0,sl,0.0,tag)
-             : trade.Sell(lots,_Symbol,0.0,sl,0.0,tag);
+             ? trade.Buy(lots,_Symbol,0.0,sl,tp,tag)
+             : trade.Sell(lots,_Symbol,0.0,sl,tp,tag);
 
    uint retcode=trade.ResultRetcode();
 
@@ -988,7 +771,8 @@ void TryOpenPosition(int direction,string tag,double slDistance)
       Log("ENTRY "+tag+" dir="+IntegerToString(direction)+
           " lots="+DoubleToString(lots,2)+
           " entry="+PriceText(entry)+
-          " sl="+PriceText(sl));
+          " sl="+PriceText(sl)+
+          " tp="+PriceText(tp));
    }
    else
    {
@@ -999,14 +783,8 @@ void TryOpenPosition(int direction,string tag,double slDistance)
 }
 
 //======================================================================
-// Level-touch entries: multi-timeframe swing-high/low (supply/demand)
-// levels, raw tick touch, no reclaim/confirmation - learned from the old
-// EzyMap "every zero-confluence level, no entry governors" build, now
-// the ONLY entry source in V2 (not a supplement, as it was in V1) and
-// covering six timeframes instead of four. Levels only rebuild on their
-// OWN timeframe's new bar close, never intra-bar. Touch detection uses
-// the same previous-vs-current-tick envelope crossing this session
-// settled on, so a fast tick move through a level is never missed.
+// SND level-touch entries: unchanged from V2. Levels only rebuild on
+// their OWN timeframe's new bar close, never intra-bar.
 //======================================================================
 void RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback,string tfLabel)
 {
@@ -1041,6 +819,8 @@ void RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback,stri
 
 void UpdateLevelsOnNewBars()
 {
+   if(!InpEnableLevelTouchEntries) return;
+
    datetime m5=iTime(_Symbol,PERIOD_M5,0);
    if(m5!=0 && m5!=g_lastM5LevelBarTime)
    {
@@ -1086,16 +866,63 @@ void UpdateLevelsOnNewBars()
 
 void TryLevelEntry(int direction,double levelPrice)
 {
-   double atrBuf[];
-   if(CopyBufferSeries(g_handleAtrM5,0,3,atrBuf)<3) return;
+   double slDistance=InpFixedSlPips*StrategyPipSize();
+   double tpDistance=InpFixedTpPips*StrategyPipSize();
+   if(slDistance<=0.0 || tpDistance<=0.0) return;
 
-   double slDistance=InpAtrSlMultiplier*atrBuf[1];
-   if(slDistance<=0.0) return;
-
-   TryOpenPosition(direction,"V2SND",slDistance);
+   TryOpenPosition(direction,"V3aSND",slDistance,tpDistance);
 }
 
-void ProcessLevelTouches()
+//======================================================================
+// EMA13 touch entries: same zero-confluence philosophy as SND, but the
+// reference is a moving M5 EMA read LIVE (shift=0, the forming bar's
+// continuously-updating value) rather than a static level - an EMA is
+// just a smoothed lagging price, not a bar pattern, so reading it live
+// carries none of the repaint risk a bar-pattern signal would.
+//======================================================================
+void TryEmaEntry(int direction,double emaValue)
+{
+   double slDistance=InpFixedSlPips*StrategyPipSize();
+   double tpDistance=InpFixedTpPips*StrategyPipSize();
+   if(slDistance<=0.0 || tpDistance<=0.0) return;
+
+   TryOpenPosition(direction,"V3aEMA",slDistance,tpDistance);
+}
+
+void CheckEmaTouch(double observedLo,double observedHi)
+{
+   if(!InpEnableEmaTouchEntries) return;
+
+   double emaBuf[];
+   if(CopyBufferSeries(g_handleEmaM5,0,1,emaBuf)<1) return;
+   double emaValue=emaBuf[0];
+   if(emaValue<=0.0) return;
+
+   double tolerance=InpEmaTouchTolerancePoints*_Point;
+   bool touching=(observedHi>=emaValue-tolerance && observedLo<=emaValue+tolerance);
+
+   g_emaInZone=touching; // diagnostic only
+
+   if(!touching) return;
+   if(TimeCurrent()<g_emaCooldownUntil) return;
+   if(!g_hasPreviousCMP) return;
+
+   int direction=0;
+   if(g_previousCMP>emaValue)      direction=1;  // was above, dipped to touch -> expect bounce up -> BUY
+   else if(g_previousCMP<emaValue) direction=-1; // was below, rallied to touch -> expect rejection down -> SELL
+   if(direction==0) return;                       // previous CMP sat exactly on the EMA - no clear side
+
+   TryEmaEntry(direction,emaValue);
+   g_emaCooldownUntil=TimeCurrent()+MathMax(0,InpEmaReentrySeconds);
+}
+
+//======================================================================
+// Shared per-tick trigger processing: builds the tick envelope once
+// (previous-vs-current-tick crossing check, proven this session to
+// catch a fast move a single-tick snapshot would miss) and feeds it to
+// both the SND level loop and the EMA touch check.
+//======================================================================
+void ProcessTouchTriggers()
 {
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol,tick)) return;
@@ -1120,36 +947,33 @@ void ProcessLevelTouches()
       observedHi=MathMax(observedHi,g_previousCMP);
    }
 
-   double tolerance=InpLevelTouchTolerancePoints*_Point;
-
-   for(int i=0;i<ArraySize(g_levels);i++)
+   if(InpEnableLevelTouchEntries)
    {
-      if(g_levels[i].price<=0.0) continue;
+      double tolerance=InpLevelTouchTolerancePoints*_Point;
 
-      bool touching=(observedHi>=g_levels[i].price-tolerance &&
-                     observedLo<=g_levels[i].price+tolerance);
+      for(int i=0;i<ArraySize(g_levels);i++)
+      {
+         if(g_levels[i].price<=0.0) continue;
 
-      g_levels[i].inZone=touching; // kept for drawing/diagnostics only
+         bool touching=(observedHi>=g_levels[i].price-tolerance &&
+                        observedLo<=g_levels[i].price+tolerance);
 
-      if(!touching) continue;
+         g_levels[i].inZone=touching; // diagnostic only
 
-      // Blocks only a fade running directly against a confirmed strong
-      // H1 trend - the correlated-loss mechanism behind two live margin
-      // calls. Checked before the cooldown so a level isn't left waiting
-      // out a stale cooldown once the trend condition clears.
-      if(!TrendFilterAllows(g_levels[i].fadeDirection)) continue;
+         if(!touching) continue;
 
-      // Cooldown-only re-arm, per explicit "maximum trade frequency"
-      // request: the reference file's "no entry governors" design does not
-      // require price to fully leave the zone before a level can fire
-      // again - only InpLevelReentrySeconds gates it. A level price is
-      // chopping right at now fires repeatedly on cooldown instead of
-      // going silent until a full round-trip out of the zone.
-      if(TimeCurrent()<g_levels[i].cooldownUntil) continue;
+         // Cooldown-only re-arm: no requirement to fully leave the zone
+         // before re-firing, only InpLevelReentrySeconds gates it.
+         if(TimeCurrent()<g_levels[i].cooldownUntil) continue;
 
-      TryLevelEntry(g_levels[i].fadeDirection,g_levels[i].price);
-      g_levels[i].cooldownUntil=TimeCurrent()+MathMax(0,InpLevelReentrySeconds);
+         TryLevelEntry(g_levels[i].fadeDirection,g_levels[i].price);
+         g_levels[i].cooldownUntil=TimeCurrent()+MathMax(0,InpLevelReentrySeconds);
+      }
    }
+
+   // Uses g_previousCMP for touch direction, so this must run BEFORE it
+   // is overwritten by the current tick below.
+   CheckEmaTouch(observedLo,observedHi);
 
    g_previousCMP=cmp;
    g_hasPreviousCMP=true;
@@ -1220,16 +1044,25 @@ void ModifyPositionSafely(ulong ticket,double sl,double tp)
 }
 
 //======================================================================
-// Exit: trail-only, no TP. Activates once favourable excursion has run
-// the full SL distance (never sooner - the activation-floor rule proven
-// on the FRESH V3/V4 family this session, and ported to V1). Every
-// candidate stop must land on the CORRECT SIDE of current price, not
-// just far enough from it - a stale peak-based candidate can otherwise
-// get rejected every attempt after a pullback (the bug found and fixed
-// on V1 this session).
+// Exit 1: fixed TP (set at open, see TryOpenPosition) + a ONE-TIME
+// breakeven lock, not continuous trailing. Once the position's peak
+// favourable excursion reaches InpBreakevenTriggerPips, the SL moves to
+// InpBreakevenLockPips in profit and stays there for the rest of the
+// trade - the candidate SL is computed from the fixed openPrice, not
+// from the peak, so once applied it no longer "improves" on later ticks
+// and the modify naturally becomes a no-op (idempotent single step).
+// Every candidate stop must land on the CORRECT SIDE of current price,
+// not just far enough from it (the bug found and fixed on V1/V2 this
+// session).
 //======================================================================
-void ManageTrailing()
+void ManageBreakevenLock()
 {
+   PruneManagedSlots();
+
+   double triggerDistance=InpBreakevenTriggerPips*StrategyPipSize();
+   double lockDistance=InpBreakevenLockPips*StrategyPipSize();
+   if(triggerDistance<=0.0 || lockDistance<=0.0) return;
+
    for(int i=PositionsTotal()-1;i>=0;i--)
    {
       ulong ticket=PositionGetTicket(i);
@@ -1243,9 +1076,6 @@ void ManageTrailing()
       double currentSl   =PositionGetDouble(POSITION_SL);
       double currentPrice=PositionGetDouble(POSITION_PRICE_CURRENT);
 
-      double slDistance=MathAbs(openPrice-currentSl);
-      if(slDistance<=0.0) continue;
-
       int slot=EnsureManagedSlot(ticket);
       if(slot<0) continue;
 
@@ -1258,30 +1088,64 @@ void ManageTrailing()
                        ?(g_managed[slot].peakPrice-openPrice)
                        :(openPrice-g_managed[slot].peakPrice);
 
-      if(favorable<slDistance) continue;
+      if(favorable<triggerDistance) continue;
 
-      double candidateSl=RoundPrice((direction==1)
-                         ?g_managed[slot].peakPrice-slDistance
-                         :g_managed[slot].peakPrice+slDistance);
+      double lockedSl=RoundPrice((direction==1)
+                      ?openPrice+lockDistance
+                      :openPrice-lockDistance);
 
-      bool improves=(direction==1)?(candidateSl>currentSl):(candidateSl<currentSl);
+      bool improves=(direction==1)?(lockedSl>currentSl):(lockedSl<currentSl);
       if(!improves) continue;
 
-      double minStep=InpTrailMinStepPoints*_Point;
-      if(MathAbs(candidateSl-currentSl)<minStep) continue;
-
-      bool validSide=(direction==1)?(candidateSl<currentPrice):(candidateSl>currentPrice);
+      bool validSide=(direction==1)?(lockedSl<currentPrice):(lockedSl>currentPrice);
       if(!validSide) continue;
 
       double minDist=MinimumStopDistance(currentPrice);
-      if(MathAbs(currentPrice-candidateSl)<minDist) continue;
+      if(MathAbs(currentPrice-lockedSl)<minDist) continue;
 
-      ModifyPositionSafely(ticket,candidateSl,PositionGetDouble(POSITION_TP));
+      ModifyPositionSafely(ticket,lockedSl,PositionGetDouble(POSITION_TP));
    }
 }
 
 //======================================================================
-// Chart drawing (12 SND levels + status label)
+// Exit 2: hard, unconditional force-close once a position has been open
+// InpMaxHoldingMinutes, regardless of P&L or whether the trail has
+// resolved yet. Direct fix for positions sitting open for an extended
+// stretch the way V2's did.
+//======================================================================
+void EnforceMaxHoldingTime()
+{
+   if(InpMaxHoldingMinutes<=0) return;
+
+   long cutoffSeconds=(long)InpMaxHoldingMinutes*60;
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+
+      datetime openTime=(datetime)PositionGetInteger(POSITION_TIME);
+      long heldSeconds=(long)(TimeCurrent()-openTime);
+      if(heldSeconds<cutoffSeconds) continue;
+
+      bool ok=trade.PositionClose(ticket);
+      uint retcode=trade.ResultRetcode();
+
+      if(ok && TradeRetcodeAccepted(retcode))
+         Log("MAX HOLDING TIME EXIT ticket="+IntegerToString((int)ticket)+
+             " heldMinutes="+DoubleToString(heldSeconds/60.0,1));
+      else
+         Log("MAX HOLDING TIME EXIT FAILED ticket="+IntegerToString((int)ticket)+
+             " retcode="+IntegerToString(retcode)+
+             " desc="+trade.ResultRetcodeDescription());
+   }
+}
+
+//======================================================================
+// Chart drawing (12 SND levels + EMA13 line + status label)
 //======================================================================
 void DrawLevels()
 {
@@ -1289,7 +1153,7 @@ void DrawLevels()
 
    for(int i=0;i<ArraySize(g_levels);i++)
    {
-      string name="V2_LVL_"+IntegerToString(i);
+      string name="V3a_LVL_"+IntegerToString(i);
       if(g_levels[i].price<=0.0)
       {
          ObjectDelete(0,name);
@@ -1311,20 +1175,57 @@ void DrawLevels()
                       g_levels[i].tfLabel+" "+
                       (g_levels[i].fadeDirection==1?"DEMAND":"SUPPLY"));
    }
+}
 
-   if(InpDrawStatusLabel)
-      DrawStatusLabel();
+void DrawEmaLine()
+{
+   if(!InpDrawEma) return;
+
+   int bars=MathMax(3,InpDrawBarsBack);
+   double emaBuf[];
+   int n=CopyBufferSeries(g_handleEmaM5,0,bars,emaBuf);
+   if(n<2) return;
+
+   for(int shift=0;shift<n-1;shift++)
+   {
+      string name="V3a_EMA_"+IntegerToString(shift);
+      datetime t1=iTime(_Symbol,PERIOD_M5,shift+1);
+      datetime t2=iTime(_Symbol,PERIOD_M5,shift);
+      double p1=emaBuf[shift+1];
+      double p2=emaBuf[shift];
+      if(t1==0 || t2==0) continue;
+
+      if(ObjectFind(0,name)<0)
+         ObjectCreate(0,name,OBJ_TREND,0,t1,p1,t2,p2);
+      else
+      {
+         ObjectMove(0,name,0,t1,p1);
+         ObjectMove(0,name,1,t2,p2);
+      }
+
+      ObjectSetInteger(0,name,OBJPROP_COLOR,clrOrange);
+      ObjectSetInteger(0,name,OBJPROP_WIDTH,1);
+      ObjectSetInteger(0,name,OBJPROP_RAY,false);
+      ObjectSetInteger(0,name,OBJPROP_BACK,true);
+      ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   }
+}
+
+int CountActiveLevels()
+{
+   int n=0;
+   for(int i=0;i<ArraySize(g_levels);i++)
+      if(g_levels[i].price>0.0) n++;
+   return n;
 }
 
 void DrawStatusLabel()
 {
-   string name="V2_StatusLabel";
-   string trendText=(g_trendDirection==1?"UP":(g_trendDirection==-1?"DOWN":"NONE"));
-   string text=StringFormat("EzyEA V2 | SND levels active=%d/%d | Open=%d/%d | ADX=%.1f trend=%s | %s",
+   string name="V3a_StatusLabel";
+   string text=StringFormat("EzyEA V3a | SND active=%d/%d | EMA%d touch=%s | Open=%d/%d",
                 CountActiveLevels(),ArraySize(g_levels),
-                CountOpenPositions(),InpMaxConcurrentPositions,
-                g_lastAdxValue,trendText,
-                g_tradingHalted?"HALTED (drawdown breaker)":"ACTIVE");
+                InpEmaPeriod,(g_emaInZone?"IN-ZONE":"-"),
+                CountOpenPositions(),InpMaxConcurrentPositions);
 
    if(ObjectFind(0,name)<0)
    {
@@ -1337,15 +1238,7 @@ void DrawStatusLabel()
    }
 
    ObjectSetString(0,name,OBJPROP_TEXT,text);
-   ObjectSetInteger(0,name,OBJPROP_COLOR,g_tradingHalted?clrOrange:clrWhite);
-}
-
-int CountActiveLevels()
-{
-   int n=0;
-   for(int i=0;i<ArraySize(g_levels);i++)
-      if(g_levels[i].price>0.0) n++;
-   return n;
+   ObjectSetInteger(0,name,OBJPROP_COLOR,clrWhite);
 }
 
 void RemoveAllDrawings()
@@ -1353,7 +1246,7 @@ void RemoveAllDrawings()
    for(int i=ObjectsTotal(0,0,-1)-1;i>=0;i--)
    {
       string name=ObjectName(0,i,0,-1);
-      if(StringFind(name,"V2_")==0)
+      if(StringFind(name,"V3a_")==0)
          ObjectDelete(0,name);
    }
 }
@@ -1369,28 +1262,25 @@ void PeriodicStatusLog()
    if(g_lastStatusLogTime>0 && now-g_lastStatusLogTime<InpStatusLogIntervalSeconds) return;
    g_lastStatusLogTime=now;
 
-   double equityNow=AccountInfoDouble(ACCOUNT_EQUITY);
-   double drawdownPctNow=(g_peakEquity>0.0)?(g_peakEquity-equityNow)/g_peakEquity*100.0:0.0;
+   if(InpDrawStatusLabel) DrawStatusLabel();
 
-   Log("V2 LIVE PARITY STATUS"+
-       " | SND levels active="+IntegerToString(CountActiveLevels())+"/"+IntegerToString(ArraySize(g_levels))+
+   Log("V3a LIVE PARITY STATUS"+
+       " | SND active="+IntegerToString(CountActiveLevels())+"/"+IntegerToString(ArraySize(g_levels))+
+       " | EMA"+IntegerToString(InpEmaPeriod)+" touch="+(g_emaInZone?"IN-ZONE":"-")+
        " | open="+IntegerToString(CountOpenPositions())+"/"+IntegerToString(InpMaxConcurrentPositions)+
-       " | drawdown="+DoubleToString(drawdownPctNow,2)+"%"+(g_tradingHalted?" (HALTED)":"")+
        " | equity="+DoubleToString(EffectiveAccountEquity(),2)+" "+AccountInfoString(ACCOUNT_CURRENCY));
 
-   Log("V2 DEPLOYMENT GATE BREAKDOWN"+
+   Log("V3a DEPLOYMENT GATE BREAKDOWN"+
        " | attempts="+IntegerToString(g_gateAttempts)+
        " | accepted="+IntegerToString(g_gateAccepted)+
        " | rejected="+IntegerToString(g_gateRejected)+
        " | spreadRejects="+IntegerToString(g_gateSpreadRejects)+
        " | concurrencyRejects="+IntegerToString(g_gateConcurrencyRejects)+
        " | distanceRejects="+IntegerToString(g_gateDistanceRejects)+
-       " | sizingRejects="+IntegerToString(g_gateSizingRejects)+
-       " | drawdownRejects="+IntegerToString(g_gateDrawdownRejects));
+       " | sizingRejects="+IntegerToString(g_gateSizingRejects));
 }
 
-// Summarizes this EA's own deal history (by symbol+magic, so it never
-// picks up manual or other-EA trades sharing the account) at shutdown -
+// Summarizes this EA's own deal history (by symbol+magic) at shutdown -
 // covers both a Strategy Tester run ending and the EA being removed live.
 void WriteFinalReport()
 {
@@ -1419,7 +1309,7 @@ void WriteFinalReport()
               HistoryDealGetDouble(dealTicket,DEAL_COMMISSION);
    }
 
-   Log("V2 FINAL REPORT"+
+   Log("V3a FINAL REPORT"+
        " | trades="+IntegerToString(trades)+
        " | total lots traded="+DoubleToString(lotsTraded,2)+
        " | net P/L="+DoubleToString(netPnl,2)+" "+AccountInfoString(ACCOUNT_CURRENCY));
