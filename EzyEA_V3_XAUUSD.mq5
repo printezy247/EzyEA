@@ -1,96 +1,77 @@
 //+------------------------------------------------------------------+
 //|                                             EzyEA_V3_XAUUSD.mq5  |
 //|                                                                    |
-//| EzyEA V3 of this generation's fresh V1/V2/V3... numbering line.    |
-//| Overwrites the original EzyEA_V3_XAUUSD.mq5 (the first-generation  |
-//| live-tested EA that V1/V2 of this generation were themselves       |
-//| forked from) per explicit request - that lineage is retired.       |
-//| Built from EzyEA_V1_XAUUSD.mq5 (VPS-tuned trend filter/per-        |
-//| direction cap/drawdown breaker build), then refined per explicit   |
-//| request on exactly two things: exit-mechanism robustness and zone/ |
-//| chart drawing precision. Entry philosophy is completely unchanged: |
-//| SND (M5->Weekly) + EMA13 (M5) zero-confluence touch = immediate    |
-//| trade, no confirmation required.                                   |
-//|                                                                    |
-//| EXIT LOGIC REFINEMENT - hybrid virtual trail, inspired by the      |
-//| "EzyMap Scalp Mastery" reference file's hybrid-trail pattern but   |
-//| kept ATR-derived (not fixed-pip) to match this EA's philosophy:    |
-//|   - Real stop protection no longer depends on the broker accepting |
-//|     a tight SL modify(). A virtual stop (same ATR-derived          |
-//|     distance/activation-floor rule as before - it does not start   |
-//|     trailing until favourable excursion has run the full SL        |
-//|     distance) is tracked in EA memory and checked every tick; the   |
-//|     moment price crosses it, the position is force-closed directly |
-//|     (CloseAtVirtualStop). The broker-side SL is still pushed as a   |
-//|     best-effort backup net via the existing backoff-protected       |
-//|     ModifyPositionSafely, now clamped to the closest distance the   |
-//|     broker will legally accept rather than skipped outright.        |
-//|   - Fixed a latent bug found while redesigning this: the old code   |
-//|     re-derived "SL distance" every tick from openPrice vs the       |
-//|     CURRENT (broker) SL, which the trail itself had just moved -    |
-//|     once the first trail-modify succeeded, that derived distance    |
-//|     collapsed toward zero on the next tick, effectively freezing    |
-//|     the real trail at whatever level it happened to be when the     |
-//|     distance first collapsed. slDistance is now captured ONCE per   |
-//|     position, from the SL that was live the first time its ticket   |
-//|     was seen, and never re-derived from a later mutated SL.         |
-//|   - InpReconstructPeakFromM1: on first seeing a ticket (fresh entry |
-//|     OR an EA restart reattaching to an existing position), the      |
-//|     trail peak is rebuilt from M1 bar history since POSITION_TIME   |
-//|     instead of seeding it at the current price - a restart mid-     |
-//|     trade no longer forgets how far price already ran.              |
-//|                                                                      |
-//| ZONE-PRECISION REFINEMENT: SND levels no longer use the raw          |
-//| highest-high/lowest-low across the whole lookback window (which     |
-//| could anchor a zone on the edge of the window with no real          |
-//| rejection ever having happened there). RebuildLevelForTimeframe     |
-//| now looks for the most recent genuine swing pivot within the        |
-//| lookback (InpZonePivotBars, default 3 - a bar whose high/low        |
-//| exceeds every bar within that many bars on BOTH sides), falling     |
-//| back to the old raw-window extreme only if no valid pivot exists.   |
-//|                                                                      |
-//| DRAWING REFINEMENT - full premium treatment, also inspired by the   |
-//| EzyMap Scalp Mastery reference file, adapted for EzyEA's multi-      |
-//| position portfolio (that file tracks one setup lifecycle at a       |
-//| time; EzyEA can hold many concurrent positions):                    |
-//|   - ApplyPremiumChartTheme(): dark background, custom candle         |
-//|     colours, hides the native ticker/OHLC readout.                  |
-//|   - DrawTradeCard(): a compact top-right portfolio card - open       |
-//|     count by direction, floating P/L, SND/EMA/trend/breaker state.  |
-//|   - DrawLiveTradeLevels(): gold entry/broker-SL/virtual-trail lines  |
-//|     drawn per open position.                                        |
-//|   - Small win/loss markers at each closed trade                     |
-//|     (CheckForClosedDeals/AddHistoricalMarker), read from deal        |
-//|     history so nothing is missed even if the EA was offline when     |
-//|     a position closed.                                              |
-//|                                                                      |
-//| Everything else unchanged from EzyEA V1 of this generation: H1 ADX   |
-//| trend filter, per-direction concurrency cap, portfolio drawdown      |
-//| breaker, VPS-tuned modify backoff/re-entry cooldowns, risk-based     |
-//| lot sizing via OrderCalcProfit(), portfolio-aware margin check, the  |
-//| zero-stops-level broker fallback, auto-calibrating spread guard,     |
-//| and cent-account-aware equity handling - confirmed this round that   |
-//| InpScaleRiskByCentDivisor stays FALSE: a 500 USC account is ~100x     |
-//| less real capital than a 500 USD account, so matching their LOT      |
-//| COUNTS (not their risk %) was re-confirmed to be the same mechanism  |
-//| that was already tried live and reverted for overexposing a cent     |
-//| account ~100x. Both account types risk the same % of their OWN      |
-//| real equity per trade; differing lot counts between them is correct, |
-//| not a bug.                                                           |
-//|                                                                      |
-//| Distinct magic number (190006) so this can run alongside V1/V2/      |
-//| V3b/V4/V3(BTCUSD) without cross-talk.                                |
-//|                                                                      |
-//| CHANGELOG                                                            |
-//| 6.000 - Initial build: hybrid virtual-trail exit (ATR-derived,       |
-//|         broker-SL-independent real protection, fixed the slDistance |
-//|         collapse bug), M1 peak reconstruction on restart, swing-     |
-//|         pivot zone detection, full premium chart drawing (theme,     |
-//|         portfolio trade card, gold live-levels, historical           |
-//|         win/loss markers). Forked from EzyEA_V1_XAUUSD.mq5 1.000.    |
+//| EzyEA V3 - WINNER of the 3-candidate exit-shape/execution A/B test  |
+//| run for this generation's V3 slot (V3 baseline / V3.1 exit-shape /  |
+//| V3.2 spread-aware deviation), per explicit request. This file IS    |
+//| the former EzyEA_V3.1_XAUUSD.mq5 6.100, promoted into the V3 slot - |
+//| the old V3 baseline and V3.2 are retired/stopped (V3.2 kept in the  |
+//| repo as a dormant reference, not developed further). Entry          |
+//| philosophy unchanged throughout all of this: SND (M5->Weekly) +     |
+//| EMA13 (M5) zero-confluence touch = immediate trade, no confirmation.|
+//|                                                                     |
+//| EXIT LOGIC - now LOCKED IN and refined further per explicit follow- |
+//| up request, switching from the ATR-relative version that won the    |
+//| A/B test to literal fixed pips:                                     |
+//|   - InpPresetStopLossPips = 21: wide floor protecting from entry.   |
+//|   - InpTrailingDistancePips = 7: tight distance used once trailing  |
+//|     is armed (was ATR-relative in the A/B-test build; now a plain   |
+//|     pip value, using the same cent-aware pip-size convention as     |
+//|     EzyEA V2 - InpXAUUSDscPipPrice/InpStandardXAUUSDPipPrice, both   |
+//|     default 0.10). ATR is no longer used anywhere in this file for  |
+//|     stops - InpAtrPeriod and the ATR indicator handle are removed.  |
+//|   - Activation: the trail now arms the instant floating P&L turns   |
+//|     POSITIVE (favorable>0.0 using POSITION_PRICE_CURRENT, which is  |
+//|     already the side a close would execute at - bid for a BUY, ask  |
+//|     for a SELL - so this nets out spread correctly, not just "price |
+//|     moved"), per explicit request. Previously this was ATR-relative |
+//|     and defaulted to immediate too, but is now a plain, unconditional|
+//|     rule rather than a configurable multiplier.                      |
+//|   - The hybrid virtual-trail MECHANISM itself (real protection        |
+//|     tracked in EA memory and enforced by a direct close, independent |
+//|     of the broker accepting a tight SL modify; M1 peak reconstruction |
+//|     on restart) is unchanged from the A/B-test build.                 |
+//|                                                                        |
+//| ZONE DRAWING - refined further per explicit follow-up request:         |
+//| RebuildLevelForTimeframe still QUALIFIES a swing pivot using the wick   |
+//| (a genuine rejection needs a real high/low extreme beyond neighbouring  |
+//| bars - unchanged), but the ZONE PRICE itself now uses that pivot bar's  |
+//| CLOSE, not its wick: close-to-high for a supply/SELL zone, close-to-low |
+//| for a demand/BUY zone. A wick can be a brief, noisy spike that price    |
+//| only touched for an instant; the close is where price actually settled  |
+//| by the end of that bar - a tighter, more representative zone level.     |
+//| The raw-window fallback (used only when no valid pivot exists) now      |
+//| tracks close extremes too, for consistency with the primary path.       |
+//|                                                                          |
+//| Everything else unchanged from the A/B-test build: swing-pivot zone      |
+//| QUALIFICATION (InpZonePivotBars), full premium drawing (theme, trade      |
+//| card, gold live-levels, historical markers), H1 ADX trend filter,         |
+//| per-direction concurrency cap, portfolio drawdown breaker, VPS-tuned      |
+//| modify backoff/re-entry cooldowns, risk-based lot sizing via               |
+//| OrderCalcProfit() with InpScaleRiskByCentDivisor staying FALSE              |
+//| (confirmed again this generation: matching lot COUNTS, not risk %,          |
+//| between a 500 USD and 500 USC account overexposes the cent account          |
+//| ~100x - already tried live and reverted).                                    |
+//|                                                                                |
+//| Distinct magic number (190006, reclaimed from the retired V3 baseline)        |
+//| and order-comment/object-prefix tags (V3SND/V3EMA, V3_ chart objects) so       |
+//| this can run alongside V1/V2/V3.2/V3b/V4/V3(BTCUSD) without cross-talk.        |
+//|                                                                                 |
+//| CHANGELOG                                                                      |
+//| 6.100 - (as EzyEA_V3.1_XAUUSD.mq5) exit-shape A/B-test candidate:              |
+//|         wide preset floor + tight immediate-activation trail,                  |
+//|         ATR-multiple based. Won the 3-candidate test.                          |
+//| 6.101 - Promoted into the V3 slot (renamed from V3.1, magic number             |
+//|         reclaimed). Exit distances switched from ATR-relative to               |
+//|         fixed pips (preset 21p / trail 7p), activation switched from          |
+//|         an ATR-multiple threshold to an unconditional "floating P&L           |
+//|         turns positive" rule, ATR indicator removed entirely (no              |
+//|         longer used anywhere). Zone levels switched from wick-based           |
+//|         (high/low) to close-based (close-to-high for supply/SELL,             |
+//|         close-to-low for demand/BUY), pivot qualification unchanged.          |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "6.000"
+#property version   "6.101"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -150,21 +131,35 @@ input bool   InpEnableTrendFilter           = true;
 input int    InpAdxPeriod                   = 14;
 input double InpAdxTrendThreshold           = 25.0;
 
-input group "=== Stops / Trail (ATR-based, M5) ==="
-input int    InpAtrPeriod                   = 14;
-input double InpAtrSlMultiplier             = 1.5;
+input group "=== Stops / Trail (fixed pips) ==="
+// Locked in as the winning shape after A/B testing 3 exit-mechanism
+// candidates for this generation's V3 slot (per explicit request) -
+// this build won and is now fixed-pip rather than ATR-relative, per
+// explicit follow-up request: preset SL 21 pips, trailing 7 pips.
+// ATR is no longer used anywhere in this file for stops - InpAtrPeriod
+// and the ATR indicator handle are removed (same precedent as EzyEA
+// V2's fixed-pip variant). Pip size uses that same established
+// cent-aware convention (InpXAUUSDscPipPrice/InpStandardXAUUSDPipPrice,
+// both default 0.10 - the standard gold convention, confirmed live
+// that assuming 0.01 for a .sc suffix makes stops far tighter than the
+// broker's real minimum distance, rejecting every entry).
+input double InpPresetStopLossPips          = 21.0;
+input double InpTrailingDistancePips        = 7.0;
+input double InpXAUUSDscPipPrice            = 0.10;
+input double InpStandardXAUUSDPipPrice      = 0.10;
 input double InpTrailMinStepPoints          = 20.0;
 
 input group "=== Hybrid Virtual Trail ==="
 // Real protection no longer depends on the broker accepting a tight SL
-// modify(): a virtual stop (same ATR-derived distance/activation-floor
-// rule as before) is checked every tick in EA memory and the position
-// is force-closed directly the instant price crosses it. The broker-
-// side SL (via the existing backoff-protected ModifyPositionSafely) is
-// still pushed as a best-effort backup net at a safe distance, so a
-// position still carries SOME protection if the terminal/EA drops
-// offline - it just stops being the ONLY thing standing between price
-// and an uncontrolled loss.
+// modify(): a virtual stop (fixed-pip preset floor from entry, tightens
+// to the fixed-pip trail distance once floating P&L turns positive - see
+// the Stops/Trail group above) is checked every tick in EA memory and
+// the position is force-closed directly the instant price crosses it.
+// The broker-side SL (via the existing backoff-protected
+// ModifyPositionSafely) is still pushed as a best-effort backup net at a
+// safe distance, so a position still carries SOME protection if the
+// terminal/EA drops offline - it just stops being the ONLY thing
+// standing between price and an uncontrolled loss.
 input bool   InpUseVirtualTrailFallback     = true;
 input int    InpVirtualTrailCloseDeviationPts = 30;
 // On first seeing a ticket (fresh entry OR EA restart onto an existing
@@ -274,8 +269,7 @@ struct ManagedPositionState
    int      consecutiveFailures;
    datetime cooldownUntil;
    double   peakPrice;
-   double   slDistance;       // ATR-derived distance, captured once, never re-derived from a mutated SL
-   double   virtualStop;      // tight logical stop, checked every tick, enforced by direct close
+   double   virtualStop;       // tight logical stop, checked every tick, enforced by direct close
    bool     peakReconstructed;
 };
 
@@ -293,7 +287,6 @@ struct LevelTouchState
 //======================================================================
 CTrade trade;
 
-int g_handleAtrM5 = INVALID_HANDLE;
 int g_handleEmaM5 = INVALID_HANDLE;
 int g_handleAdxH1 = INVALID_HANDLE;
 
@@ -357,6 +350,9 @@ void   OnTick();
 string Upper(string s);
 bool   IsGold();
 bool   IsCentSuffixSymbol();
+double StrategyPipSize();
+double PresetSlDistance();
+double TrailDistance();
 double RoundPrice(double v);
 string PriceText(double v);
 void   Log(string msg);
@@ -439,10 +435,9 @@ int OnInit()
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpDeviationPoints);
 
-   g_handleAtrM5 = iATR(_Symbol,PERIOD_M5,InpAtrPeriod);
    g_handleEmaM5 = iMA(_Symbol,PERIOD_M5,InpEmaPeriod,0,MODE_EMA,PRICE_CLOSE);
    g_handleAdxH1 = iADX(_Symbol,PERIOD_H1,InpAdxPeriod);
-   if(g_handleAtrM5==INVALID_HANDLE || g_handleEmaM5==INVALID_HANDLE || g_handleAdxH1==INVALID_HANDLE)
+   if(g_handleEmaM5==INVALID_HANDLE || g_handleAdxH1==INVALID_HANDLE)
    {
       Log("Indicator handle creation failed.");
       return INIT_FAILED;
@@ -511,7 +506,6 @@ void OnDeinit(const int reason)
 {
    WriteFinalReport();
 
-   if(g_handleAtrM5!=INVALID_HANDLE) IndicatorRelease(g_handleAtrM5);
    if(g_handleEmaM5!=INVALID_HANDLE) IndicatorRelease(g_handleEmaM5);
    if(g_handleAdxH1!=INVALID_HANDLE) IndicatorRelease(g_handleAdxH1);
 
@@ -558,6 +552,23 @@ bool IsCentSuffixSymbol()
 {
    string s=Upper(_Symbol);
    return (StringFind(s,".SC")>=0 || StringFind(s,"_SC")>=0 || StringFind(s,"CENT")>=0);
+}
+
+double StrategyPipSize()
+{
+   if(IsCentSuffixSymbol())
+      return MathMax(InpXAUUSDscPipPrice,_Point);
+   return MathMax(InpStandardXAUUSDPipPrice,_Point);
+}
+
+double PresetSlDistance()
+{
+   return MathMax(0.1,InpPresetStopLossPips)*StrategyPipSize();
+}
+
+double TrailDistance()
+{
+   return MathMax(0.1,InpTrailingDistancePips)*StrategyPipSize();
 }
 
 double RoundPrice(double v)
@@ -1117,22 +1128,32 @@ void RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback,stri
    {
       double h=iHigh(_Symbol,tf,shift);
       double l=iLow(_Symbol,tf,shift);
-      if(h<=0.0 || l<=0.0) continue;
+      double c=iClose(_Symbol,tf,shift);
+      if(h<=0.0 || l<=0.0 || c<=0.0) continue;
 
-      fallbackHi=MathMax(fallbackHi,h);
-      fallbackLo=MathMin(fallbackLo,l);
+      // Fallback tracks CLOSE extremes too, for consistency with the
+      // primary pivot-based path below.
+      fallbackHi=MathMax(fallbackHi,c);
+      fallbackLo=MathMin(fallbackLo,c);
 
       // Iterating from the most recent closed bar outward, so the first
       // pivot found on each side is the most recent one - the zone
       // closest to current price is the most likely to still be live.
+      // Pivot QUALIFICATION still uses the wick (a genuine rejection
+      // needs a real high/low extreme beyond neighbouring bars), but the
+      // ZONE PRICE itself uses that pivot bar's CLOSE, not its wick -
+      // close-to-high for a supply/SELL zone, close-to-low for a
+      // demand/BUY zone. A wick can be a brief, noisy spike; the close
+      // is where price actually settled by the end of that bar, a
+      // tighter and more representative level than the wick tip.
       if(!foundHi && IsSwingHigh(tf,shift,pivotBars))
       {
-         swingHi=h;
+         swingHi=c;
          foundHi=true;
       }
       if(!foundLo && IsSwingLow(tf,shift,pivotBars))
       {
-         swingLo=l;
+         swingLo=c;
          foundLo=true;
       }
 
@@ -1209,10 +1230,7 @@ void UpdateLevelsOnNewBars()
 
 void TryLevelEntry(int direction,double levelPrice)
 {
-   double atrBuf[];
-   if(CopyBufferSeries(g_handleAtrM5,0,3,atrBuf)<3) return;
-
-   double slDistance=InpAtrSlMultiplier*atrBuf[1];
+   double slDistance=PresetSlDistance();
    if(slDistance<=0.0) return;
 
    TryOpenPosition(direction,"V3SND",slDistance);
@@ -1227,10 +1245,7 @@ void TryLevelEntry(int direction,double levelPrice)
 //======================================================================
 void TryEmaEntry(int direction,double emaValue)
 {
-   double atrBuf[];
-   if(CopyBufferSeries(g_handleAtrM5,0,3,atrBuf)<3) return;
-
-   double slDistance=InpAtrSlMultiplier*atrBuf[1];
+   double slDistance=PresetSlDistance();
    if(slDistance<=0.0) return;
 
    TryOpenPosition(direction,"V3EMA",slDistance);
@@ -1377,14 +1392,6 @@ int EnsureManagedSlot(ulong ticket)
    g_managed[idx].ticket=ticket;
    g_managed[idx].consecutiveFailures=0;
    g_managed[idx].cooldownUntil=0;
-   // Captured ONCE here from the SL that was live at first sight of this
-   // ticket (the ATR-derived distance installed at open, or - on an EA
-   // restart reattaching to an existing position - whatever SL currently
-   // exists). Never re-derived from a later, trail-mutated SL: doing so
-   // was the old bug - once the broker SL itself moved, recomputing
-   // "distance" from openPrice vs the now-mutated SL made the trail
-   // distance collapse toward zero after its first successful move.
-   g_managed[idx].slDistance=(openSl>0.0)?MathAbs(openPrice-openSl):0.0;
    g_managed[idx].peakPrice=ReconstructPeakFromM1(direction,openPrice,currentPrice,positionTime);
    g_managed[idx].peakReconstructed=true;
    g_managed[idx].virtualStop=openSl;
@@ -1466,14 +1473,16 @@ bool CloseAtVirtualStop(ulong ticket,string context,double current,double stop,d
 //======================================================================
 // Exit 1: hybrid virtual trail, no TP. Real protection no longer
 // depends on the broker accepting a tight SL modify() - a virtual stop
-// (same ATR-derived distance/activation-floor rule as before: it does
-// not start trailing until favourable excursion has run the full SL
-// distance) is tracked in EA memory and checked every tick; the moment
-// price crosses it the position is force-closed directly. The broker-
-// side SL is still pushed via the existing backoff-protected
+// is tracked in EA memory and checked every tick; the moment price
+// crosses it the position is force-closed directly. The broker-side SL
+// is still pushed via the existing backoff-protected
 // ModifyPositionSafely as a best-effort backup net, clamped to
-// whatever distance the broker will actually accept - it is no longer
-// the only thing standing between price and an uncontrolled loss.
+// whatever distance the broker will actually accept.
+//
+// Exit shape: a WIDE fixed-pip preset floor (PresetSlDistance(), 21p
+// default) protects from entry, but the trail arms using a SEPARATE,
+// TIGHTER fixed-pip distance (TrailDistance(), 7p default) the instant
+// floating P&L turns positive - see the Stops/Trail input group above.
 //======================================================================
 void ManageTrailing()
 {
@@ -1490,8 +1499,11 @@ void ManageTrailing()
       int slot=EnsureManagedSlot(ticket);
       if(slot<0) continue;
 
-      double slDistance=g_managed[slot].slDistance;
+      double slDistance=PresetSlDistance();
       if(slDistance<=0.0) continue;
+
+      double trailDistance=TrailDistance();
+      if(trailDistance<=0.0) trailDistance=slDistance;
 
       int direction=((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)?1:-1;
       double openPrice   =PositionGetDouble(POSITION_PRICE_OPEN);
@@ -1504,14 +1516,27 @@ void ManageTrailing()
          g_managed[slot].peakPrice=MathMin(g_managed[slot].peakPrice,currentPrice);
 
       double peak=g_managed[slot].peakPrice;
+      // POSITION_PRICE_CURRENT is already the side the position would
+      // close at (bid for a BUY, ask for a SELL), so favorable>0 here
+      // means real floating P&L is positive, not just "price moved" -
+      // this is what "trailing starts after entry becomes positive
+      // P&L" means precisely (spread already netted out).
       double favorable=(direction==1)?(peak-openPrice):(openPrice-peak);
 
+      // WIDE preset floor from entry - always the starting protection,
+      // regardless of activation state.
       if(g_managed[slot].virtualStop<=0.0)
          g_managed[slot].virtualStop=RoundPrice((direction==1)?openPrice-slDistance:openPrice+slDistance);
 
-      if(favorable>=slDistance)
+      // Trail arms the instant floating P&L turns positive (explicit
+      // request) - not gated behind running the full preset distance.
+      // The TIGHT trailDistance candidate only actually improves on the
+      // wide preset floor once peak has moved far enough to overtake it -
+      // the monotonic "improves" comparison below handles that
+      // transition naturally, no special-casing needed.
+      if(favorable>0.0)
       {
-         double trailedStop=RoundPrice((direction==1)?peak-slDistance:peak+slDistance);
+         double trailedStop=RoundPrice((direction==1)?peak-trailDistance:peak+trailDistance);
          bool trailedImproves=(direction==1)
                               ?(trailedStop>g_managed[slot].virtualStop)
                               :(trailedStop<g_managed[slot].virtualStop);
