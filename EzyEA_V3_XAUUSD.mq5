@@ -13,20 +13,23 @@
 //| EXIT LOGIC - now LOCKED IN and refined further per explicit follow- |
 //| up request, switching from the ATR-relative version that won the    |
 //| A/B test to literal fixed pips:                                     |
-//|   - InpPresetStopLossPips = 21: wide floor protecting from entry.   |
-//|   - InpTrailingDistancePips = 7: tight distance used once trailing  |
+//|   - InpPresetStopLossPips = 50: wide floor protecting from entry    |
+//|     (revised up from 21 after live/test feedback that 21 was too    |
+//|     tight, explicit follow-up request).                             |
+//|   - InpTrailingDistancePips = 30: tight distance used once trailing |
+//|     is armed (revised up from 7, same feedback).                    |
 //|     is armed (was ATR-relative in the A/B-test build; now a plain   |
 //|     pip value, using the same cent-aware pip-size convention as     |
 //|     EzyEA V2 - InpXAUUSDscPipPrice/InpStandardXAUUSDPipPrice, both   |
 //|     default 0.10). ATR is no longer used anywhere in this file for  |
 //|     stops - InpAtrPeriod and the ATR indicator handle are removed.  |
-//|   - Activation: the trail now arms the instant floating P&L turns   |
-//|     POSITIVE (favorable>0.0 using POSITION_PRICE_CURRENT, which is  |
-//|     already the side a close would execute at - bid for a BUY, ask  |
-//|     for a SELL - so this nets out spread correctly, not just "price |
-//|     moved"), per explicit request. Previously this was ATR-relative |
-//|     and defaulted to immediate too, but is now a plain, unconditional|
-//|     rule rather than a configurable multiplier.                      |
+//|   - Activation: the trail arms once floating P&L reaches                |
+//|     InpTrailActivationPips (10 pips default, revised from an earlier    |
+//|     "any positive P&L" rule per explicit follow-up request) using       |
+//|     POSITION_PRICE_CURRENT, which is already the side a close would     |
+//|     execute at - bid for a BUY, ask for a SELL - so this nets out       |
+//|     spread correctly, not just "price moved". Until that threshold      |
+//|     clears, the wide preset floor is the only protection.               |
 //|   - The hybrid virtual-trail MECHANISM itself (real protection        |
 //|     tracked in EA memory and enforced by a direct close, independent |
 //|     of the broker accepting a tight SL modify; M1 peak reconstruction |
@@ -69,9 +72,15 @@
 //|         longer used anywhere). Zone levels switched from wick-based           |
 //|         (high/low) to close-based (close-to-high for supply/SELL,             |
 //|         close-to-low for demand/BUY), pivot qualification unchanged.          |
+//| 6.102 - Explicit follow-up: preset 21p->50p, trail 7p->30p after               |
+//|         live/test feedback that 21/7 was too tight. Trail                     |
+//|         activation changed from "any positive P&L" to                         |
+//|         InpTrailActivationPips (10p default) - the wide preset                |
+//|         floor is the only protection until floating P&L reaches               |
+//|         that many pips, not merely turning positive.                          |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "6.101"
+#property version   "6.102"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -143,8 +152,12 @@ input group "=== Stops / Trail (fixed pips) ==="
 // both default 0.10 - the standard gold convention, confirmed live
 // that assuming 0.01 for a .sc suffix makes stops far tighter than the
 // broker's real minimum distance, rejecting every entry).
-input double InpPresetStopLossPips          = 21.0;
-input double InpTrailingDistancePips        = 7.0;
+input double InpPresetStopLossPips          = 50.0;
+input double InpTrailingDistancePips        = 30.0;
+// Trail arms once floating P&L reaches this many pips in profit, not
+// merely turning positive (explicit follow-up request) - the wide
+// preset floor is the only protection until this threshold clears.
+input double InpTrailActivationPips         = 10.0;
 input double InpXAUUSDscPipPrice            = 0.10;
 input double InpStandardXAUUSDPipPrice      = 0.10;
 input double InpTrailMinStepPoints          = 20.0;
@@ -353,6 +366,7 @@ bool   IsCentSuffixSymbol();
 double StrategyPipSize();
 double PresetSlDistance();
 double TrailDistance();
+double TrailActivationDistance();
 double RoundPrice(double v);
 string PriceText(double v);
 void   Log(string msg);
@@ -569,6 +583,11 @@ double PresetSlDistance()
 double TrailDistance()
 {
    return MathMax(0.1,InpTrailingDistancePips)*StrategyPipSize();
+}
+
+double TrailActivationDistance()
+{
+   return MathMax(0.0,InpTrailActivationPips)*StrategyPipSize();
 }
 
 double RoundPrice(double v)
@@ -1517,24 +1536,25 @@ void ManageTrailing()
 
       double peak=g_managed[slot].peakPrice;
       // POSITION_PRICE_CURRENT is already the side the position would
-      // close at (bid for a BUY, ask for a SELL), so favorable>0 here
-      // means real floating P&L is positive, not just "price moved" -
-      // this is what "trailing starts after entry becomes positive
-      // P&L" means precisely (spread already netted out).
+      // close at (bid for a BUY, ask for a SELL), so favorable here
+      // tracks real floating P&L, not just "price moved" - spread is
+      // already netted out.
       double favorable=(direction==1)?(peak-openPrice):(openPrice-peak);
+      double activationDistance=TrailActivationDistance();
 
       // WIDE preset floor from entry - always the starting protection,
       // regardless of activation state.
       if(g_managed[slot].virtualStop<=0.0)
          g_managed[slot].virtualStop=RoundPrice((direction==1)?openPrice-slDistance:openPrice+slDistance);
 
-      // Trail arms the instant floating P&L turns positive (explicit
-      // request) - not gated behind running the full preset distance.
-      // The TIGHT trailDistance candidate only actually improves on the
+      // Trail arms once floating P&L reaches InpTrailActivationPips in
+      // profit (explicit request - not merely turning positive, and not
+      // gated behind running the full preset distance either). The
+      // TIGHT trailDistance candidate only actually improves on the
       // wide preset floor once peak has moved far enough to overtake it -
       // the monotonic "improves" comparison below handles that
       // transition naturally, no special-casing needed.
-      if(favorable>0.0)
+      if(favorable>=activationDistance)
       {
          double trailedStop=RoundPrice((direction==1)?peak-trailDistance:peak+trailDistance);
          bool trailedImproves=(direction==1)
