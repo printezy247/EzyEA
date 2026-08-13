@@ -1,69 +1,74 @@
 //+------------------------------------------------------------------+
-//|                                             EzyEA_V5_XAUUSD.mq5  |
+//|                                             EzyEA_V1_XAUUSD.mq5  |
 //|                                                                    |
-//| EzyEA V5 - VPS-targeted refinement of EzyEA V3's zero-confluence   |
-//| SND+EMA13 touch engine, built as a new file so V3 (live-tested)     |
-//| stays untouched. Explicit brief: a 0-2ms-ping VPS is now the        |
-//| execution environment, target is minimum drawdown / positive        |
-//| growth WITH maximum trade frequency - not frequency traded off      |
-//| against safety, both at once.                                       |
+//| EzyEA V1 (RENUMBERED, new generation) - was EzyEA_V5_XAUUSD.mq5,   |
+//| a VPS-targeted refinement of EzyEA_V3's zero-confluence SND+EMA13  |
+//| touch engine. Renamed to V1 to start a fresh numbering line        |
+//| (V1/V2/V3...) for this generation, distinct from the earlier       |
+//| EMA100+SND-regime and SND-only-rebuild EzyEA V1/V2 files that      |
+//| used to hold these filenames (now retired/overwritten per          |
+//| explicit request). Explicit brief this generation was built for:   |
+//| a 0-2ms-ping VPS is the execution environment, target is minimum   |
+//| drawdown / positive growth WITH maximum trade frequency - not      |
+//| frequency traded off against safety, both at once.                 |
 //|                                                                    |
-//| KEPT FROM V3, UNCHANGED: the zero-confluence "touch = immediate     |
-//| trade, no confirmation" philosophy for both entry sources (SND       |
-//| M5->Weekly level touch, EMA13 M5 touch) - a near-zero-latency VPS    |
-//| is exactly what makes reacting to a touch instantly, without         |
-//| waiting for a reclaim/confirmation bar, viable without eating        |
-//| execution-lag slippage. ATR-based trail-only exit (no TP), risk-     |
-//| based lot sizing via OrderCalcProfit(), portfolio-aware margin       |
-//| check, the zero-stops-level broker fallback, an auto-calibrating     |
-//| spread guard, cent-account-aware equity handling, and the hard       |
-//| InpMaxHoldingMinutes force-close backstop.                           |
-//|                                                                      |
-//| ADDED BACK - the proven risk layer this session's diagnosis work     |
-//| found necessary (V3 deliberately dropped all of this for max         |
-//| frequency; "minimum drawdown" is now an explicit co-goal, not        |
-//| sacrificed for it):                                                  |
-//|   1. H1 ADX trend filter (InpEnableTrendFilter) - blocks ONLY a      |
-//|      fade running directly against a confirmed strong trend. This    |
-//|      is the actual, confirmed fix for the correlated-pile margin     |
-//|      calls diagnosed on EzyEA V2 earlier this session (a zero-        |
-//|      confluence system with no trend awareness fades the same        |
-//|      direction repeatedly through a real trend, piling up            |
-//|      correlated losers) - it blocks a minority of signals (only       |
-//|      those fighting a confirmed trend), costing little frequency      |
-//|      in normal ranging conditions.                                    |
-//|   2. Per-direction concurrency cap                                    |
-//|      (InpMaxConcurrentPerDirection) - bounds how many same-           |
-//|      direction positions can stack from repeated touches within       |
-//|      the re-entry cooldown, independent of the trend filter.          |
-//|   3. Portfolio drawdown circuit breaker                               |
-//|      (InpEnableDrawdownBreaker) - closes everything and halts new     |
-//|      entries the moment peak-equity drawdown crosses the              |
-//|      threshold, resumes with hysteresis. A hard backstop for tail     |
-//|      risk that does not touch normal-operation frequency at all.      |
-//|                                                                       |
-//| VPS-SPECIFIC RETUNING (0-2ms ping assumed):                           |
-//|   - InpModifyBackoffBaseSeconds 5->2: the original 5s base was        |
-//|     partly defensive against network-latency-related modify           |
-//|     rejections; a near-zero-ping VPS removes most of that from the    |
-//|     equation (server-side broker processing/rate-limiting still       |
-//|     applies regardless of ping, so this is tightened, not removed).   |
-//|   - InpLevelReentrySeconds / InpEmaReentrySeconds 60->20: faster       |
-//|     re-arm on a genuine repeat touch, now safely bounded by the new    |
-//|     per-direction cap (which did not exist when 60s was chosen as      |
-//|     V2/V3's only throttle against repeated same-zone fires).          |
-//|                                                                      |
-//| Distinct magic number (190005) so this can run alongside V3/V3a/     |
-//| V3b/V4 without cross-talk.                                            |
-//|                                                                      |
+//| KEPT FROM V3, UNCHANGED: the zero-confluence "touch = immediate    |
+//| trade, no confirmation" philosophy for both entry sources (SND     |
+//| M5->Weekly level touch, EMA13 M5 touch) - a near-zero-latency VPS  |
+//| is exactly what makes reacting to a touch instantly, without       |
+//| waiting for a reclaim/confirmation bar, viable without eating      |
+//| execution-lag slippage. ATR-based trail-only exit (no TP), risk-   |
+//| based lot sizing via OrderCalcProfit(), portfolio-aware margin     |
+//| check, the zero-stops-level broker fallback, an auto-calibrating   |
+//| spread guard, cent-account-aware equity handling, and the hard     |
+//| InpMaxHoldingMinutes force-close backstop.                         |
+//|                                                                    |
+//| ADDED BACK - the proven risk layer this session's diagnosis work   |
+//| found necessary (V3 deliberately dropped all of this for max       |
+//| frequency; "minimum drawdown" is now an explicit co-goal, not      |
+//| sacrificed for it):                                                |
+//|   1. H1 ADX trend filter (InpEnableTrendFilter) - blocks ONLY a    |
+//|      fade running directly against a confirmed strong trend. This  |
+//|      is the actual, confirmed fix for the correlated-pile margin   |
+//|      calls diagnosed on an earlier zero-confluence EzyEA build     |
+//|      this session (no trend awareness fades the same direction     |
+//|      repeatedly through a real trend, piling up correlated         |
+//|      losers) - it blocks a minority of signals (only those         |
+//|      fighting a confirmed trend), costing little frequency in      |
+//|      normal ranging conditions.                                    |
+//|   2. Per-direction concurrency cap                                 |
+//|      (InpMaxConcurrentPerDirection) - bounds how many same-        |
+//|      direction positions can stack from repeated touches within    |
+//|      the re-entry cooldown, independent of the trend filter.       |
+//|   3. Portfolio drawdown circuit breaker                            |
+//|      (InpEnableDrawdownBreaker) - closes everything and halts new  |
+//|      entries the moment peak-equity drawdown crosses the           |
+//|      threshold, resumes with hysteresis. A hard backstop for tail  |
+//|      risk that does not touch normal-operation frequency at all.   |
+//|                                                                    |
+//| VPS-SPECIFIC RETUNING (0-2ms ping assumed):                        |
+//|   - InpModifyBackoffBaseSeconds 5->2: the original 5s base was     |
+//|     partly defensive against network-latency-related modify        |
+//|     rejections; a near-zero-ping VPS removes most of that from     |
+//|     the equation (server-side broker processing/rate-limiting      |
+//|     still applies regardless of ping, so this is tightened, not    |
+//|     removed).                                                      |
+//|   - InpLevelReentrySeconds / InpEmaReentrySeconds 60->20: faster   |
+//|     re-arm on a genuine repeat touch, now safely bounded by the    |
+//|     new per-direction cap (which did not exist when 60s was        |
+//|     chosen as the only throttle against repeated same-zone fires). |
+//|                                                                    |
+//| Distinct magic number (190005) so this can run alongside V2/V3/    |
+//| V3b/V4/V3(BTCUSD) without cross-talk.                              |
+//|                                                                    |
 //| CHANGELOG                                                          |
-//| 5.000 - Initial build: forked from EzyEA_V3_XAUUSD.mq5 3.002, added |
-//|         H1 ADX trend filter, per-direction concurrency cap,          |
-//|         portfolio drawdown breaker, VPS-tuned modify backoff and      |
-//|         re-entry cooldowns.                                          |
+//| 1.000 - Renamed from EzyEA_V5_XAUUSD.mq5 5.000. Content unchanged  |
+//|         from that build: H1 ADX trend filter,                     |
+//|         per-direction concurrency cap, portfolio drawdown          |
+//|         breaker, VPS-tuned modify backoff and re-entry cooldowns.  |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "5.000"
+#property version   "1.000"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -335,7 +340,7 @@ int OnInit()
 {
    if(!IsGold())
    {
-      Log("EzyEA V5 is XAUUSD-only. Attach to a XAUUSD/XAUUSD.sc chart. Current symbol="+_Symbol);
+      Log("EzyEA V1 is XAUUSD-only. Attach to a XAUUSD/XAUUSD.sc chart. Current symbol="+_Symbol);
       return INIT_FAILED;
    }
 
@@ -389,7 +394,7 @@ int OnInit()
    g_peakEquity=AccountInfoDouble(ACCOUNT_EQUITY);
    g_tradingHalted=false;
 
-   Log("EzyEA V5 initialized on "+_Symbol+
+   Log("EzyEA V1 initialized on "+_Symbol+
        " | account unit divisor="+DoubleToString(g_accountUnitDivisor,2)+
        " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
        " | max concurrent="+IntegerToString(InpMaxConcurrentPositions)+
@@ -466,7 +471,7 @@ string PriceText(double v)
 
 void Log(string msg)
 {
-   Print("EzyEA V5 | ",msg);
+   Print("EzyEA V1 | ",msg);
 }
 
 //======================================================================
@@ -1045,7 +1050,7 @@ void TryLevelEntry(int direction,double levelPrice)
    double slDistance=InpAtrSlMultiplier*atrBuf[1];
    if(slDistance<=0.0) return;
 
-   TryOpenPosition(direction,"V5SND",slDistance);
+   TryOpenPosition(direction,"V1SND",slDistance);
 }
 
 //======================================================================
@@ -1063,7 +1068,7 @@ void TryEmaEntry(int direction,double emaValue)
    double slDistance=InpAtrSlMultiplier*atrBuf[1];
    if(slDistance<=0.0) return;
 
-   TryOpenPosition(direction,"V5EMA",slDistance);
+   TryOpenPosition(direction,"V1EMA",slDistance);
 }
 
 void CheckEmaTouch(double observedLo,double observedHi)
@@ -1326,7 +1331,7 @@ void DrawLevels()
 
    for(int i=0;i<ArraySize(g_levels);i++)
    {
-      string name="V5_LVL_"+IntegerToString(i);
+      string name="V1_LVL_"+IntegerToString(i);
       if(g_levels[i].price<=0.0)
       {
          ObjectDelete(0,name);
@@ -1361,7 +1366,7 @@ void DrawEmaLine()
 
    for(int shift=0;shift<n-1;shift++)
    {
-      string name="V5_EMA_"+IntegerToString(shift);
+      string name="V1_EMA_"+IntegerToString(shift);
       datetime t1=iTime(_Symbol,PERIOD_M5,shift+1);
       datetime t2=iTime(_Symbol,PERIOD_M5,shift);
       double p1=emaBuf[shift+1];
@@ -1394,8 +1399,8 @@ int CountActiveLevels()
 
 void DrawStatusLabel()
 {
-   string name="V5_StatusLabel";
-   string text=StringFormat("EzyEA V5 | SND active=%d/%d | EMA%d touch=%s | Open=%d/%d | trend=%s | %s",
+   string name="V1_StatusLabel";
+   string text=StringFormat("EzyEA V1 | SND active=%d/%d | EMA%d touch=%s | Open=%d/%d | trend=%s | %s",
                 CountActiveLevels(),ArraySize(g_levels),
                 InpEmaPeriod,(g_emaInZone?"IN-ZONE":"-"),
                 CountOpenPositions(),InpMaxConcurrentPositions,
@@ -1421,7 +1426,7 @@ void RemoveAllDrawings()
    for(int i=ObjectsTotal(0,0,-1)-1;i>=0;i--)
    {
       string name=ObjectName(0,i,0,-1);
-      if(StringFind(name,"V5_")==0)
+      if(StringFind(name,"V1_")==0)
          ObjectDelete(0,name);
    }
 }
@@ -1443,7 +1448,7 @@ void PeriodicStatusLog()
    double ddPct =(g_peakEquity>0.0)?(g_peakEquity-equity)/g_peakEquity*100.0:0.0;
    string trendText=(g_trendDirection==1?"UP":(g_trendDirection==-1?"DOWN":"NONE"));
 
-   Log("V5 LIVE PARITY STATUS"+
+   Log("V1 LIVE PARITY STATUS"+
        " | SND active="+IntegerToString(CountActiveLevels())+"/"+IntegerToString(ArraySize(g_levels))+
        " | EMA"+IntegerToString(InpEmaPeriod)+" touch="+(g_emaInZone?"IN-ZONE":"-")+
        " | open="+IntegerToString(CountOpenPositions())+"/"+IntegerToString(InpMaxConcurrentPositions)+
@@ -1451,7 +1456,7 @@ void PeriodicStatusLog()
        " | drawdown="+DoubleToString(ddPct,2)+"%"+(g_tradingHalted?" (HALTED)":"")+
        " | equity="+DoubleToString(EffectiveAccountEquity(),2)+" "+AccountInfoString(ACCOUNT_CURRENCY));
 
-   Log("V5 DEPLOYMENT GATE BREAKDOWN"+
+   Log("V1 DEPLOYMENT GATE BREAKDOWN"+
        " | attempts="+IntegerToString(g_gateAttempts)+
        " | accepted="+IntegerToString(g_gateAccepted)+
        " | rejected="+IntegerToString(g_gateRejected)+
@@ -1492,7 +1497,7 @@ void WriteFinalReport()
               HistoryDealGetDouble(dealTicket,DEAL_COMMISSION);
    }
 
-   Log("V5 FINAL REPORT"+
+   Log("V1 FINAL REPORT"+
        " | trades="+IntegerToString(trades)+
        " | total lots traded="+DoubleToString(lotsTraded,2)+
        " | net P/L="+DoubleToString(netPnl,2)+" "+AccountInfoString(ACCOUNT_CURRENCY));

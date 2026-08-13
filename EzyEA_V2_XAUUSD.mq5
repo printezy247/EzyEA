@@ -1,9 +1,14 @@
 //+------------------------------------------------------------------+
-//|                                            EzyEA_V3a_XAUUSD.mq5  |
+//|                                             EzyEA_V2_XAUUSD.mq5  |
 //|                                                                    |
-//| EzyEA V3a - fixed TP/SL + breakeven-lock variant of                |
+//| EzyEA V2 (RENUMBERED, new generation) - was                        |
+//| EzyEA_V3a_XAUUSD.mq5, a fixed TP/SL + breakeven-lock variant of    |
 //| EzyEA_V3_XAUUSD.mq5, built as a SEPARATE file per explicit request |
-//| so the original V3 (currently live-tested) is untouched.           |
+//| so the original V3 (currently live-tested) is untouched. Renamed   |
+//| to V2 to sit alongside the renumbered EzyEA V1 (was V5) as the     |
+//| second entry in this generation's V1/V2/V3... line, distinct from  |
+//| the earlier SND-only-rebuild EzyEA V2 that used to hold this       |
+//| filename (now retired/overwritten per explicit request).           |
 //|                                                                    |
 //| Same entry logic as V3, unchanged: two independent zero-confluence |
 //| entry sources fire in parallel, no filtering between them - SND    |
@@ -37,16 +42,17 @@
 //| anywhere in this file (SL/TP are fixed-pip, not ATR-based) -       |
 //| InpAtrPeriod/InpAtrSlMultiplier and the ATR indicator handle are   |
 //| removed. Distinct magic number (190013) and order-comment prefix   |
-//| (V3aSND/V3aEMA) so this can run alongside V3 XAUUSD without        |
-//| cross-talk.                                                        |
+//| (V2SND/V2EMA) so this can run alongside V1/V3/V3b/V4/V3(BTCUSD)    |
+//| without cross-talk.                                                |
 //|                                                                    |
 //| CHANGELOG                                                          |
-//| 3.500 - Initial build: fixed 30-pip SL / 50-pip TP / breakeven      |
-//|         lock (+3 pips once +10 pips favourable), forked from        |
-//|         EzyEA_V3_XAUUSD.mq5 3.002.                                  |
+//| 2.000 - Renamed from EzyEA_V3a_XAUUSD.mq5 3.500. Content unchanged |
+//|         from that build: fixed 30-pip SL / 50-pip TP / breakeven   |
+//|         lock (+3 pips once +10 pips favourable), forked from       |
+//|         EzyEA_V3_XAUUSD.mq5 3.002.                                 |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "3.500"
+#property version   "2.000"
 #property strict
 #include <Trade/Trade.mqh>
 
@@ -302,7 +308,7 @@ int OnInit()
 {
    if(!IsGold())
    {
-      Log("EzyEA V3a is XAUUSD-only. Attach to a XAUUSD/XAUUSD.sc chart. Current symbol="+_Symbol);
+      Log("EzyEA V2 is XAUUSD-only. Attach to a XAUUSD/XAUUSD.sc chart. Current symbol="+_Symbol);
       return INIT_FAILED;
    }
 
@@ -348,7 +354,7 @@ int OnInit()
    g_hasPreviousCMP=false;
    g_previousCMP=0.0;
 
-   Log("EzyEA V3a initialized on "+_Symbol+
+   Log("EzyEA V2 initialized on "+_Symbol+
        " | account unit divisor="+DoubleToString(g_accountUnitDivisor,2)+
        " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
        " | max concurrent="+IntegerToString(InpMaxConcurrentPositions)+" (no strategic cap)"+
@@ -424,7 +430,7 @@ string PriceText(double v)
 
 void Log(string msg)
 {
-   Print("EzyEA V3a | ",msg);
+   Print("EzyEA V2 | ",msg);
 }
 
 //======================================================================
@@ -870,7 +876,7 @@ void TryLevelEntry(int direction,double levelPrice)
    double tpDistance=InpFixedTpPips*StrategyPipSize();
    if(slDistance<=0.0 || tpDistance<=0.0) return;
 
-   TryOpenPosition(direction,"V3aSND",slDistance,tpDistance);
+   TryOpenPosition(direction,"V2SND",slDistance,tpDistance);
 }
 
 //======================================================================
@@ -886,7 +892,7 @@ void TryEmaEntry(int direction,double emaValue)
    double tpDistance=InpFixedTpPips*StrategyPipSize();
    if(slDistance<=0.0 || tpDistance<=0.0) return;
 
-   TryOpenPosition(direction,"V3aEMA",slDistance,tpDistance);
+   TryOpenPosition(direction,"V2EMA",slDistance,tpDistance);
 }
 
 void CheckEmaTouch(double observedLo,double observedHi)
@@ -1153,7 +1159,7 @@ void DrawLevels()
 
    for(int i=0;i<ArraySize(g_levels);i++)
    {
-      string name="V3a_LVL_"+IntegerToString(i);
+      string name="V2_LVL_"+IntegerToString(i);
       if(g_levels[i].price<=0.0)
       {
          ObjectDelete(0,name);
@@ -1188,7 +1194,7 @@ void DrawEmaLine()
 
    for(int shift=0;shift<n-1;shift++)
    {
-      string name="V3a_EMA_"+IntegerToString(shift);
+      string name="V2_EMA_"+IntegerToString(shift);
       datetime t1=iTime(_Symbol,PERIOD_M5,shift+1);
       datetime t2=iTime(_Symbol,PERIOD_M5,shift);
       double p1=emaBuf[shift+1];
@@ -1221,8 +1227,8 @@ int CountActiveLevels()
 
 void DrawStatusLabel()
 {
-   string name="V3a_StatusLabel";
-   string text=StringFormat("EzyEA V3a | SND active=%d/%d | EMA%d touch=%s | Open=%d/%d",
+   string name="V2_StatusLabel";
+   string text=StringFormat("EzyEA V2 | SND active=%d/%d | EMA%d touch=%s | Open=%d/%d",
                 CountActiveLevels(),ArraySize(g_levels),
                 InpEmaPeriod,(g_emaInZone?"IN-ZONE":"-"),
                 CountOpenPositions(),InpMaxConcurrentPositions);
@@ -1246,7 +1252,7 @@ void RemoveAllDrawings()
    for(int i=ObjectsTotal(0,0,-1)-1;i>=0;i--)
    {
       string name=ObjectName(0,i,0,-1);
-      if(StringFind(name,"V3a_")==0)
+      if(StringFind(name,"V2_")==0)
          ObjectDelete(0,name);
    }
 }
@@ -1264,13 +1270,13 @@ void PeriodicStatusLog()
 
    if(InpDrawStatusLabel) DrawStatusLabel();
 
-   Log("V3a LIVE PARITY STATUS"+
+   Log("V2 LIVE PARITY STATUS"+
        " | SND active="+IntegerToString(CountActiveLevels())+"/"+IntegerToString(ArraySize(g_levels))+
        " | EMA"+IntegerToString(InpEmaPeriod)+" touch="+(g_emaInZone?"IN-ZONE":"-")+
        " | open="+IntegerToString(CountOpenPositions())+"/"+IntegerToString(InpMaxConcurrentPositions)+
        " | equity="+DoubleToString(EffectiveAccountEquity(),2)+" "+AccountInfoString(ACCOUNT_CURRENCY));
 
-   Log("V3a DEPLOYMENT GATE BREAKDOWN"+
+   Log("V2 DEPLOYMENT GATE BREAKDOWN"+
        " | attempts="+IntegerToString(g_gateAttempts)+
        " | accepted="+IntegerToString(g_gateAccepted)+
        " | rejected="+IntegerToString(g_gateRejected)+
@@ -1309,7 +1315,7 @@ void WriteFinalReport()
               HistoryDealGetDouble(dealTicket,DEAL_COMMISSION);
    }
 
-   Log("V3a FINAL REPORT"+
+   Log("V2 FINAL REPORT"+
        " | trades="+IntegerToString(trades)+
        " | total lots traded="+DoubleToString(lotsTraded,2)+
        " | net P/L="+DoubleToString(netPnl,2)+" "+AccountInfoString(ACCOUNT_CURRENCY));
