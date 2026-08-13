@@ -49,9 +49,12 @@
 //|         REQUEST after confirming the real-money consequence),       |
 //|         ported identically from EzyEA_V3_XAUUSD.mq5 3.001. See      |
 //|         that file's changelog for the full explanation.             |
+//| 3.102 - REVERTED: default true->false after live confirmation on    |
+//|         EzyEA V3 XAUUSD of the predicted consequence. Ported         |
+//|         identically from EzyEA_V3_XAUUSD.mq5 3.002.                 |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "3.101"
+#property version   "3.102"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -110,15 +113,18 @@ input double InpRiskPercentPerTrade         = 0.25;
 // 100x) so a "500 USC" account sizes trades the same as a "500 USD"
 // account would - matching a Strategy Tester run using a same-raw-
 // number standard-currency deposit. This makes REAL risk per trade
-// roughly (divisor)x LARGER than InpRiskPercentPerTrade alone implies -
-// confirmed live on EzyEA V3 XAUUSD: a 500 USD tester run traded 78.65
-// lots while the same EA on a real 500 USC account traded only 1.33
-// lots over a comparable stretch (~59x gap, consistent with a ~100x
-// cent-scaling difference, not a units bug - both were internally
-// self-consistent for their own account's real value). Set to false to
-// size honestly for the account's real economic value instead (a
-// genuinely tiny account trades genuinely tiny size).
-input bool   InpScaleRiskByCentDivisor      = true;
+// roughly (divisor)x LARGER than InpRiskPercentPerTrade alone implies.
+// Tried live on EzyEA V3 XAUUSD and reverted: a 500 USD tester run
+// traded 78.65 lots while the same EA on a real 500 USC account traded
+// only 1.33 lots over a comparable stretch (~59x gap, consistent with a
+// ~100x cent-scaling difference, not a units bug). Turning this on then
+// confirmed the predicted consequence live: the account dropped from
+// ~700 to ~146 USC once the lot size scaled up to match. DEFAULTS
+// FALSE - size honestly for the account's real economic value (a
+// genuinely tiny account trades genuinely tiny size). Only re-enable
+// with a full understanding that it multiplies real per-trade risk by
+// the divisor.
+input bool   InpScaleRiskByCentDivisor      = false;
 // "No cap" per explicit request - kept as a large technical ceiling
 // only (MQL5 arrays/loops still need SOME bound for basic sanity), not
 // a strategic limit like V2's per-direction cap, which is dropped here.
