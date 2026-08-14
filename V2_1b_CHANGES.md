@@ -636,3 +636,50 @@ it on only if you ever see the same symptom (zero trades, spread suspected) on t
 See the BTCUSD file's `V2_2_BTCUSD_CHANGES.md` S07 section for the full write-up, the
 median-vs-mean reasoning, and the verification table — the code is byte-identical between
 the two files apart from the log tag and this default.
+
+---
+
+## S05 — lot multiplication removed; confidence now means layer count, not size
+
+Ported from the BTCUSD sibling's S10, where the user watched the live BTC chart place a
+single order at double the normal lot size and asked for the confidence-tier system to
+express itself as layer COUNT rather than layer SIZE: Standard = one instant order, Good =
+one instant plus one limit, Quality = one instant plus two limits, every layer the same flat
+size.
+
+**Root cause:** `ConfidenceSetupLot(conf)` picked a bigger `lotPer100` for Good/Quality (2x/3x
+Standard) for a bigger TOTAL lot, and `DesiredLayersForSetup()` also gave that setup more
+layers to split the bigger total across — two systems compounding. Worse,
+`BuildAggressiveArmPlans`'s route-shrink loop could drop a LIMIT route that failed to attach
+without shrinking the total to match, dumping the whole un-split total onto the surviving
+route(s) — observed live on the BTC sibling as a single doubled MARKET order.
+
+**Fix:** `ConfidenceSetupLot()` always returns the flat Standard lot now, regardless of
+confluence count — confidence is expressed solely through `DesiredLayersForSetup()`'s layer
+count (already correct, untouched). `BuildConfidenceLayerPlans()`,
+`BuildAggressiveArmPlans()`'s route-assignment loop, and `CreateMarketFallbackLayerSet()` all
+assign this same flat lot to every layer instead of dividing a total across however many end
+up valid. `InpGoodSetupLotPer100`/`InpQualitySetupLotPer100` remain declared for `.set`-file
+compatibility but are no longer read.
+
+See the BTCUSD file's `V2_2_BTCUSD_CHANGES.md` S10 section for the full root-cause trace and
+verification table — the code is byte-identical between the two files (script-diffed) apart
+from the stage tag in comments.
+
+---
+
+## FIXEDEXIT TEST BUILD — separate file, not part of the S01-S05 stage sequence
+
+A new file, `EzyMap_V2_1b_FIXEDEXIT_TEST.mq5`, forked from the S05 build so the user's main
+gold build is not disturbed. Every exit-geometry value the user requested
+(`InpPresetStopLossPips=21`, `InpTrailInitialDistancePips=7`, `InpTrailTightDistancePips=7`,
+`InpUseATRGeometry=false`, no TP/partial/breakeven) was already this file's S05 default, so
+the only change is a new input: `InpTrailArmRequiresPositiveProfit` (default `true` here,
+`false` everywhere else) replaces the existing pip-distance PHASE 1 arm check in
+`ManageHybridTrailingPositions()` with `PositionGetDouble(POSITION_PROFIT)>0.0` — the trail
+cannot touch the stop at all until the position is genuinely in profit, not just moved N
+pips favourably (which can still be a net loss once spread is subtracted).
+
+See the BTCUSD file's `V2_2_BTCUSD_CHANGES.md` FIXEDEXIT TEST BUILD section for the full
+reasoning and verification table — the arm-check code is byte-identical between the two new
+files (script-diffed).

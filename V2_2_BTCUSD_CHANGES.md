@@ -1129,3 +1129,349 @@ in place — the next test should report it.
 | `STAGE0_BASELINE.set` / `DIAGNOSTIC_FIRSTPASS.set` need no new pin | ✅ both already set `InpAutoCalibrateSpreadCap=false`, so the calibration branch (and its ceiling) never executes in either control arm |
 | **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
 | **Fix validated by a real run** | ❌ **no — the ceiling-decoupling is reasoned from the exact number (`120.0`) observed in the user's own journal, not yet re-tested** |
+
+---
+
+## S08 — ATR-adaptive stop/trail geometry turned on by default
+
+**The ceiling fix worked.** The next test run confirmed it: `SPREAD REJECTED` went from
+229,027 to **0**, and the run went from 0 deployments to `deployed=312, LIVE=305,
+completed=305`. The deployment-gate bug across S06/S07 is fully resolved — the EA now
+places and manages real trades on `BTCUSD.sc`.
+
+That same run surfaced the next problem: `TOTAL SETUPS: 528 | wins=56 | losses=403 |
+flat=69` — a **~12% win rate**. The user confirmed this run used the plain compiled
+defaults, no `.set` loaded (they don't write code and asked to receive a ready-to-run `.mq5`
+going forward rather than instructions to hand-edit `.set` files — every fix from here on
+should be a compiled-default change, not a `.set`-only one).
+
+At compiled defaults, `InpUseATRGeometry=false`, so every stop was a flat
+`InpPresetStopLossPips=21` "strategy pips." `StrategyPipSize()` returns `$1` for BTC — the
+file's own long-standing comment only ever worked this out for gold ("on XAU, one strategy
+pip is 0.10 price"), so a BTC "21-pip stop" is a flat **$21** stop on a symbol trading around
+$65,000 with $10-40 of noise on a single M5 candle (visible directly in the user's own
+chart screenshot). A stop that tight relative to ordinary noise, not a wrong directional
+signal, is the most likely single explanation for a win rate this low.
+
+### Fix
+
+No new code was needed — V3.190 already built ATR-adaptive geometry (`InpUseATRGeometry`,
+`ResolveATRGeometryPips()`) for the analogous gold problem (Asia-session ATR a third of New
+York's). Two compiled-default changes in this file only (V3.190/V2.1b keep the gold-proven
+fixed-pip defaults untouched):
+
+- `InpUseATRGeometry`: `false` → **`true`**.
+- `InpATRStopCeilingPips`: `35.0` → **`500.0`**.
+
+The ceiling change matters as much as turning the switch on. `ResolveATRGeometryPips()`
+computes `Clamp(atrPips * InpATRStopMultiplier, floor, ceiling)` — a gold-sized ceiling of 35
+left in place would have silently clamped the ATR-derived BTC stop straight back down to
+"too tight," the identical bug shape S07 already found and fixed once for the spread cap.
+500 is deliberately generous (a BTC M5 ATR would need to exceed roughly $312 before it ever
+binds) so it acts as a safety backstop against a runaway ATR reading, not an everyday clamp.
+`InpATRStopFloorPips` (12.0) is left unchanged — BTC's ATR is expected to sit well above it,
+so it was never the operative constraint.
+
+`RECOMMENDED.set`'s existing section 1 already reasoned through this exact scaling problem
+independently (pip = $1 on BTC vs $0.10 on gold, "multiply gold's flat pip counts by 10") and
+sets its own more specific `InpATRStopCeilingPips=350`; that number stands when the `.set` is
+loaded (`.set` values override compiled defaults) and is not disturbed by this stage — a
+short cross-reference comment was added there instead so the two numbers don't look like an
+unexplained conflict later.
+
+### `.set` file changes
+
+`STAGE0_BASELINE.set` gained the S08 polarity-exception pin (`InpUseATRGeometry=false`,
+`InpATRStopCeilingPips=35.0`), same pattern as S06/S07, so the control arm still reproduces
+plain fixed-pip gold/V2.1b behaviour exactly.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Brace / paren / bracket balance | ✅ `{}` 937/937 · `()` 6400/6400 · `[]` 1187/1187, residual 0 (comment + default-value only change, no structural edit) |
+| No function signature or control-flow changed | ✅ only two `input` default values changed; `ResolveATRGeometryPips()`, `RefreshGeometryATR()`, `CurrentGeometryATR()` untouched |
+| `STAGE0_BASELINE.set` reproduces pre-S08 behaviour | ✅ pins both changed defaults back to their old values |
+| Every `.set` input name resolves to a real declaration | ✅ script-checked: `RECOMMENDED` 76, `STAGE0_BASELINE` 8, `DIAGNOSTIC_FIRSTPASS` 74 entries, zero missing |
+| **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
+| **Fix validated by a real run** | ❌ **no — reasoned from the file's own documented pip-to-dollar conversion and the observed noise scale in the user's chart, not yet re-tested** |
+
+**Next test:** re-pull, recompile with no `.set` needed, and re-run. Read the `V2.2 BTC
+SPREAD AUTO-CALIBRATION COMPLETE` line for the real measured spread (still open from S07),
+and this time also check the win/loss split and net profit — if the win rate is still very
+low with ATR-adaptive stops active, the geometry scale was not the (whole) story and the
+next place to look is the entry/direction signal logic itself.
+
+---
+
+## S09 — the zero-confluence fallback stopped meaning zero confluences
+
+**S08 did not move the win rate.** A second real test run, on a different day, came back at
+~14.4% (53/315/65) — essentially the same as S07's 12.2% (56/403/69) despite stops now being
+ATR-adaptive instead of a flat $21. The user's own equity-curve screenshot settled the
+question: a smooth, steady grind downward with no drawdown spikes at all — many small
+losses, not occasional big ones. That is a trade-*selectivity* signature, not a stop-width
+one, so S08's fix (real, and kept) was not the whole story.
+
+Reading `ResolveMarketReadySignal()` found a second, independent bug in the same family as
+S07/S08 — a fixed value that made sense for gold's trading cadence but not BTC's. A
+documented "V3.094 exception" drops the required confluence count to **zero** whenever the
+EA has 0 or 1 open positions on the symbol, meant as a rare low-exposure fallback. A setup
+admitted this way also has its touch-quality recheck and position-count recheck explicitly
+**bypassed** at deployment time (`V3104_FORCE_ZERO_CONF_MARKET_EXECUTION`, logged as
+`ZERO-CONFLUENCE FORCE PASS ... recheck=BYPASSED`). On gold this presumably fires rarely.
+On BTC, the same test run that exposed the win-rate problem completed **301 trades in 24
+hours** — about one every 5 minutes — so exposure sits at 0-1 almost continuously. The "rare
+exception" is plausibly the *dominant* entry path on BTC: most trades getting no real
+quality bar at all, which is consistent with a strategy that has some real edge but pays it
+away in noise trades with none.
+
+### Fix
+
+The user was explicit that the fix should be "more confluences," not changes to the
+exit/profit-locking logic (S08 stands untouched). `InpZeroConfFallbackMinConfluences`
+(default `2`, matching the existing trend-following bar) replaces the hardcoded `0` that
+low-exposure setups were assigned. This is sufficient on its own: `zeroConfluenceFallback=
+(requiredConfluences==0)` downstream is what actually triggers the FORCE-PASS bypass at
+deployment, so once the assigned value is non-zero, those setups fall through to the
+**normal** deployment path (touch-quality recheck and position-count recheck both apply)
+instead of skipping it.
+
+**What did NOT change:** `buyCandidate`/`sellCandidate` — the test for whether a setup arms
+at all — reads `(buyNormalConfluence || buyZeroConfluenceFallback)`, and
+`buyZeroConfluenceFallback`'s own definition (exposure ≤ 1 and confluence count below the
+normal bar) is untouched. So exactly the same set of setups can still arm while the EA is
+flat or near-flat; the only change is that most of them now have to clear the standard
+quality gate on the way to a real order, instead of being force-passed through it.
+
+### `.set` file changes
+
+`STAGE0_BASELINE.set` gained the S09 polarity-exception pin
+(`InpZeroConfFallbackMinConfluences=0`), same pattern as S06-S08, reproducing the exact
+pre-S09 "any touch while flat" behaviour that has existed since V3.094/V3.102.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Brace / paren / bracket balance | ✅ `{}` 937/937 · `()` 6402/6402 · `[]` 1187/1187, residual 0 |
+| Admission test (`buyCandidate`/`sellCandidate`) unchanged | ✅ still reads `buyNormalConfluence \|\| buyZeroConfluenceFallback`; neither operand touched |
+| Only the two `effectiveRequired` assignments changed | ✅ `buyEffectiveRequired`/`sellEffectiveRequired` now read the new input instead of a literal `0`; no other call site edited |
+| New input declared before first use | ✅ input at line ~661, first use at ~8432, well after |
+| Every `.set` input name resolves to a real declaration | ✅ script-checked: `RECOMMENDED` 76, `STAGE0_BASELINE` 9, `DIAGNOSTIC_FIRSTPASS` 74 entries, zero missing |
+| **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
+| **Fix validated by a real run** | ❌ **no — reasoned from the file's own documented "V3.094 exception" and the observed 301-trades/24h turnover rate, not yet re-tested** |
+
+**Next test:** the user is running this build live today on a $1000 (USC) real chart rather
+than the Strategy Tester. Watch for a lower trade count than the ~300-450/day seen in S07/S08
+tester runs (most low-exposure setups should now be filtered by the normal quality gate
+instead of force-passed) and check whether the win rate improves. If trade count drops but
+win rate is still poor, the remaining problem is in the entry/direction signal quality
+itself, not in how permissively it gets applied.
+
+---
+
+## S10 — lot multiplication removed; confidence now means layer count, not size
+
+While S09 was running live, the user watched the BTC chart place a single order at **double**
+the normal lot size and asked directly: does the confidence-tier system still multiply lot
+size, and can it be changed to multiply the *number of layers* instead - Standard = one
+instant (MARKET) order, Good = one instant plus one limit, Quality = one instant plus two
+limits, every layer the same flat size?
+
+### Root cause
+
+Two systems were already scaling the same thing in the same direction, compounding each
+other:
+
+1. `ConfidenceSetupLot(conf)` picked a bigger `lotPer100` for Good/Quality
+   (`InpGoodSetupLotPer100`/`InpQualitySetupLotPer100`, 2x/3x
+   `InpStandardSetupLotPer100`), producing a bigger **total** lot for the whole setup.
+2. `DesiredLayersForSetup(conf,...)` **also** gave that same setup more layers (2 for Good, 3
+   for Quality) to split that already-bigger total across.
+
+That alone would have produced "more, smaller layers" rather than a doubled single order. The
+actual doubling came from a third place: `BuildAggressiveArmPlans`'s route-shrink loop could
+drop a LIMIT route that failed to attach (a very ordinary outcome — price moved, a duplicate
+zone, a broker minimum-distance rule) **without** shrinking `targetSetupLot` to match, so the
+whole un-split, already-tier-inflated total fell onto whichever route(s) survived — exactly a
+single MARKET order at 2x (or 3x) the intended size, which is what the user saw live.
+
+### Fix
+
+- `ConfidenceSetupLot()` no longer reads `InpGoodSetupLotPer100`/`InpQualitySetupLotPer100` at
+  all — it always returns the flat `InpStandardSetupLotPer100`-derived lot, regardless of
+  confluence count. Confidence is now expressed **solely** through
+  `DesiredLayersForSetup()`'s layer count, which was already correct (1/2/3) and is untouched.
+- `BuildConfidenceLayerPlans()`, `BuildAggressiveArmPlans()`'s route-assignment loop, and
+  `CreateMarketFallbackLayerSet()` — the three places that used to divide one total lot across
+  N layers — now assign this same flat lot to **every** layer directly. A layer/route that
+  cannot open (limit fails to attach, broker rejects it) simply does not open, at no cost to
+  the layers that do. This removes the doubling bug at its source rather than patching the
+  route-shrink loop that exposed it.
+- `InpGoodSetupLotPer100`/`InpQualitySetupLotPer100` remain declared (so old `.set` files
+  still load without error) but are no longer read anywhere.
+
+Applied identically to `EzyMap_V2_1b_TRIGGER_REFINED.mq5` (S05 there) — the user asked for
+both files, and the three functions touched are shared, unmodified code between the two
+lineages, so the fix is byte-identical apart from the stage tag in comments.
+
+### What did NOT change
+
+- Which setups can arm, and how many layers a Standard/Good/Quality setup gets, is untouched —
+  only how big each of those layers is.
+- The aggregate risk-budget ceiling (`riskBudget` in `BuildConfidenceLayerPlans`) is still
+  respected: it now caps cumulative risk across layers already planned rather than
+  pre-dividing itself across all of them up front, so it still shrinks or refuses a layer if
+  the running total would exceed it - it just no longer shrinks every layer pre-emptively to
+  fit inside a fixed total that no longer exists.
+- S08 (ATR-adaptive stops) and S09 (zero-conf confluence floor) are both untouched, per the
+  user's request to leave exit/profit-locking logic alone.
+
+**Understood consequence, not a bug:** a Good or Quality setup will now genuinely commit more
+total capital than before in the case where every layer fills (2x or 3x a single Standard
+layer, by simple arithmetic of "more layers, same size each") — this is the direct, intended
+result of "more layers" replacing "bigger layers," not an oversight.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Brace / paren / bracket balance | ✅ V2.2: `{}` 933/933 · `()` 6372/6372 · `[]` 1187/1187, residual 0. V2.1b: `{}` 930/930 · `()` 6265/6265 · `[]` 1187/1187, residual 0 |
+| No dangling references to removed variables (`remainingLot`, `desiredShare`, `riskShare`) | ✅ grep-confirmed zero hits in either file |
+| `ConfidenceSetupLot()` signature unchanged | ✅ still `double ConfidenceSetupLot(int conf)`; every call site (4 in each file) needed no edits |
+| Patch identical between V2.2 and V2.1b | ✅ script-diffed the non-comment lines of `ConfidenceSetupLot()`, `BuildConfidenceLayerPlans()`, and `CreateMarketFallbackLayerSet()` between both files — zero differences. The `BuildAggressiveArmPlans` route-loop edit diffed identically as well |
+| **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
+| **Fix validated by a real run** | ❌ **no — reasoned from the exact live trade the user reported (a single order at 2x lot) and the three-function trace above, not yet re-tested** |
+
+**Next test:** watch the live BTC chart for a Good/Quality setup and confirm each individual
+order (not the setup total) is now the same size as a Standard order's single layer — e.g. if
+Standard places one 0.09-lot order, a Good setup should place two 0.09-lot orders (one
+instant, one limit), not one 0.18-lot order.
+
+---
+
+## FIXEDEXIT TEST BUILD — separate file, not part of the S01-S10 stage sequence
+
+A new file, `EzyMap_V2_2_BTCUSD_FIXEDEXIT_TEST.mq5`, forked from the S10 build so the user's
+live-running S10 file is not disturbed. Requested to isolate the effect of a fixed
+(non-ATR) preset stop and a trail that never touches the stop until the trade is genuinely
+profitable — a different question from S08/S09 and worth testing in isolation rather than
+folding into the main build.
+
+**Input default changes from S10 (BTC pip = $1, per `StrategyPipSize()`):**
+
+| Input | S10 build | FIXEDEXIT_TEST |
+|---|---|---|
+| `InpUseATRGeometry` | `true` | `false` — a fixed preset must not be overwritten by a live ATR figure |
+| `InpPresetStopLossPips` | `21.0` | `39.0` ($39 flat stop) |
+| `InpTrailInitialDistancePips` | `7.0` | `25.0` ($25 trail) |
+| `InpTrailTightDistancePips` | `7.0` | `25.0` (kept equal to Initial — `InpTrailTightenAtPips` stays `999.0`/unreachable, so there is only ever one trail phase) |
+| `InpTrailingDistancePips` | `7.0` | `25.0` (cosmetic only — `FixedTrailCandidateSL()` is dead code, never called; kept in sync purely so log lines don't contradict the real trail distance) |
+| `InpUseTakeProfit`, `InpUsePartialTakeProfit`, `InpUseBreakevenLock` | all `false` | unchanged (`false`) — no TP, no partial, no breakeven-floor complexity, so nothing can close or lock in profit early besides the single trail phase |
+
+**New behaviour — `InpTrailArmRequiresPositiveProfit` (default `true` in this build, `false`
+everywhere else):** the existing PHASE 1 arm check in `ManageHybridTrailingPositions()`
+(`peakFavourable>=activationDistance`, a raw price-distance test) is replaced by
+`PositionGetDouble(POSITION_PROFIT)>0.0` when this input is true. This is a deliberately
+different and stricter question than "has price moved N pips in my favour" — a favourable
+pip move can still be a net loss once spread is subtracted (`POSITION_PROFIT` already nets
+this out, since a BUY closes at bid and a SELL at ask). The trail cannot touch the stop at
+all until the position is genuinely, not just directionally, in profit, which is the direct
+answer to "avoid premature profit-taking or loss-cutting by the EA."
+
+Ported identically to `EzyMap_V2_1b_FIXEDEXIT_TEST.mq5` for gold — there every other
+exit-geometry value already matched what was requested (`InpPresetStopLossPips=21`,
+`InpTrailInitialDistancePips=7`, `InpUseATRGeometry=false` were already the S05 defaults), so
+only the new arm-gate input and its wiring were added.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Brace / paren / bracket balance | ✅ V2.2 FIXEDEXIT_TEST: `{}` 933/933 · `()` 6377/6377 · `[]` 1187/1187, residual 0. V2.1b FIXEDEXIT_TEST: `{}` 930/930 · `()` 6270/6270 · `[]` 1187/1187, residual 0 |
+| Arm-check edit identical between both new files | ✅ script-diffed the non-comment lines — zero differences |
+| S10/S05 shipped files untouched | ✅ these are new, separately-named files; `EzyMap_V2_2_BTCUSD_ADAPTATION.mq5` and `EzyMap_V2_1b_TRIGGER_REFINED.mq5` have no changes from this build |
+| `currentProfit` read before any position-selection could change | ✅ captured immediately alongside `currentSL`/`currentTP` in the same position loop iteration |
+| **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
+| **Fix validated by a real run** | ❌ **no — this is a fresh test build by design, not yet run** |
+
+---
+
+## S11 — exit-modify backoff (`EzyMap_V2_2_BTCUSD_ADAPTATION.mq5` only, real bug found live)
+
+A full-day live run on BTCUSD.sc ended at 881.71 from a 930 USC start, and the user flagged
+the Trades journal: the terminal showed `modify` immediately followed by `failed modify
+... [Invalid stops]` for the same ticket, over and over, roughly once per second, for two
+open positions simultaneously, continuously for the whole session.
+
+### Root cause
+
+Three separate functions each gate whether/where a trailing-stop modify can be sent —
+`FixedTrailSLBrokerValid()`, `LatestBrokerValidExitSL()`, and `BrokerTrailMinimumDistance()`
+(via `BrokerCompatibleTrailSL()`) — and all three compute the same shape of minimum distance:
+`SYMBOL_TRADE_STOPS_LEVEL`/`SYMBOL_TRADE_FREEZE_LEVEL` (broker-reported) plus a small fixed
+cushion of 2-5 **points** (`InpExecutionStopCushionPoints`, `InpTrailBrokerCushionPoints`,
+`InpExitExtraStopCushionPoints`). On XAUUSD, where 1 point is $0.01 and typical distances are
+dollars, that cushion is a meaningful few-cent-to-few-dollar buffer. On BTCUSD.sc, where 1
+point is still $0.01 but the instrument routinely moves by tens or hundreds of dollars, the
+same 2-5 points is a few **cents** — functionally nothing. If the broker's real enforced
+minimum stop distance for this symbol is wider than what those two symbol properties report
+(a known real-world quirk on crypto CFDs, whose reported stops/freeze level can understate
+the server's actual rule), the code computes a value it believes is valid, the broker
+rejects it anyway, and — critically — nothing in the retry path ever adapts: it just tries
+again a fixed cooldown later with the same undersized cushion, forever. This is the same
+risk category as the confirmed entry-spam incident that cost real capital on a different EA
+(unthrottled retries hitting the broker), just applied to modifies instead of new orders and
+throttled to roughly 1/sec instead of 100+/sec — still a sustained, forever-failing,
+broker-facing request pattern with no self-correction, over an entire trading day.
+
+### Fix
+
+- Added `consecutiveInvalidStops` to `ExitExecutionState`, incremented on every rejection
+  (the pre-send validity check failing, or the broker rejecting the actual `PositionModify`
+  request) and reset to 0 the instant a modify is accepted.
+- Added `ExitBackoffCushionPrice(referencePrice, backoffSteps)`: a shared formula that adds
+  `InpExitBackoffCushionStepPct`% of the **current price** per consecutive failure, capped at
+  `InpExitBackoffMaxSteps` steps. Percentage-of-price, not a fixed point count, so the same
+  setting is meaningful on BTC's ~$65,000 print and XAU's ~$2,000 print alike, instead of
+  needing a different point value hand-tuned per symbol.
+- Threaded a `backoffSteps` parameter through `FixedTrailSLBrokerValid()`,
+  `LatestBrokerValidExitSL()`, `BrokerTrailMinimumDistance()`, and `BrokerCompatibleTrailSL()`
+  so every one of the four distance checks - including the pre-filter gate in
+  `ManageHybridTrailingPositions()`, which used to call these with no backoff awareness at
+  all - agrees on the same widening clearance.
+- The retry cooldown itself now backs off exponentially on repeated failure
+  (`InpExitInvalidStopsCooldownMs * 2^consecutiveFailures`, capped at
+  `InpExitBackoffCooldownCapMs`), so even if the widened cushion doesn't immediately clear
+  whatever the broker's real rule is, the request RATE drops off sharply instead of
+  sustaining a fixed once-per-second hammer for the rest of the session.
+- New log line `V3.176 SYNCHRONIZED SL PRE-SEND REJECTED (backoff)` and an extra
+  `consecutive failures=` field on the existing `SYNCHRONIZED SL REJECTED` line, so the next
+  live run's journal shows directly whether backoff is escalating and whether it eventually
+  clears.
+
+### What did NOT change
+
+- The three cushion inputs (`InpExecutionStopCushionPoints`, `InpTrailBrokerCushionPoints`,
+  `InpExitExtraStopCushionPoints`) keep their original meaning and defaults for the FIRST
+  attempt on any ticket (`consecutiveInvalidStops==0` → zero backoff cushion, byte-identical
+  distance to before this stage). Backoff only ever adds on top, after at least one real
+  rejection.
+- Entry logic, confluence gating, sizing, and every other exit mechanism (breakeven lock,
+  virtual-trail fallback, close-on-hit) are untouched.
+
+**Not yet known:** whether the widened cushion actually clears the broker's real minimum, or
+whether BTCUSD.sc's true rule is wider still and this only reduces the request rate without
+ever succeeding. The defaults (0.02% per step, 8-step cap, 15s cooldown cap) are a reasoned
+first attempt, not backtested or live-validated — the next run's journal is the real test.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Brace / paren / bracket balance | ✅ `{}` 934/934 · `()` 6406/6406 · `[]` 1192/1192, residual 0 |
+| Every call site of the four modified functions passes `backoffSteps` | ✅ grep-confirmed: all 2 `FixedTrailSLBrokerValid` sites, 1 `LatestBrokerValidExitSL` site, 1 `BrokerCompatibleTrailSL` site (which itself calls `BrokerTrailMinimumDistance`) updated |
+| Diffed against the pre-S11 committed file | ✅ scoped to the additions described above — no other line touched |
+| **Compiles in MetaEditor** | ❌ **not verified — no MQL5 toolchain in this environment** |
+| **Fix validated by a real run** | ❌ **no — diagnosed from the journal screenshot and code trace, not yet re-tested live** |

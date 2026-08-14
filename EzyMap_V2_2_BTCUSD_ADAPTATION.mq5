@@ -223,7 +223,7 @@
 //  rule lives in ProcessDirectZeroConfluenceTriggers(). See           |
 //  V2_1b_CHANGES.md.                                                  |
 //                                                                    |
-//  V2.2 BTC STAGE SUMMARY (S01-S07)                                   |
+//  V2.2 BTC STAGE SUMMARY (S01-S11)                                   |
 //                                                                    |
 //  Incremental build on V2.1b. This is a PORTABILITY AND BUGFIX pass, |
 //  not a strategy change. Scope: make the EA behave correctly on      |
@@ -385,6 +385,124 @@
 //      static (non-calibrating) branch.                               |
 //      Inputs: InpSpreadCalibrationCeilingPoints                      |
 //                                                                    |
+//  S08 ATR-ADAPTIVE STOP/TRAIL GEOMETRY TURNED ON BY DEFAULT           |
+//      A real test run at compiled defaults (spread gate now fixed,   |
+//      312 deployed / 305 completed) came back with a 12% win rate    |
+//      (56/403/69). InpUseATRGeometry was still false, so every       |
+//      stop was a flat InpPresetStopLossPips=21 "strategy pip" -      |
+//      and StrategyPipSize() is $1 for BTC (the file's own comment    |
+//      only ever worked this out for XAU: "one strategy pip is 0.10   |
+//      price"), so that is a flat $21 stop on a ~$65,000 symbol       |
+//      with $10-40 of noise per single M5 candle. No code was        |
+//      needed - V3.190's existing ATR geometry (built for gold's      |
+//      Asia-vs-NY ATR swing) already derives stop/trail/arm from      |
+//      live ATR instead of a frozen constant. Turned on by default    |
+//      in THIS file only; V3.190/V2.1b keep it off (gold-proven       |
+//      fixed-pip behaviour, not touched).                             |
+//      InpATRStopCeilingPips raised 35 -> 500: the ceiling clamps     |
+//      atrPips*multiplier, so a gold-sized ceiling left in place      |
+//      would have silently re-imposed the same "too tight for BTC"    |
+//      bug this stage exists to fix - the identical shape of bug      |
+//      S07's spread ceiling had. 500 is a safety backstop (needs a    |
+//      BTC M5 ATR above ~$312 to ever bind), not an everyday clamp.   |
+//      Inputs: InpUseATRGeometry (default TRUE here, FALSE            |
+//              elsewhere), InpATRStopCeilingPips (500.0, was 35.0)    |
+//                                                                    |
+//  S09 ZERO-CONFLUENCE FALLBACK NO LONGER MEANS ZERO CONFLUENCES       |
+//      S08's ATR-adaptive stops did not move a second real test run's |
+//      win rate (~12-14% on two different days) and the equity curve  |
+//      was a smooth, steady grind - many small losses, not occasional |
+//      big ones - which points at trade SELECTIVITY, not stop width.  |
+//      ResolveMarketReadySignal() has a documented "V3.094 exception":|
+//      required confluences drop to ZERO whenever this EA has 0 or 1  |
+//      open positions, and a setup admitted that way also has its     |
+//      touch-quality and position-count rechecks explicitly BYPASSED  |
+//      at deployment (V3104_FORCE_ZERO_CONF_MARKET_EXECUTION). On     |
+//      gold this fires rarely. On BTC, positions turn over fast (301  |
+//      completed trades in 24h in the test that exposed this, one     |
+//      every ~5 minutes), so exposure sits at 0-1 almost continuously |
+//      and this "rare exception" is plausibly the DOMINANT path -     |
+//      most entries getting no real quality bar at all.               |
+//      FIX: the required-confluence value that low-exposure setups    |
+//      get assigned is no longer hardcoded 0. Raising it above 0 is   |
+//      sufficient on its own to route them through the NORMAL         |
+//      deployment path instead of the bypass, because                 |
+//      zeroConfluenceFallback=(requiredConfluences==0) downstream -   |
+//      no other call site needed editing. WHICH setups can arm at     |
+//      all is unchanged (buyCandidate/sellCandidate's admission test  |
+//      does not read this value); only whether an admitted setup      |
+//      still has to clear the normal quality gate changed.            |
+//      Inputs: InpZeroConfFallbackMinConfluences (default 2)          |
+//                                                                    |
+//  S10 LOT MULTIPLICATION REMOVED - CONFIDENCE NOW MEANS LAYER COUNT   |
+//      The user watched the live BTC chart double a lot on a single    |
+//      order and asked for the tier system to express confidence as   |
+//      NUMBER OF LAYERS, not per-layer SIZE: Standard = one instant    |
+//      (MARKET), Good = one instant plus one limit, Quality = one     |
+//      instant plus two limits - every layer the SAME flat lot.       |
+//      ROOT CAUSE: ConfidenceSetupLot() picked a bigger lotPer100 for  |
+//      Good/Quality (2x/3x Standard), producing a bigger TOTAL, and    |
+//      DesiredLayersForSetup() ALSO gave that setup more layers to     |
+//      split the bigger total across - two systems compounding. Worse,|
+//      BuildAggressiveArmPlans's route-shrink logic could drop a      |
+//      LIMIT route that failed to attach WITHOUT shrinking the total, |
+//      dumping the whole un-split total onto the surviving route(s) - |
+//      exactly the single doubled MARKET order observed live.         |
+//      FIX: ConfidenceSetupLot() always returns the flat Standard lot |
+//      now, regardless of confluence count (InpGoodSetupLotPer100/    |
+//      InpQualitySetupLotPer100 are no longer read - kept as inputs   |
+//      only so old .set files still load). Confidence is expressed    |
+//      SOLELY through DesiredLayersForSetup()'s layer count, which     |
+//      was already correct (1/2/3) and untouched. Every layer-builder |
+//      (BuildConfidenceLayerPlans, BuildAggressiveArmPlans's route     |
+//      loop, CreateMarketFallbackLayerSet) now assigns this SAME flat  |
+//      lot to every layer instead of dividing one total across        |
+//      however many layers/routes end up valid - a route that cannot  |
+//      open now simply does not open, at no cost to the routes that   |
+//      do, which also removes the doubling bug at its source.         |
+//      Ported identically to EzyMap_V2_1b_TRIGGER_REFINED.mq5 (same   |
+//      three functions, same reasoning) since the user asked for both.|
+//      Inputs: none new. InpGoodSetupLotPer100/InpQualitySetupLotPer100|
+//      remain declared but are no longer read by ConfidenceSetupLot().|
+//                                                                    |
+//  S11 EXIT MODIFY BACKOFF (real bug, found live)                     |
+//      A full-day live run on BTCUSD.sc showed the broker rejecting   |
+//      the same trailing-SL modify, on two tickets, roughly once per  |
+//      second, continuously for the whole session ("Invalid stops"    |
+//      every single time - see the "modify"/"failed modify" pairs in |
+//      the Trades journal). ROOT CAUSE: FixedTrailSLBrokerValid(),    |
+//      LatestBrokerValidExitSL() and BrokerTrailMinimumDistance()     |
+//      each require only SYMBOL_TRADE_STOPS_LEVEL/FREEZE_LEVEL plus a |
+//      small fixed 2-5 POINT cushion (InpExecutionStopCushionPoints/  |
+//      InpTrailBrokerCushionPoints/InpExitExtraStopCushionPoints).    |
+//      On XAUUSD that is a sane few-dollar buffer; on BTCUSD.sc it is |
+//      a few CENTS - negligible - so if the broker's real enforced    |
+//      minimum distance for this symbol is wider than what those two  |
+//      symbol properties report (common for crypto CFDs), every       |
+//      retry keeps failing forever with no correction. This is the    |
+//      same risk category as the confirmed entry-spam incident that   |
+//      cost real capital on a different EA - just applied to modifies |
+//      instead of new orders, and throttled to ~1/sec instead of      |
+//      100+/sec, but still a sustained, forever-failing, broker-      |
+//      facing request pattern with no self-correction.                |
+//      FIX: added a per-ticket consecutiveInvalidStops counter        |
+//      (ExitExecutionState). Every rejection (broker OR the pre-send  |
+//      validity check) widens the required clearance by               |
+//      InpExitBackoffCushionStepPct% of the CURRENT PRICE (percentage,|
+//      not a fixed point count, so it scales correctly on BTC's       |
+//      $65,000 print and XAU's $2,000 print alike) and multiplies the |
+//      retry cooldown, both capped (InpExitBackoffMaxSteps,           |
+//      InpExitBackoffCooldownCapMs). Resets to zero the instant a     |
+//      modify is accepted. Threaded through all three distance        |
+//      functions plus the pre-filter gate in                          |
+//      ManageHybridTrailingPositions() so every layer of the check     |
+//      agrees. Defaults (0.02% per step, 8 step cap, 15s cooldown     |
+//      cap) are a first attempt, not backtested - watch the new       |
+//      "(backoff)" log lines on the next live run to see whether they |
+//      actually clear the rejection or just slow it down.             |
+//      Inputs: InpExitBackoffCushionStepPct, InpExitBackoffMaxSteps,  |
+//      InpExitBackoffCooldownCapMs.                                   |
+//                                                                    |
 //  BASE NOTE: this file descends from the V3.176 line, NOT from the   |
 //  separate V3.180 PARITY_HARDENED branch. It does not contain the    |
 //  V3.180 P01-P13 parity fixes. NowMs() and TradeRetcodePartial()     |
@@ -392,7 +510,7 @@
 //  were never present in this lineage; they were not removed.         |
 //+------------------------------------------------------------------+
 #property copyright "EzyMap"
-#property version   "2.202"
+#property version   "2.207"
 
 #include <Trade/Trade.mqh>
 
@@ -617,6 +735,25 @@ input double InpGoodSetupLotPer100         = 0.02;
 input double InpQualitySetupLotPer100      = 0.03;
 input int    InpGoodConfidenceMin          = 3;
 input int    InpQualityConfidenceMin       = 5;
+
+// V2.2 BTC S09: the "V3.094 exception" (see ResolveMarketReadySignal()) drops
+// the required confluence count to ZERO whenever this EA has 0 or 1 open
+// positions on the symbol - meant as a rare low-exposure fallback on gold.
+// On BTC, positions turn over fast (a real test run completed 301 trades in
+// 24 hours, roughly one every 5 minutes), so exposure sits at 0-1 almost
+// continuously and this "exception" ends up being the DOMINANT path, not a
+// rare one - every setup admitted through it also gets its touch-quality and
+// position-count rechecks explicitly bypassed (see V3104_FORCE_ZERO_CONF_
+// MARKET_EXECUTION), so effectively no quality bar applied to most entries.
+// That, not stop width, is the leading explanation for a ~12-14% win rate
+// that did not improve after S08's ATR-adaptive stops. This does not remove
+// the low-exposure fallback (BTC still needs to be able to re-enter while
+// flat) - it just requires a real confluence count instead of none. Default
+// 2 matches the existing trend-following bar, so a counter-trend setup can
+// still use the fallback with partial (but non-zero) confirmation, while a
+// trend-following setup below its own 2-confluence bar can no longer use the
+// fallback to skip that bar entirely.
+input int    InpZeroConfFallbackMinConfluences = 2;
 
 // Hard monetary-risk guard. Confidence lots are reduced if the frozen
 // Entry->SL distance would otherwise exceed this percentage of equity.
@@ -1067,7 +1204,21 @@ input bool   InpBreakevenAfterPartial          = true;
 
 // V3.190 S3: master switch. Default false = S01 fixed-pip geometry.
 // RECOMMENDED true.
-input bool   InpUseATRGeometry                 = false;
+//
+// V2.2 BTC S08: turned ON by default in this file only (V3.190/V2.1b keep
+// false, the gold-proven fixed-pip behaviour). WHY: a real test run at the
+// compiled defaults (InpUseATRGeometry=false, so a flat InpPresetStopLossPips
+// = 21 "strategy pips") produced a 12% win rate (56 wins / 403 losses / 69
+// flat out of 528 setups). StrategyPipSize() returns $1 for BTC (comment
+// above literally documents "on XAU, one strategy pip is 0.10 price" - it
+// was never re-derived for BTC's completely different absolute scale), so
+// that 21-pip preset is a flat $21 stop on a symbol trading around $65,000
+// with $10-40 of noise per single M5 candle - tight enough that ordinary
+// noise, not a wrong signal, is the most likely explanation for the low win
+// rate. ATR geometry already existed in this file for exactly this problem
+// (built to handle gold's Asia-vs-NY ATR swing) and needed no new code, only
+// turning on and rescaling its ceiling - see InpATRStopCeilingPips below.
+input bool   InpUseATRGeometry                 = true;
 input int    InpATRPeriod                      = 14;
 input ENUM_TIMEFRAMES InpATRTimeframe          = PERIOD_M5;
 // V3.190 S3: stop distance = ATR * this, clamped to the floor/ceiling below.
@@ -1080,7 +1231,15 @@ input double InpATRTrailMultiplier             = 0.55;
 // V3.190 S3: arm threshold = ATR * this.
 input double InpATRArmMultiplier               = 0.35;
 input double InpATRStopFloorPips               = 12.0;
-input double InpATRStopCeilingPips             = 35.0;
+// V2.2 BTC S08: was 35.0 (gold-scaled). This is a CEILING, not the enforced
+// value - ResolveATRGeometryPips() computes Clamp(atrPips*multiplier, floor,
+// ceiling), so a gold-sized ceiling here would silently re-impose the exact
+// same "stop too tight for BTC" bug this stage exists to fix, the same shape
+// of bug S07's spread ceiling had. Raised generously so it acts as a genuine
+// safety backstop against a runaway ATR reading, not an everyday clamp - a
+// BTC M5 ATR would need to exceed roughly $312 (500/1.60) before this ever
+// binds.
+input double InpATRStopCeilingPips             = 500.0;
 input double InpATRTrailFloorPips              = 5.0;
 
 //------------------------- V3.190 STAGE 4 ---------------------------
@@ -1458,6 +1617,56 @@ input int    InpExitInvalidStopsCooldownMs       = 500;
 // being rejected and falling back to the (now disabled) no-SL retry.
 input int    InpExitExtraStopCushionPoints       = 5;
 input bool   InpExitLogFillSlippage              = true;
+
+// EXIT MODIFY BACKOFF - added after a real live run on BTCUSD.sc showed the
+// broker rejecting the SAME trailing-SL modify, on TWO tickets, roughly once
+// per second, continuously for the whole session ("Invalid stops" every
+// time). None of the cushion inputs above ever escalate on repeated
+// rejection - they are small, fixed POINT counts (2-5 points), which is
+// negligible in dollar terms for BTCUSD (a few cents) even though it may be
+// enough headroom for a forex/metals symbol where 1 point is a meaningful
+// fraction of typical price moves. If the broker's real enforced minimum
+// distance for this symbol is wider than what SYMBOL_TRADE_STOPS_LEVEL/
+// SYMBOL_TRADE_FREEZE_LEVEL report (common for crypto CFDs), every retry
+// keeps failing forever with no correction - exactly the kind of sustained,
+// broker-facing request pattern that previously triggered a real "server
+// problem" alert on a different EA (unthrottled entry retries; this is the
+// same risk category applied to modifies instead of entries).
+//
+// After each consecutive failure (broker reject OR the pre-send validity
+// check itself failing) for a given ticket, this widens the required
+// clearance by InpExitBackoffCushionStepPct% of the CURRENT price - scales
+// correctly with price level, so the same setting is meaningful on both a
+// $65,000 BTC print and a $2,000 XAU print - and multiplies the retry
+// cooldown, both capped. Resets to zero the moment a modify is accepted.
+input double InpExitBackoffCushionStepPct  = 0.02;   // % of current price added per consecutive failure
+input int    InpExitBackoffMaxSteps        = 8;       // cap on how many failures keep widening the cushion
+input int    InpExitBackoffCooldownCapMs   = 15000;   // cap on the exponential retry backoff
+
+// ZERO STOPS-LEVEL FALLBACK - added after a real BTCUSD.sc log (analysed
+// 2026-08-10) showed "stopLevel=0 | freezeLevel=0" logged alongside every
+// single INVALID_STOPS rejection on the FRESH V3 BTCUSD line, including on
+// the very first attempt, before any backoff cushion had accumulated -
+// strong evidence that broker-reported zero does not reliably mean "no
+// minimum distance" on this account. When both SYMBOL_TRADE_STOPS_LEVEL
+// and SYMBOL_TRADE_FREEZE_LEVEL report zero, this adds a percentage-of-
+// price floor to the required clearance from the FIRST attempt, instead
+// of only widening after failures accumulate.
+input double InpZeroStopsLevelFallbackPct = 0.05;
+
+// VIRTUAL TRAIL CLOSE BACKOFF - added after the same real BTCUSD.sc log
+// showed 547 combined FROZEN(10029)/POSITION_CLOSED(10036) failures on
+// "HYBRID VIRTUAL TRAIL CLOSE FAILED" on the FRESH V3 BTCUSD line, the
+// single largest failure category, with the same tickets failing
+// repeatedly back-to-back. ClosePositionAtVirtualTrail() here has the
+// identical latent gap - unlike the modify path above, it carries NO
+// cooldown or retry-state at all, so it retries RequestSynchronizedPositionClose()
+// on every single tick for as long as the virtual trail stays hit, hammering
+// the broker with close requests for a position that is either temporarily
+// FROZEN or has ALREADY closed by other means. Reuses
+// InpExitModifyMinimumIntervalMs/InpExitBackoffCooldownCapMs above for its
+// retry cadence rather than adding yet more inputs for the same underlying
+// policy.
 
 // Legacy compatibility inputs retained but hard-disabled in V2.009F.
 input bool   InpUseContinuationTrail           = false;
@@ -1864,6 +2073,23 @@ struct ExitExecutionState
    double lastRequestedSL;
    uint   lastModifyRetcode;
 
+   // EXIT MODIFY BACKOFF: consecutive rejections (broker or pre-send
+   // validity check) for this ticket's SL modify. Widens the required
+   // broker clearance and the retry cooldown on every failure; reset to 0
+   // the instant a modify is accepted. See InpExitBackoffCushionStepPct.
+   int    consecutiveInvalidStops;
+
+   // VIRTUAL TRAIL CLOSE BACKOFF: separate from the modify counters above
+   // - a close attempt and a modify attempt are different operations on
+   // the same ticket, and coupling their retry state would let a recent
+   // modify failure delay a legitimate close (or vice versa). Consecutive
+   // rejected close attempts at the virtual trail; reset to 0 on
+   // acceptance OR when the broker reports the position is already closed
+   // (POSITION_CLOSED means the goal is already achieved, not a failure).
+   int    closeConsecutiveFailures;
+   ulong  closeCooldownUntilMs;
+   uint   lastCloseRetcode;
+
    // V3.190 S2: volume requested on the in-flight close. 0.0 means the
    // request was a full close; a positive value marks it as a partial so the
    // deal handler can tell the two apart when the fill arrives.
@@ -2128,13 +2354,15 @@ void ManageHybridTrailingPositions(string context);
 int HybridTrailStateIndex(ulong ticket);
 int EnsureHybridTrailState(ulong ticket,int direction,double entry,double current,datetime positionTime,MqlTick &tick);
 double ReconstructTrailPeak(int direction,double entry,datetime positionTime,MqlTick &tick);
-double BrokerTrailMinimumDistance();
-double BrokerCompatibleTrailSL(int direction,double current,double virtualStop);
+double ExitBackoffCushionPrice(double referencePrice,int backoffSteps);
+double ZeroStopsLevelFallbackPrice(double referencePrice,long stopsLevel,long freezeLevel);
+double BrokerTrailMinimumDistance(double current,int backoffSteps);
+double BrokerCompatibleTrailSL(int direction,double current,double virtualStop,int backoffSteps);
 int ExitExecutionStateIndexByTicket(ulong ticket);
 int ExitExecutionStateIndexByIdentifier(long positionIdentifier);
 int EnsureExitExecutionState(ulong ticket);
 bool ExitCloseInProgress(ulong ticket);
-double LatestBrokerValidExitSL(int direction,double virtualStop,MqlTick &tick);
+double LatestBrokerValidExitSL(int direction,double virtualStop,MqlTick &tick,int backoffSteps);
 bool RequestSynchronizedPositionModify(ulong ticket,
                                        int direction,
                                        double virtualStop,
@@ -4035,7 +4263,8 @@ double BrokerSafeExecutionTP(int direction,
 
 bool FixedTrailSLBrokerValid(int direction,
                              double currentPrice,
-                             double requestedSL)
+                             double requestedSL,
+                             int backoffSteps)
 {
    if(currentPrice<=0 || requestedSL<=0)
       return false;
@@ -4049,7 +4278,9 @@ bool FixedTrailSLBrokerValid(int direction,
    double minimumDistance=
       MathMax(_Point,
               ((double)MathMax(stopsLevel,freezeLevel)+
-               MathMax(0,InpExecutionStopCushionPoints))*_Point);
+               MathMax(0,InpExecutionStopCushionPoints))*_Point)+
+      ExitBackoffCushionPrice(currentPrice,backoffSteps)+
+      ZeroStopsLevelFallbackPrice(currentPrice,stopsLevel,freezeLevel);
 
    if(direction==1)
       return requestedSL<=currentPrice-minimumDistance+_Point*0.25;
@@ -4417,22 +4648,47 @@ int EnsureHybridTrailState(ulong ticket,
    return index;
 }
 
-double BrokerTrailMinimumDistance()
+// EXIT MODIFY BACKOFF: shared formula for the extra clearance added per
+// consecutive rejected modify on a ticket. Scales with the symbol's own
+// current price (percentage, not a fixed point count), so the same
+// InpExitBackoffCushionStepPct is meaningful on BTCUSD's $65,000 scale and
+// on XAUUSD's $2,000 scale alike - unlike the point-based cushions above,
+// which are negligible in dollar terms on a high-priced symbol like BTC.
+double ExitBackoffCushionPrice(double referencePrice,int backoffSteps)
+{
+   int steps=MathMin(MathMax(0,backoffSteps),MathMax(0,InpExitBackoffMaxSteps));
+   if(steps<=0 || referencePrice<=0.0)
+      return 0.0;
+   return referencePrice*MathMax(0.0,InpExitBackoffCushionStepPct)/100.0*steps;
+}
+
+double ZeroStopsLevelFallbackPrice(double referencePrice,long stopsLevel,long freezeLevel)
+{
+   if(stopsLevel>0 || freezeLevel>0 || referencePrice<=0.0)
+      return 0.0;
+   return referencePrice*MathMax(0.0,InpZeroStopsLevelFallbackPct)/100.0;
+}
+
+double BrokerTrailMinimumDistance(double current,int backoffSteps)
 {
    long stopsLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
    long freezeLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL);
    int cushion=MathMax(MathMax(0,InpExecutionStopCushionPoints),
                        MathMax(0,InpTrailBrokerCushionPoints));
 
-   return MathMax(_Point,
-                  ((double)MathMax(stopsLevel,freezeLevel)+cushion)*_Point);
+   double base=MathMax(_Point,
+                       ((double)MathMax(stopsLevel,freezeLevel)+cushion)*_Point);
+
+   return base+ExitBackoffCushionPrice(current,backoffSteps)+
+          ZeroStopsLevelFallbackPrice(current,stopsLevel,freezeLevel);
 }
 
 double BrokerCompatibleTrailSL(int direction,
                                double current,
-                               double virtualStop)
+                               double virtualStop,
+                               int backoffSteps)
 {
-   double minDistance=BrokerTrailMinimumDistance();
+   double minDistance=BrokerTrailMinimumDistance(current,backoffSteps);
    double allowed=(direction==1)?current-minDistance:current+minDistance;
    double candidate=(direction==1)
                     ? MathMin(virtualStop,allowed)
@@ -4529,7 +4785,8 @@ bool ExitCloseInProgress(ulong ticket)
 
 double LatestBrokerValidExitSL(int direction,
                                double virtualStop,
-                               MqlTick &tick)
+                               MqlTick &tick,
+                               int backoffSteps)
 {
    if(!SymbolInfoTick(_Symbol,tick))
       return 0.0;
@@ -4557,7 +4814,9 @@ double LatestBrokerValidExitSL(int direction,
       MathMax(
          ProtectionTickSize(),
          ((double)MathMax(stopsLevel,freezeLevel)+
-          cushion)*_Point);
+          cushion)*_Point)+
+      ExitBackoffCushionPrice(current,backoffSteps)+
+      ZeroStopsLevelFallbackPrice(current,stopsLevel,freezeLevel);
 
    double allowed=
       direction==1
@@ -4623,12 +4882,21 @@ bool RequestSynchronizedPositionModify(ulong ticket,
       (ulong)MathMax(0,InpExitModifyMinimumIntervalMs))
       return false;
 
+   // EXIT MODIFY BACKOFF: how many times IN A ROW has this ticket's modify
+   // been rejected (broker or pre-send check)? Feeds a widening clearance
+   // into both checks below, and an exponential retry cooldown further
+   // down, so a systematically-invalid modify backs off instead of
+   // hammering the server at a fixed rate forever. See
+   // InpExitBackoffCushionStepPct.
+   int backoffSteps=g_exitExecutionStates[stateIndex].consecutiveInvalidStops;
+
    MqlTick latestTick;
    double brokerSL=
       LatestBrokerValidExitSL(
          direction,
          virtualStop,
-         latestTick);
+         latestTick,
+         backoffSteps);
 
    if(brokerSL<=0.0)
       return false;
@@ -4636,13 +4904,25 @@ bool RequestSynchronizedPositionModify(ulong ticket,
    double current=
       direction==1 ? latestTick.bid : latestTick.ask;
 
-   if(!FixedTrailSLBrokerValid(direction,current,brokerSL))
+   if(!FixedTrailSLBrokerValid(direction,current,brokerSL,backoffSteps))
    {
+      int failCount=++g_exitExecutionStates[stateIndex].consecutiveInvalidStops;
+      int backoffCooldown=
+         (int)MathMin(
+            (double)MathMax(0,InpExitBackoffCooldownCapMs),
+            (double)MathMax(0,InpExitInvalidStopsCooldownMs)*
+            (double)(1<<MathMin(failCount,10)));
+
       g_exitExecutionStates[stateIndex].modifyCooldownUntilMs=
-         now+
-         (ulong)MathMax(
-            0,
-            InpExitInvalidStopsCooldownMs);
+         now+(ulong)backoffCooldown;
+
+      Log("V3.176 SYNCHRONIZED SL PRE-SEND REJECTED (backoff) | "+context+
+          " | purpose="+purpose+
+          " | ticket="+(string)ticket+
+          " | consecutive failures="+IntegerToString(failCount)+
+          " | widened clearance="+
+          DoubleToString(ExitBackoffCushionPrice(current,backoffSteps),_Digits)+
+          " | next retry in="+IntegerToString(backoffCooldown)+"ms");
       return false;
    }
 
@@ -4657,6 +4937,8 @@ bool RequestSynchronizedPositionModify(ulong ticket,
 
    if(accepted)
    {
+      g_exitExecutionStates[stateIndex].consecutiveInvalidStops=0;
+
       g_exitExecutionStates[stateIndex].modifyCooldownUntilMs=
          now+
          (ulong)MathMax(
@@ -4675,9 +4957,14 @@ bool RequestSynchronizedPositionModify(ulong ticket,
       return true;
    }
 
+   int failCount=++g_exitExecutionStates[stateIndex].consecutiveInvalidStops;
+
    int cooldown=
       code==TRADE_RETCODE_INVALID_STOPS
-      ? MathMax(0,InpExitInvalidStopsCooldownMs)
+      ? (int)MathMin(
+           (double)MathMax(0,InpExitBackoffCooldownCapMs),
+           (double)MathMax(0,InpExitInvalidStopsCooldownMs)*
+           (double)(1<<MathMin(failCount,10)))
       : MathMax(0,InpExitModifyMinimumIntervalMs);
 
    g_exitExecutionStates[stateIndex].modifyCooldownUntilMs=
@@ -4700,6 +4987,7 @@ bool RequestSynchronizedPositionModify(ulong ticket,
           (int)SymbolInfoInteger(
              _Symbol,
              SYMBOL_TRADE_FREEZE_LEVEL))+
+       " | consecutive failures="+IntegerToString(failCount)+
        " | cooldown="+IntegerToString(cooldown)+"ms"+
        " | retcode="+IntegerToString((int)code)+
        " | "+trade.ResultRetcodeDescription());
@@ -4790,6 +5078,8 @@ bool RequestSynchronizedPositionClose(ulong ticket,
    uint code=trade.ResultRetcode();
    trade.SetDeviationInPoints(
       (ulong)MathMax(0,InpDeviationPoints));
+
+   g_exitExecutionStates[stateIndex].lastCloseRetcode=code;
 
    bool accepted=
       sent && TradeRetcodeAccepted(code);
@@ -4976,6 +5266,13 @@ bool ClosePositionAtVirtualTrail(ulong ticket,
                                  double stop,
                                  double peak)
 {
+   int stateIndex=EnsureExitExecutionState(ticket);
+
+   ulong nowMs=NowMs();
+   if(stateIndex>=0 &&
+      nowMs<g_exitExecutionStates[stateIndex].closeCooldownUntilMs)
+      return false;
+
    ulong deviation=
       (ulong)MathMax(
          0,
@@ -4989,15 +5286,48 @@ bool ClosePositionAtVirtualTrail(ulong ticket,
          peak,
          deviation);
 
-   if(!accepted)
+   if(accepted)
    {
-      Log("HYBRID VIRTUAL TRAIL CLOSE FAILED | "+context+
-          " | ticket="+(string)ticket+
-          " | observed="+DoubleToString(current,_Digits)+
-          " | virtualSL="+DoubleToString(stop,_Digits));
+      if(stateIndex>=0)
+         g_exitExecutionStates[stateIndex].closeConsecutiveFailures=0;
+      return true;
    }
 
-   return accepted;
+   uint code=(stateIndex>=0)?g_exitExecutionStates[stateIndex].lastCloseRetcode:0;
+
+   if(code==TRADE_RETCODE_POSITION_CLOSED)
+   {
+      if(stateIndex>=0)
+         g_exitExecutionStates[stateIndex].closeConsecutiveFailures=0;
+
+      Log("HYBRID VIRTUAL TRAIL CLOSE ALREADY DONE | "+context+
+          " | ticket="+(string)ticket+
+          " | position was already closed by the time this request reached the broker");
+      return true;
+   }
+
+   int failCount=0;
+   int cooldown=MathMax(0,InpExitModifyMinimumIntervalMs);
+
+   if(stateIndex>=0)
+   {
+      failCount=++g_exitExecutionStates[stateIndex].closeConsecutiveFailures;
+      cooldown=(int)MathMin(
+         (double)MathMax(0,InpExitBackoffCooldownCapMs),
+         (double)MathMax(0,InpExitModifyMinimumIntervalMs)*
+         (double)(1<<MathMin(failCount,10)));
+      g_exitExecutionStates[stateIndex].closeCooldownUntilMs=nowMs+(ulong)cooldown;
+   }
+
+   Log("HYBRID VIRTUAL TRAIL CLOSE FAILED | "+context+
+       " | ticket="+(string)ticket+
+       " | observed="+DoubleToString(current,_Digits)+
+       " | virtualSL="+DoubleToString(stop,_Digits)+
+       " | consecutive failures="+IntegerToString(failCount)+
+       " | next retry in="+IntegerToString(cooldown)+"ms"+
+       " | retcode="+IntegerToString((int)code));
+
+   return false;
 }
 
 void PruneHybridTrailStates()
@@ -5318,7 +5648,17 @@ void ManageHybridTrailingPositions(string context)
       // Push the ratcheted virtual stop out to the broker. The step filter
       // only throttles how often we talk to the server; it never permits a
       // backwards move because virtualStop itself is already monotonic.
-      double desiredSL=BrokerCompatibleTrailSL(direction,current,virtualStop);
+      // EXIT MODIFY BACKOFF: mirror the same widening clearance used inside
+      // RequestSynchronizedPositionModify() here, so this pre-filter agrees
+      // with the authoritative check instead of optimistically offering a
+      // desiredSL that the deeper check (correctly) rejects every time.
+      int exitStateIndex=ExitExecutionStateIndexByTicket(ticket);
+      int trailBackoffSteps=
+         exitStateIndex>=0
+         ? g_exitExecutionStates[exitStateIndex].consecutiveInvalidStops
+         : 0;
+
+      double desiredSL=BrokerCompatibleTrailSL(direction,current,virtualStop,trailBackoffSteps);
 
       bool improves=
          TrailStopImproves(direction,
@@ -5329,7 +5669,7 @@ void ManageHybridTrailingPositions(string context)
                            : _Point*0.25);
 
       if(improves && desiredSL>0.0 &&
-         FixedTrailSLBrokerValid(direction,current,desiredSL))
+         FixedTrailSLBrokerValid(direction,current,desiredSL,trailBackoffSteps))
       {
          double submittedSL=0.0;
          bool accepted=
@@ -8357,11 +8697,21 @@ bool CalculateMapAndMaybeReady(double livePrice)
       zeroConfluenceLowExposure &&
       !sellNormalConfluence;
 
+   // V2.2 BTC S09: was a hardcoded 0 (see InpZeroConfFallbackMinConfluences
+   // for why). g_buyReady.requiredConfluences/g_sellReady.requiredConfluences
+   // carry this value through to zeroConfluenceFallback=(requiredConfluences
+   // ==0) at persistence time, so raising it above 0 here is sufficient on
+   // its own to route these setups through the NORMAL deployment path
+   // instead of the FORCE-PASS bypass - no other call site needs editing.
    int buyEffectiveRequired=
-      buyZeroConfluenceFallback ? 0 : buyRequired;
+      buyZeroConfluenceFallback
+      ? MathMax(0,InpZeroConfFallbackMinConfluences)
+      : buyRequired;
 
    int sellEffectiveRequired=
-      sellZeroConfluenceFallback ? 0 : sellRequired;
+      sellZeroConfluenceFallback
+      ? MathMax(0,InpZeroConfFallbackMinConfluences)
+      : sellRequired;
 
    bool buyCandidate=
       allowBuy &&
@@ -12503,6 +12853,10 @@ string ConfidenceClassText(int conf)
    return "STANDARD";
 }
 
+// S10: conf is intentionally unused now - see the comment below on why lot
+// size no longer scales by confidence tier. Signature kept unchanged so
+// every existing call site (which all pass a real confluence count) needs
+// no edits.
 double ConfidenceSetupLot(int conf)
 {
    double effectiveEquity=EffectiveAccountEquity();
@@ -12511,12 +12865,21 @@ double ConfidenceSetupLot(int conf)
    if(effectiveEquity<MinimumTradingEquity())
       return 0.0;
 
+   // S10 (both files): per-tier LOT scaling removed at the user's explicit
+   // request - this used to select InpGoodSetupLotPer100/InpQualitySetupLot-
+   // Per100 (2x/3x InpStandardSetupLotPer100) here, making a "Good" or
+   // "Quality" setup's TOTAL lot bigger while DesiredLayersForSetup() ALSO
+   // gave it more layers to split that bigger total across - the two systems
+   // were stacking (more layers of a bigger pie), and if a limit layer
+   // failed to place, BuildAggressiveArmPlans's route-shrink logic dumped
+   // the entire un-split total onto whatever routes remained, which is what
+   // produced an observed live BTC trade at 2x the normal single-layer lot.
+   // Every layer now requests this SAME flat, untiered lot - confidence is
+   // expressed ONLY through DesiredLayersForSetup()'s layer COUNT (1 for
+   // Standard, 2 for Good, 3 for Quality), never through a bigger per-layer
+   // size. InpGoodSetupLotPer100/InpQualitySetupLotPer100 are kept as inputs
+   // only for .set-file compatibility; neither is read here anymore.
    double lotPer100=InpStandardSetupLotPer100;
-
-   if(conf>=InpQualityConfidenceMin)
-      lotPer100=InpQualitySetupLotPer100;
-   else if(conf>=InpGoodConfidenceMin)
-      lotPer100=InpGoodSetupLotPer100;
 
    // REAL-CENT BROKER-NATIVE RULE:
    // Calculate the proportional target first. On a live cent account only,
@@ -13192,7 +13555,6 @@ bool BuildConfidenceLayerPlans(int direction,
    if(minVol<=0)
       return false;
 
-   double remainingLot=targetSetupLot;
    double plannedRisk=0.0;
 
    for(int i=0;i<requestedLayers;i++)
@@ -13231,22 +13593,20 @@ bool BuildConfidenceLayerPlans(int direction,
       if(lossPerLot<=0)
          return false;
 
-      int layersLeft=requestedLayers-i;
-
-      // Split the requested TOTAL setup lot as evenly as possible.
-      double desiredShare=
-         NormalizeVolumeDown(remainingLot/(double)layersLeft);
-
-      if(desiredShare<minVol-1e-12)
-         return false;
-
-      // Each layer receives an equal share of the remaining hard risk budget.
+      // S10: every layer requests the SAME flat targetSetupLot - no more
+      // dividing one total across requestedLayers, which is what let a
+      // "Good"/"Quality" setup's already-larger tiered total get sliced
+      // into layers instead of adding real, separate, standard-sized
+      // layers. riskBudget remains a genuine AGGREGATE ceiling across all
+      // layers placed so far (not divided up-front either), so a layer is
+      // still shrunk or refused once the setup's cumulative risk would
+      // exceed it - it just no longer pre-shrinks every layer to fit a
+      // fixed total that no longer exists.
       double riskRemaining=MathMax(0.0,riskBudget-plannedRisk);
-      double riskShare=riskRemaining/(double)layersLeft;
-      double maxByRisk=NormalizeVolumeDown(riskShare/lossPerLot);
+      double maxByRisk=NormalizeVolumeDown(riskRemaining/lossPerLot);
 
       double vol=
-         NormalizeVolumeDown(MathMin(desiredShare,maxByRisk));
+         NormalizeVolumeDown(MathMin(targetSetupLot,maxByRisk));
 
       if(vol<minVol-1e-12)
          return false;
@@ -13258,7 +13618,6 @@ bool BuildConfidenceLayerPlans(int direction,
       plans[i].volume=vol;
 
       plannedRisk+=vol*lossPerLot;
-      remainingLot=MathMax(0.0,remainingLot-vol);
 
       if(plannedRisk>riskBudget+0.01)
          return false;
@@ -13595,50 +13954,27 @@ bool BuildAggressiveArmPlans(PersistentReadySetup &setup,
          setup,tick,minDist,secondDepth,plans);
    }
 
-   // Use only valid routes, but preserve the full original confidence lot.
+   // S10: every route - the MARKET route and each LIMIT route - now
+   // requests the SAME flat targetSetupLot instead of splitting one total
+   // across however many routes ended up valid. This is precisely the fix
+   // for the bug this stage exists to remove: previously, if a LIMIT route
+   // failed to attach (a common outcome - price too close, a duplicate zone,
+   // a broker distance rule), the shrink-loop below reduced "available"
+   // WITHOUT reducing targetSetupLot, so the entire un-split total (already
+   // 2x/3x the standard lot from the old confidence-tiered ConfidenceSetupLot())
+   // fell onto whatever routes remained - observed live as a single MARKET
+   // order at double the normal size. targetSetupLot is already the flat,
+   // untiered per-layer lot (see ConfidenceSetupLot()) and was already
+   // verified above to be >= the broker minimum, so no shrink-loop or
+   // remainder split is needed at all: a route that cannot open still just
+   // does not open, at no cost to the routes that do.
    int available=ArraySize(plans);
-
-   while(available>1)
-   {
-      double share=
-         NormalizeVolumeDown(
-            targetSetupLot/(double)available);
-
-      if(share>=minVol-1e-12)
-         break;
-
-      ArrayResize(plans,available-1);
-      available=ArraySize(plans);
-   }
 
    if(available<=0)
       return false;
 
-   double remaining=targetSetupLot;
-
-   // LIMIT routes receive equal broker-valid shares.
-   // MARKET receives the final rounding remainder, preserving total volume.
-   for(int i=available-1;i>=0;i--)
-   {
-      int routesLeft=i+1;
-
-      double volume=
-         (i==0)
-         ? NormalizeVolumeDown(remaining)
-         : NormalizeVolumeDown(
-              remaining/(double)routesLeft);
-
-      if(volume<minVol-1e-12)
-      {
-         SetDeploymentFailure(
-            "confidence volume split produced a layer below broker minimum",
-            0,"","",false);
-         return false;
-      }
-
-      plans[i].volume=volume;
-      remaining=MathMax(0.0,remaining-volume);
-   }
+   for(int i=0;i<available;i++)
+      plans[i].volume=targetSetupLot;
 
    double assigned=0.0;
 
@@ -13735,46 +14071,24 @@ bool CreateMarketFallbackLayerSet(int direction,
 
    int layers=MathMax(1,MathMin(requestedLayers,InpMaxLayers));
 
-   // Reduce layer count only when broker minimum volume makes the preferred
-   // split impossible. Total setup lot remains the same.
-   while(layers>1)
-   {
-      double share=
-         NormalizeVolumeDown(targetSetupLot/(double)layers);
-
-      if(share>=minVol-1e-12)
-         break;
-
-      layers--;
-   }
-
+   // S10: every fallback layer requests the SAME flat targetSetupLot, same
+   // reasoning as BuildAggressiveArmPlans - targetSetupLot is already the
+   // flat, untiered per-layer lot and already verified >= broker minimum
+   // above, so no split-to-fit-a-total logic is needed here at all.
    ArrayResize(plans,layers);
 
-   double remaining=targetSetupLot;
    double marketPrice=(direction==1)?tick.ask:tick.bid;
 
    for(int i=0;i<layers;i++)
    {
-      int left=layers-i;
-
-      double vol=
-         (left==1)
-         ? NormalizeVolumeDown(remaining)
-         : NormalizeVolumeDown(remaining/(double)left);
-
-      if(vol<minVol-1e-12)
-         return false;
-
       plans[i].rawPrice=marketPrice;
       plans[i].execPrice=marketPrice;
-      plans[i].volume=vol;
+      plans[i].volume=targetSetupLot;
       plans[i].kind=LAYER_MARKET;
       plans[i].lossPerLot=OneLotLoss(direction,marketPrice,sl);
 
       if(plans[i].lossPerLot<=0)
          return false;
-
-      remaining=MathMax(0.0,remaining-vol);
    }
 
    return true;

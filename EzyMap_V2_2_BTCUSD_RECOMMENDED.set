@@ -40,6 +40,15 @@
 ; ---------------------------------------------------------------------------
 ; 1. ATR GEOMETRY - ON. This is the important one.
 ; ---------------------------------------------------------------------------
+; UPDATE (S08): a real test run at the plain compiled defaults (this section
+; still OFF back then) came back with a 12% win rate - a flat $21 stop on a
+; ~$65,000 symbol with $10-40 of M5 noise. That confirmed this section's whole
+; premise. InpUseATRGeometry is now ALSO the compiled default in this file
+; (was false), with InpATRStopCeilingPips raised to 500 there (a generous
+; backstop, not a tuned number) rather than this file's more specific 350 -
+; if you load this .set its 350 wins since .set values override compiled
+; defaults; if you run with no .set at all, 500 applies. Either way the
+; ceiling should rarely bind - see the sanity check below.
 ; V3.190 S03 is the correct lever for BTC precisely because it is SELF-
 ; RELATIVE: the stop is a multiple of the instrument's own current ATR, so it
 ; tracks a volatility regime shift automatically. The three MULTIPLIERS are
