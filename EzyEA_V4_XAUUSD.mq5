@@ -15,11 +15,16 @@
 //|     CLOSE below/above the last closed M5 bar's close within              |
 //|     InpDirectionHistory (48) bars; S2/R2 = the next support/               |
 //|     resistance close at least InpH1MinSeparationPips (70) further out.      |
-//|   - H4/D1/W1 "outer levels": one nearest support + one nearest              |
-//|     resistance close each, same close-anchored rule, wider minimum           |
-//|     separation per timeframe (70/120/200 pips) - NOT the swing-pivot          |
-//|     high/low system V1/V3 use; this file's levels are always the              |
-//|     nearest historical bar CLOSE, no pivot/rejection qualification.            |
+//|   - H4/D1/W1 "outer levels": full S1/S2/R1/R2 each too (confirmed         |
+//|     via direct code reading that these use the identical selection        |
+//|     rule H1 does, not a single support/resistance pair - an earlier        |
+//|     build here under-provisioned these to one S + one R each, cutting      |
+//|     total tradeable levels from 16 to 10 and directly reducing entry       |
+//|     frequency versus the reference; fixed), same close-anchored rule,       |
+//|     wider minimum separation per timeframe (70/120/200 pips) - NOT the      |
+//|     swing-pivot high/low system V1/V3 use; this file's levels are            |
+//|     always the nearest historical bar CLOSE, no pivot/rejection              |
+//|     qualification.                                                            |
 //|   - No M5/M15/EMA13 entry source at all - the reference's M5 role is           |
 //|     purely to supply the H1 map's reference price, not to generate              |
 //|     its own tradeable level or EMA touch.                                       |
@@ -94,9 +99,27 @@
 //|         (preset 24p / trail 13p) with live-parity trail-arming                                                      |
 //|         guards, full premium chart drawing. Forked from                                                             |
 //|         EzyEA_V1_XAUUSD.mq5 1.000.                                                                                   |
+//| 4.001 - Explicit follow-up after live/tester feedback that 4.000       |
+//|         wasn't as aggressive as the reference. Three fixes, all         |
+//|         confirmed via re-reading the reference's actual code:           |
+//|         (1) H4/D1/W1 now get the full S1/S2/R1/R2 tiers, not just        |
+//|         one support + one resistance - was under-provisioned at 10       |
+//|         total levels vs the reference's 16, a 37.5% cut to tradeable      |
+//|         zones. (2) Touch tolerance floor switched from a flat 1.5-pip      |
+//|         raw-point value to InpLevelTouchToleranceMinPips=9, matching        |
+//|         the reference's actual effective tolerance - most anchor bars       |
+//|         simply don't carry a 9-pip wick, so the derived tolerance was        |
+//|         usually far tighter than the reference without this floor.           |
+//|         (3) TryOpenPosition/TryLevelEntry now return whether the entry         |
+//|         actually filled; a level is only "consumed" on genuine success,        |
+//|         so a rejection for any reason (spread, sizing, distance, broker)        |
+//|         no longer silently locks that level out for the rest of its zone         |
+//|         visit - it retries every InpEntryRetryThrottleSeconds (1) while           |
+//|         still touching and unconsumed, echoing the reference's own ~100ms          |
+//|         retry cadence at this codebase's TimeCurrent()-second granularity.          |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "4.000"
+#property version   "4.001"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -117,11 +140,11 @@ enum ENUM_EZY_ACCOUNT_SCALE
 input group "=== Level System: H1 current map + H4/D1/W1 outer levels ==="
 // Replicates the EzyMap Scalp Mastery V3.184 reference's entry-trigger
 // logic: levels are always the nearest historical bar CLOSE (never a
-// swing-pivot high/low), rebuilt on every new bar of their own
-// timeframe. H1 gets S1/S2/R1/R2 (nearest + next-nearest close each
-// side); H4/D1/W1 each get one nearest support + one nearest
-// resistance close. Reference price for H1 is the last CLOSED M5
-// bar's close.
+// swing-pivot high/low). All four groups (H1/H4/D1/W1) get the full
+// S1/S2/R1/R2 tiers (nearest + next-nearest close each side), rebuilt
+// together on every new M5 bar close since that is what moves the
+// shared reference price (the last closed M5 bar's close) they are
+// all anchored to.
 input bool   InpEnableLevelTouchEntries     = true;
 input int    InpDirectionHistory            = 48;    // H1 lookback bars for S1/S2/R1/R2
 input double InpH1MinSeparationPips         = 70.0;
@@ -133,9 +156,25 @@ input int    InpW1LookbackBars              = 48;
 input double InpW1MinSeparationPips         = 200.0;
 // Per-level touch tolerance is derived from that level's own anchor
 // bar's close-to-high (resistance) or close-to-low (support) distance
-// - this input is only a FLOOR for when that distance is too small to
-// be a usable zone (e.g. a near-zero-wick bar).
-input double InpLevelTouchToleranceMinPoints = 15.0;
+// - this input is a FLOOR under that, in pips (matches the reference's
+// actual effective touch tolerance of ~9 pips - max(InpEntryTouchTolerancePips=5,
+// InpZeroConfTouchTolerancePips=9) there). Confirmed via live testing
+// that the original 1.5-pip floor (15 raw points) was far tighter than
+// the reference and a major cause of reduced trade frequency - most
+// H1/H4/D1/W1 anchor bars simply don't have a 9-pip wick on the
+// relevant side, so without this floor the derived tolerance was
+// usually much smaller than the reference's flat envelope.
+input double InpLevelTouchToleranceMinPips  = 9.0;
+// A level only ever "consumed" (state-based re-entry, matching the
+// reference) after an ACTUAL successful fill - a rejected attempt
+// (spread guard, temporary broker rejection, etc.) leaves it
+// unconsumed so it retries. This throttle (matches the spirit of the
+// reference's InpDeploymentRetryIntervalMs=100ms retry cadence, at
+// TimeCurrent()-second granularity per this codebase's established
+// convention of never using GetTickCount64()) just stops a still-
+// touching, still-failing level from re-attempting and re-logging
+// every single tick.
+input int    InpEntryRetryThrottleSeconds   = 1;
 
 input group "=== Stops / Trail (fixed pips) ==="
 // Exact preset from the reference file: SL24 / TRAIL13.
@@ -249,7 +288,8 @@ struct LevelTouchState
    double   tolerance;        // per-level touch tolerance, derived from close-to-high/low
    int      fadeDirection;    // 1 = demand (support), fade BUY; -1 = supply (resistance), fade SELL
    bool     inZone;
-   bool     consumed;         // state-based re-entry: fires once, resets only after price leaves the zone
+   bool     consumed;         // state-based re-entry: only set true on an ACTUAL successful fill
+   datetime nextRetryTime;    // short throttle between repeated attempts while still touching and unconsumed
    string   tfLabel;
 };
 
@@ -280,8 +320,14 @@ int g_gateDistanceRejects    = 0;
 int g_gateSizingRejects      = 0;
 int g_gateDrawdownRejects    = 0;
 
-// H1: S1/S2/R1/R2 (indices 0-3). H4: S/R (4-5). D1: S/R (6-7). W1: S/R (8-9).
-LevelTouchState g_levels[10];
+// Confirmed via direct code reading of the reference file that H4/D1/W1
+// each produce a full S1/S2/R1/R2 via the same PickDirectionLevels-style
+// selection H1 uses, not just one support/resistance pair - originally
+// under-built at 10 levels (2 each for H4/D1/W1), reducing tradeable
+// levels by 37.5% versus the reference and directly cutting entry
+// frequency. H1: S1/S2/R1/R2 (0-3). H4: S1/S2/R1/R2 (4-7). D1: S1/S2/R1/R2
+// (8-11). W1: S1/S2/R1/R2 (12-15).
+LevelTouchState g_levels[16];
 
 // All four level groups share one M5-close-driven rebuild gate: the
 // reference price they're all anchored to (last closed M5 close)
@@ -342,7 +388,7 @@ int    CopyBufferSeries(int handle,int bufferIndex,int count,double &out[]);
 void   CloseAllPositions(string reason);
 void   UpdateDrawdownBreaker();
 
-void   TryOpenPosition(int direction,string tag,double slDistance);
+bool   TryOpenPosition(int direction,string tag,double slDistance);
 
 double ReconstructPeakFromM1(int direction,double entry,double current,datetime positionTime);
 bool   CloseAtVirtualStop(ulong ticket,string context,double current,double stop,double peak);
@@ -358,10 +404,9 @@ bool   FindNearestCloses(ENUM_TIMEFRAMES tf,int lookback,double reference,double
                          double &r1,datetime &r1Time,double &r2,datetime &r2Time);
 double LevelToleranceFromAnchor(ENUM_TIMEFRAMES tf,datetime anchorTime,int fadeDirection);
 void   SetLevelSlot(int idx,double price,int fadeDirection,double tolerance,string tfLabel);
-void   RebuildH1CurrentMap();
-void   RebuildOuterLevel(int slotBase,ENUM_TIMEFRAMES tf,int lookback,double minSeparation,string tfLabel);
+void   RebuildLevelGroup(int slotBase,ENUM_TIMEFRAMES tf,int lookback,double minSeparationPips,string tfLabel);
 void   UpdateLevelsOnNewBars();
-void   TryLevelEntry(int direction,double levelPrice);
+bool   TryLevelEntry(int direction,double levelPrice);
 void   ProcessTouchTriggers();
 
 void   ApplyPremiumChartTheme();
@@ -412,6 +457,7 @@ int OnInit()
       g_levels[i].fadeDirection=0;
       g_levels[i].inZone=false;
       g_levels[i].consumed=false;
+      g_levels[i].nextRetryTime=0;
       g_levels[i].tfLabel="";
    }
    g_lastLevelRebuildM5Time = 0;
@@ -438,7 +484,7 @@ int OnInit()
        " | drawdown breaker="+(InpEnableDrawdownBreaker?DoubleToString(InpMaxEquityDrawdownPct,1)+"%":"OFF")+
        " | preset="+DoubleToString(InpPresetStopLossPips,0)+"p trail="+DoubleToString(InpTrailingDistancePips,0)+"p"+
        " | live parity="+(InpLiveXAUProtectionParity?"ON":"OFF")+
-       " | levels=H1(4)+H4/D1/W1(2 each)=10");
+       " | levels=H1/H4/D1/W1(4 each)="+IntegerToString(ArraySize(g_levels)));
 
    return INIT_SUCCEEDED;
 }
@@ -912,30 +958,37 @@ void UpdateDrawdownBreaker()
 // a basic safety backstop, not an entry governor - it doesn't limit
 // which signals fire, only caps worst-case tail risk.
 //======================================================================
-void TryOpenPosition(int direction,string tag,double slDistance)
+// Returns true only on an ACTUAL successful fill - callers use this to
+// decide whether a touched level is genuinely "consumed" (state-based
+// re-entry) or should keep retrying on the next tick while still
+// touching. A rejection for any reason (spread, sizing, distance,
+// broker) must NOT permanently consume the touch the way an unconditional
+// consumed=true would - that was found to silently drop a level for the
+// rest of its zone visit after a single transient rejection.
+bool TryOpenPosition(int direction,string tag,double slDistance)
 {
    g_gateAttempts++;
 
    if(g_tradingHalted)
    {
       g_gateDrawdownRejects++;
-      return;
+      return false;
    }
 
    if(CountOpenPositions()>=InpMaxConcurrentPositions)
    {
       g_gateConcurrencyRejects++;
-      return;
+      return false;
    }
 
    if(!SpreadAllowed())
    {
       g_gateSpreadRejects++;
-      return;
+      return false;
    }
 
    MqlTick tick;
-   if(!SymbolInfoTick(_Symbol,tick)) return;
+   if(!SymbolInfoTick(_Symbol,tick)) return false;
 
    double entry=(direction==1)?tick.ask:tick.bid;
    double sl=RoundPrice((direction==1)?entry-slDistance:entry+slDistance);
@@ -947,7 +1000,7 @@ void TryOpenPosition(int direction,string tag,double slDistance)
       Log("ENTRY REJECTED "+tag+" reason=SL_DISTANCE_TOO_TIGHT"+
           " slDistance="+PriceText(slDistance)+
           " minDist="+PriceText(minDist));
-      return;
+      return false;
    }
 
    double lots=ComputeLotsForRisk(direction,entry,sl);
@@ -958,7 +1011,7 @@ void TryOpenPosition(int direction,string tag,double slDistance)
           " riskEquity="+DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2)+
           " entry="+PriceText(entry)+" sl="+PriceText(sl)+
           " perLotLoss="+DoubleToString(OneLotLoss(direction,entry,sl),2));
-      return;
+      return false;
    }
 
    bool sent=(direction==1)
@@ -974,24 +1027,25 @@ void TryOpenPosition(int direction,string tag,double slDistance)
           " lots="+DoubleToString(lots,2)+
           " entry="+PriceText(entry)+
           " sl="+PriceText(sl));
+      return true;
    }
-   else
-   {
-      g_gateRejected++;
-      Log("ENTRY REJECTED "+tag+" retcode="+IntegerToString(retcode)+
-          " desc="+trade.ResultRetcodeDescription());
-   }
+
+   g_gateRejected++;
+   Log("ENTRY REJECTED "+tag+" retcode="+IntegerToString(retcode)+
+       " desc="+trade.ResultRetcodeDescription());
+   return false;
 }
 
 //======================================================================
 // Level system: replicates the EzyMap Scalp Mastery V3.184 reference's
 // entry-trigger logic. Levels are always the nearest historical bar
 // CLOSE (never a swing-pivot high/low) relative to a shared reference
-// price (the last closed M5 bar's close) - H1 gets a full S1/S2/R1/R2
-// "current map", H4/D1/W1 each get one nearest support + one nearest
-// resistance ("outer levels"). All four groups rebuild together on
-// every new M5 bar close, since that is what moves the reference price
-// they are all anchored to.
+// price (the last closed M5 bar's close) - all four groups (H1, H4,
+// D1, W1) get the full S1/S2/R1/R2 tiers, confirmed via direct code
+// reading that H4/D1/W1 use the identical selection rule H1 does, not
+// a single support/resistance pair. All four groups rebuild together
+// on every new M5 bar close, since that is what moves the reference
+// price they are all anchored to.
 //======================================================================
 bool FindNearestCloses(ENUM_TIMEFRAMES tf,int lookback,double reference,double minSeparation,
                        bool wantSecondTier,
@@ -1052,11 +1106,13 @@ bool FindNearestCloses(ENUM_TIMEFRAMES tf,int lookback,double reference,double m
 // (resistance/SELL) or close-to-low (support/BUY) distance, not the
 // full candle high-low range - a wick can be a brief spike; the close
 // is where price actually settled. Floored at
-// InpLevelTouchToleranceMinPoints so a near-zero-wick bar still gets a
-// usable zone.
+// InpLevelTouchToleranceMinPips (pip-based, matches the reference's
+// actual ~9-pip touch tolerance) so a near-zero-wick bar still gets a
+// usable zone, and so a genuinely small-wicked anchor doesn't produce
+// a far tighter zone than the reference ever used.
 double LevelToleranceFromAnchor(ENUM_TIMEFRAMES tf,datetime anchorTime,int fadeDirection)
 {
-   double floorTol=MathMax(0.0,InpLevelTouchToleranceMinPoints)*_Point;
+   double floorTol=MathMax(0.0,InpLevelTouchToleranceMinPips)*StrategyPipSize();
    if(anchorTime<=0) return floorTol;
 
    int shift=iBarShift(_Symbol,tf,anchorTime,true);
@@ -1082,6 +1138,7 @@ void SetLevelSlot(int idx,double price,int fadeDirection,double tolerance,string
       g_levels[idx].fadeDirection=0;
       g_levels[idx].inZone=false;
       g_levels[idx].consumed=false;
+      g_levels[idx].nextRetryTime=0;
       g_levels[idx].tfLabel="";
       return;
    }
@@ -1095,26 +1152,14 @@ void SetLevelSlot(int idx,double price,int fadeDirection,double tolerance,string
    // fired re-fire immediately just because the slot was repopulated.
 }
 
-void RebuildH1CurrentMap()
-{
-   double reference=iClose(_Symbol,PERIOD_M5,1);
-   if(reference<=0.0) return;
-
-   double minSep=MathMax(0.0,InpH1MinSeparationPips)*StrategyPipSize();
-
-   double s1,s2,r1,r2;
-   datetime s1Time,s2Time,r1Time,r2Time;
-   if(!FindNearestCloses(PERIOD_H1,MathMax(1,InpDirectionHistory),reference,minSep,true,
-                          s1,s1Time,s2,s2Time,r1,r1Time,r2,r2Time))
-      return;
-
-   SetLevelSlot(0,s1,1, LevelToleranceFromAnchor(PERIOD_H1,s1Time,1), "H1-S1");
-   SetLevelSlot(1,s2,1, LevelToleranceFromAnchor(PERIOD_H1,s2Time,1), "H1-S2");
-   SetLevelSlot(2,r1,-1,LevelToleranceFromAnchor(PERIOD_H1,r1Time,-1),"H1-R1");
-   SetLevelSlot(3,r2,-1,LevelToleranceFromAnchor(PERIOD_H1,r2Time,-1),"H1-R2");
-}
-
-void RebuildOuterLevel(int slotBase,ENUM_TIMEFRAMES tf,int lookback,double minSeparationPips,string tfLabel)
+// Every group (H1 "current map" and the H4/D1/W1 "outer levels") uses
+// the identical selection rule confirmed via direct code reading of
+// the reference: nearest + next-nearest close each side of the shared
+// M5-close reference, at least minSeparationPips apart within lookback
+// bars. Originally H1 alone got the full S1/S2/R1/R2 treatment while
+// H4/D1/W1 only got a single S/R pair each - fixed so all four groups
+// get all four tiers, matching the reference's actual level count.
+void RebuildLevelGroup(int slotBase,ENUM_TIMEFRAMES tf,int lookback,double minSeparationPips,string tfLabel)
 {
    double reference=iClose(_Symbol,PERIOD_M5,1);
    if(reference<=0.0) return;
@@ -1123,12 +1168,14 @@ void RebuildOuterLevel(int slotBase,ENUM_TIMEFRAMES tf,int lookback,double minSe
 
    double s1,s2,r1,r2;
    datetime s1Time,s2Time,r1Time,r2Time;
-   if(!FindNearestCloses(tf,MathMax(1,lookback),reference,minSep,false,
+   if(!FindNearestCloses(tf,MathMax(1,lookback),reference,minSep,true,
                           s1,s1Time,s2,s2Time,r1,r1Time,r2,r2Time))
       return;
 
-   SetLevelSlot(slotBase,  s1,1, LevelToleranceFromAnchor(tf,s1Time,1), tfLabel+"-S");
-   SetLevelSlot(slotBase+1,r1,-1,LevelToleranceFromAnchor(tf,r1Time,-1),tfLabel+"-R");
+   SetLevelSlot(slotBase,  s1,1, LevelToleranceFromAnchor(tf,s1Time,1), tfLabel+"-S1");
+   SetLevelSlot(slotBase+1,s2,1, LevelToleranceFromAnchor(tf,s2Time,1), tfLabel+"-S2");
+   SetLevelSlot(slotBase+2,r1,-1,LevelToleranceFromAnchor(tf,r1Time,-1),tfLabel+"-R1");
+   SetLevelSlot(slotBase+3,r2,-1,LevelToleranceFromAnchor(tf,r2Time,-1),tfLabel+"-R2");
 }
 
 void UpdateLevelsOnNewBars()
@@ -1139,18 +1186,18 @@ void UpdateLevelsOnNewBars()
    if(m5==0 || m5==g_lastLevelRebuildM5Time) return;
    g_lastLevelRebuildM5Time=m5;
 
-   RebuildH1CurrentMap();
-   RebuildOuterLevel(4,PERIOD_H4,InpH4LookbackBars,InpH4MinSeparationPips,"H4");
-   RebuildOuterLevel(6,PERIOD_D1,InpD1LookbackBars,InpD1MinSeparationPips,"D1");
-   RebuildOuterLevel(8,PERIOD_W1,InpW1LookbackBars,InpW1MinSeparationPips,"W1");
+   RebuildLevelGroup(0, PERIOD_H1,MathMax(1,InpDirectionHistory),InpH1MinSeparationPips,"H1");
+   RebuildLevelGroup(4, PERIOD_H4,InpH4LookbackBars,InpH4MinSeparationPips,"H4");
+   RebuildLevelGroup(8, PERIOD_D1,InpD1LookbackBars,InpD1MinSeparationPips,"D1");
+   RebuildLevelGroup(12,PERIOD_W1,InpW1LookbackBars,InpW1MinSeparationPips,"W1");
 }
 
-void TryLevelEntry(int direction,double levelPrice)
+bool TryLevelEntry(int direction,double levelPrice)
 {
    double slDistance=PresetSlDistance();
-   if(slDistance<=0.0) return;
+   if(slDistance<=0.0) return false;
 
-   TryOpenPosition(direction,"V4SND",slDistance);
+   return TryOpenPosition(direction,"V4SND",slDistance);
 }
 
 //======================================================================
@@ -1195,7 +1242,7 @@ void ProcessTouchTriggers()
 
       double tolerance=(g_levels[i].tolerance>0.0)
                        ?g_levels[i].tolerance
-                       :MathMax(0.0,InpLevelTouchToleranceMinPoints)*_Point;
+                       :MathMax(0.0,InpLevelTouchToleranceMinPips)*StrategyPipSize();
 
       bool touching=(observedHi>=g_levels[i].price-tolerance &&
                      observedLo<=g_levels[i].price+tolerance);
@@ -1204,15 +1251,20 @@ void ProcessTouchTriggers()
       {
          g_levels[i].inZone=false;
          g_levels[i].consumed=false;
+         g_levels[i].nextRetryTime=0;
          continue;
       }
 
       g_levels[i].inZone=true;
 
       if(g_levels[i].consumed) continue;
+      if(TimeCurrent()<g_levels[i].nextRetryTime) continue;
 
-      TryLevelEntry(g_levels[i].fadeDirection,g_levels[i].price);
-      g_levels[i].consumed=true;
+      bool filled=TryLevelEntry(g_levels[i].fadeDirection,g_levels[i].price);
+      if(filled)
+         g_levels[i].consumed=true;
+      else
+         g_levels[i].nextRetryTime=TimeCurrent()+MathMax(0,InpEntryRetryThrottleSeconds);
    }
 
    g_previousCMP=cmp;
