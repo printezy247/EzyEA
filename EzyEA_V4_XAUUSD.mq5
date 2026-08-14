@@ -1,145 +1,108 @@
 //+------------------------------------------------------------------+
 //|                                             EzyEA_V4_XAUUSD.mq5  |
 //|                                                                    |
-//| EzyEA V4 - entry logic replicated from the "EzyMap Scalp Mastery   |
-//| V3.184" reference file ("EVERY_ZERO_CONF_LEVEL_NO_ENTRY_GOVERNORS  |
-//| SL24_TRAIL13"), per explicit request. Overwrites the earlier       |
-//| EzyEA_V4_XAUUSD.mq5 (a copytrade master-account edition, a          |
-//| different objective entirely) per explicit confirmation - that     |
-//| file is retired.                                                    |
-//|                                                                      |
-//| LEVEL SYSTEM - replaces the swing-pivot SND+EMA13 engine used by     |
-//| V1/V2/V3 with the reference's nearest-bar-CLOSE level system          |
-//| (confirmed via direct code reading, not the filename alone):          |
-//|   - H1 "current map": every new H1 bar, S1/R1 = the nearest H1 bar     |
-//|     CLOSE below/above the last closed M5 bar's close within              |
-//|     InpDirectionHistory (48) bars; S2/R2 = the next support/               |
-//|     resistance close at least InpH1MinSeparationPips (70) further out.      |
-//|   - H4/D1/W1 "outer levels": full S1/S2/R1/R2 each too (confirmed         |
-//|     via direct code reading that these use the identical selection        |
-//|     rule H1 does, not a single support/resistance pair - an earlier        |
-//|     build here under-provisioned these to one S + one R each, cutting      |
-//|     total tradeable levels from 16 to 10 and directly reducing entry       |
-//|     frequency versus the reference; fixed), same close-anchored rule,       |
-//|     wider minimum separation per timeframe (70/120/200 pips) - NOT the      |
-//|     swing-pivot high/low system V1/V3 use; this file's levels are            |
-//|     always the nearest historical bar CLOSE, no pivot/rejection              |
-//|     qualification.                                                            |
-//|   - No M5/M15/EMA13 entry source at all - the reference's M5 role is           |
-//|     purely to supply the H1 map's reference price, not to generate              |
-//|     its own tradeable level or EMA touch.                                       |
-//|                                                                                   |
-//| ZONE PRECISION (explicit request): each level's touch tolerance is                |
-//| derived from its own anchor bar's close-to-high (resistance) or                    |
-//| close-to-low (support) distance, not the full candle high-low range,               |
-//| floored at a minimum so a near-zero-wick bar still gets a usable zone.              |
-//|                                                                                       |
-//| RE-ENTRY: state-based, matching the reference exactly - not a time-                  |
-//| based cooldown like V1/V2/V3. A level fires once, then will not fire                  |
-//| again while price stays inside its touch zone; it only re-arms after                  |
-//| price fully leaves the zone and returns.                                                |
-//|                                                                                           |
-//| NO ENTRY GOVERNORS (matching the reference's naming exactly, confirmed                   |
-//| via code reading that its own directional-losing-cap/M5-closed-loss-                      |
-//| cap/daily-risk-lock/layer-cap machinery is disabled both by input                          |
-//| default AND by not being wired into its live entry path at all): no                        |
-//| trend filter, no per-direction concurrency cap. The portfolio drawdown                      |
-//| breaker stays as a basic safety backstop though (it does not limit                           |
-//| entry frequency, only caps worst-case tail risk), same as the existing                        |
-//| spread guard and portfolio margin check - EzyEA's own established                              |
-//| distinction between "strategic filter" (dropped) and "basic execution                          |
-//| correctness" (kept).                                                                             |
-//|                                                                                                     |
-//| EXIT - hybrid virtual trail (same mechanism as V1.1/V2.1/V3: a virtual                              |
-//| stop tracked in EA memory, checked every tick, enforced by a direct                                  |
-//| close independent of the broker accepting a tight SL modify; broker-                                 |
-//| side SL still pushed as a best-effort backup, clamped to the closest                                  |
-//| legal distance), with the reference's exact preset: InpPresetStopLossPips                             |
-//| = 24, InpTrailingDistancePips = 13.                                                                     |
-//|                                                                                                          |
-//| LIVE PARITY (explicit request, ported from the reference's live-only                                    |
-//| trail-arming guards): on a genuine live XAUUSD.sc chart (never in the                                    |
-//| Strategy Tester), three extra conditions gate trail activation beyond                                    |
-//| InpTrailActivationPips (0 = immediate in tester):                                                        |
-//|   - InpLiveXAURequireFullTrailBeforeArm: activation distance is raised                                   |
-//|     to at least the full trail distance (13 pips), not just the pip                                     |
-//|     threshold alone.                                                                                     |
-//|   - InpLiveXAUIncludeSpreadInTrailArm: the current live spread is added                                  |
-//|     on top of the activation distance.                                                                   |
-//|   - InpLiveXAUTrailWarmupSeconds (15): the trail cannot arm until this                                   |
-//|     many seconds have passed since the EA first saw the position - a                                     |
-//|     restart mid-trade cannot immediately treat a position as "already                                    |
-//|     favourable enough to arm."                                                                           |
-//| InpLiveXAUDisableHistoricalPeakRebuild also disables M1 peak                                              |
-//| reconstruction specifically on a live XAUUSD.sc chart (peak starts at                                     |
-//| the current tick only), matching the same live-vs-tester parity intent.                                   |
-//| All of this is inert in the tester (InpReconstructPeakFromM1 still                                         |
-//| reconstructs normally there) and on any non-live/non-.sc chart.                                             |
-//|                                                                                                              |
-//| Everything else unchanged from EzyEA V1 of this generation: risk-based                                       |
-//| lot sizing via OrderCalcProfit() (InpRiskPercentPerTrade - kept, NOT the                                      |
-//| reference's flat lot-per-$100-balance table, per explicit prior decision                                      |
-//| this session to keep honest risk-%-of-equity sizing), portfolio-aware                                          |
-//| margin check, TimeCurrent()-based modify backoff, the zero-stops-level                                         |
-//| broker fallback, auto-calibrating spread guard, cent-account-aware                                             |
-//| equity handling (InpScaleRiskByCentDivisor stays FALSE, same reasoning                                          |
-//| already confirmed multiple times this session), and full premium chart                                         |
-//| drawing (theme, portfolio trade card, gold live-levels, historical                                              |
-//| win/loss markers) matching V3's standard.                                                                        |
-//|                                                                                                                    |
-//| Distinct magic number (190040) and order-comment/object-prefix tags                                              |
-//| (V4SND, V4_ chart objects) so this can run alongside V1/V1.1/V2/V2.1/                                            |
-//| V3/V3.1/V3.2/V3b/V3(BTCUSD) without cross-talk.                                                                   |
-//|                                                                                                                      |
-//| CHANGELOG                                                                                                           |
-//| 4.000 - Initial build: entry logic replicated from EzyMap Scalp                                                     |
-//|         Mastery V3.184 (H1 nearest-close current map + H4/D1/W1                                                     |
-//|         outer levels, close-derived zone tolerance, state-based                                                     |
-//|         re-entry, no entry governors), hybrid virtual-trail exit                                                    |
-//|         (preset 24p / trail 13p) with live-parity trail-arming                                                      |
-//|         guards, full premium chart drawing. Forked from                                                             |
-//|         EzyEA_V1_XAUUSD.mq5 1.000.                                                                                   |
-//| 4.001 - Explicit follow-up after live/tester feedback that 4.000       |
-//|         wasn't as aggressive as the reference. Three fixes, all         |
-//|         confirmed via re-reading the reference's actual code:           |
-//|         (1) H4/D1/W1 now get the full S1/S2/R1/R2 tiers, not just        |
-//|         one support + one resistance - was under-provisioned at 10       |
-//|         total levels vs the reference's 16, a 37.5% cut to tradeable      |
-//|         zones. (2) Touch tolerance floor switched from a flat 1.5-pip      |
-//|         raw-point value to InpLevelTouchToleranceMinPips=9, matching        |
-//|         the reference's actual effective tolerance - most anchor bars       |
-//|         simply don't carry a 9-pip wick, so the derived tolerance was        |
-//|         usually far tighter than the reference without this floor.           |
-//|         (3) TryOpenPosition/TryLevelEntry now return whether the entry         |
-//|         actually filled; a level is only "consumed" on genuine success,        |
-//|         so a rejection for any reason (spread, sizing, distance, broker)        |
-//|         no longer silently locks that level out for the rest of its zone         |
-//|         visit - it retries every InpEntryRetryThrottleSeconds (1) while           |
-//|         still touching and unconsumed, echoing the reference's own ~100ms          |
-//|         retry cadence at this codebase's TimeCurrent()-second granularity.          |
-//| 4.002 - Explicit follow-up: entries still ~10x fewer than the reference             |
-//|         after 4.001. Root cause found via direct code reading of                    |
-//|         CollectEveryZeroConfCandidates: the reference's High-Risk/Low-                |
-//|         Risk candidates (priorities 5-6) widen the H1 current-map S1/S2                |
-//|         touch surface using an M15-average-range/ATR-derived width (up                 |
-//|         to InpMaximumZoneRangeATR=1.80x), not a flat pip tolerance - price               |
-//|         sitting anywhere inside a wide zone counts as touching, not only                 |
-//|         a brief pass through a narrow band. Approximated (not the                         |
-//|         reference's full asymmetric-skew/neighbour-capping/candle-snapping                 |
-//|         formula) by blending an M15 ATR(14)-based width (InpZoneAtrMultiplier,               |
-//|         1.8) into EVERY level's tolerance uniformly via ZoneAtrWidth() -                      |
-//|         still zero-confluence, no new gating condition, just a wider touch                     |
-//|         surface on the same marked levels, per explicit instruction.                            |
+//| EzyEA V4 - FROM-SCRATCH, NEAR-VERBATIM PORT of the reference EA    |
+//| "EzyMap Scalp Mastery V3.104 (FORCE_ZERO_CONFLUENCE_MARKET_FIXED)" |
+//| per explicit request: "use this mq5's drawing and trigger logic    |
+//| as the new one, dont change or refine anything except for live     |
+//| parity, and better arrangements for better performance... dont     |
+//| change any of the original's logic". This build SUPERSEDES the     |
+//| earlier V4.000-4.002 attempts, which were reinterpretations from a |
+//| PROSE SUMMARY of a DIFFERENT sibling reference file (V3.184,        |
+//| "EVERY_ZERO_CONF_LEVEL_NO_ENTRY_GOVERNORS_SL24_TRAIL13") and, as    |
+//| a result, underperformed - firing roughly 10x fewer trades than    |
+//| the real reference because the summary lost fidelity (approximated |
+//| a zone-widening formula instead of copying it, missed that some     |
+//| timeframes needed 4 levels not 2, etc). This rebuild instead reads  |
+//| and copies the actual V3.104 source function-by-function for every |
+//| decision that determines whether/when/which-direction/how-big a    |
+//| trade fires, or how it is drawn - see the fidelity-critical         |
+//| findings below, each confirmed by direct code reading of the        |
+//| reference, not derived from memory or from a summary.                |
+//|                                                                        |
+//| FIDELITY-CRITICAL FINDINGS (also documented inline at their exact      |
+//| call sites below):                                                      |
+//| 1. Direction/SNR timeframe is H1, not H4 - ConfigureRouting() hardcodes  |
+//|    g_directionTF=PERIOD_H1 regardless of the reference's own stale        |
+//|    header comment ("H4 SNR -> M15 -> M3 -> M5"). This file's routing       |
+//|    is ported verbatim: H1 direction -> M15 support -> M5 confirm/entry.     |
+//| 2. "M3 reversal" confirmation is CONFIRMED DEAD CODE in the reference -      |
+//|    M3ReversalConfirmation()/SelectM5ReadyZone()/StrictM15ZoneAtH4Line()/      |
+//|    LatestH4OverlapZone()/RefinedConfidence() are never called anywhere in      |
+//|    the source and are therefore NOT ported here (porting them would itself     |
+//|    be an unfaithful reinterpretation). The live confirmation is computed        |
+//|    directly on the confirmed M5 candle (rejection wick / CHOCH break /           |
+//|    directional-close fallback), inline inside CalculateMapAndMaybeReady().        |
+//| 3. Zero-confluence force-bypass mechanics (the file's namesake behavior):          |
+//|    whenever this EA has <=1 open position on the symbol, the normal 2/3           |
+//|    confluence requirement drops to 0 for whichever side lacks it                   |
+//|    (V3104_ZERO_CONFLUENCE_TOUCH_RULE et al, all compile-time true), and             |
+//|    once a setup is flagged zero-conf, PersistentQualityPass() and                    |
+//|    DeployAggressiveArmSetup() skip the day-lock/campaign-cap/live-cent-cap             |
+//|    checks entirely and retry an unconditional MARKET order until filled.               |
+//|    This is the dominant behavior for most of a session's setups and is                  |
+//|    exactly what "FORCE_ZERO_CONFLUENCE_MARKET" in the reference's filename                |
+//|    signals - ported verbatim, all V3104_* switches kept exactly as-is.                     |
+//| 4. Lot sizing is a CONFIDENCE-TIER $/lot-per-$100-of-broker-native-balance                  |
+//|    rule (ConfidenceSetupLot/LotSizingCapitalUnits/CapSetupVolumeForCentSafety),               |
+//|    NOT risk-%-of-equity - ported as one unit, including its own cent-account                  |
+//|    safety cap. (A separate, OFF-by-default manual risk-% override has been                     |
+//|    added on top per explicit follow-up request - see "Risk / Sizing" input                      |
+//|    group below; it does not change the default live behavior.)                                   |
+//| 5. Exit is the hybrid virtual trail (ManageHybridTrailingPositions): a                             |
+//|    virtual stop tracked in EA memory, checked every tick, enforced by a                             |
+//|    direct close independent of whether the broker accepts a tight SL                                 |
+//|    modify; broker-side SL still pushed as a best-effort backup. Exact                                  |
+//|    reference preset: 30-pip SL / 10-pip trail (InpPresetStopLossPips=30,                                |
+//|    InpTrailingDistancePips=10), no take profit (InpUseTakeProfit=false).                                  |
+//| 6. The entire legacy single-signal state machine (ManageReady/ManageActive/                                |
+//|    ReadDirectEzySignal/ArmReadySignal/ReconcileExecutionState, the bridge-                                   |
+//|    signal GlobalVariable persistence SaveState/LoadState/ClearCurrentState,                                   |
+//|    and the "Legacy single-signal execution" branch of OnTick) is unreachable                                   |
+//|    while InpPersistentReadyMode=true (kept at its reference default of true)                                    |
+//|    and is therefore intentionally NOT ported, per the same dead-code                                             |
+//|    criterion as (2) above - this is confirmed by call-graph reading, not an                                       |
+//|    approximation. Everything else in the live call chain (touch detection,                                        |
+//|    layer building, campaign/day-lock, directional layer caps, journal/                                             |
+//|    analytics reporting, and every drawing routine including the currently-                                          |
+//|    unreachable-but-upstream-present historical win/loss markers) is ported                                           |
+//|    with real code, unabridged, exactly as reachable/unreachable as it is in                                           |
+//|    the reference - nothing was wired in or removed beyond the dead-code list                                          |
+//|    above.                                                                                                                |
+//|                                                                                                                             |
+//| Distinct magic number (190041, fresh - distinct from V1/V1.1/V2/V2.1/V3 and                                                |
+//| every prior V4 attempt) and a distinct chart-object prefix (EZYEAV4_,                                                       |
+//| replacing the reference's own EZYSMV3104FORCEZEROCONF_) so this can run                                                      |
+//| alongside every other EzyEA/EzyMap variant on the same account/chart without                                                  |
+//| cross-talk - this, the magic number, and this header/changelog block are the                                                  |
+//| ONLY intentional deviations from the reference's logic; every trigger,                                                         |
+//| sizing, exit, and drawing decision below is the reference's own code.                                                           |
+//|                                                                                                                                    |
+//| CHANGELOG                                                                                                                          |
+//| 4.100 - Complete rebuild superseding the abandoned 4.000-4.002 line.        |
+//|         Ported directly from the actual EzyMap Scalp Mastery V3.104         |
+//|         FORCE_ZERO_CONFLUENCE_MARKET_FIXED source (10,052 lines),           |
+//|         function-by-function, not from a prose summary. Removed only        |
+//|         the reference's own confirmed-dead code (see findings above).       |
+//|         Added an OFF-by-default manual risk-percent-of-equity sizing        |
+//|         override (InpUseRiskPercentSizing/InpRiskPercentPerTrade),          |
+//|         matching the convention already used across V1/V1.1/V2/V2.1/V3,     |
+//|         for the user's own later manual tuning - the reference's own        |
+//|         confidence-tier lot sizing remains the exact default behavior.      |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "4.002"
-#property strict
+#property version   "4.100"
+// Note: intentionally NOT adding #property strict here (the current V4
+// file has it, but the V3.104 reference this file is ported from does
+// not) - the reference's own compiler behavior is preserved verbatim
+// rather than risking new implicit-cast warnings/errors across 10,000
+// lines of unmodified reference code that was never written or tested
+// against strict mode.
 
 #include <Trade/Trade.mqh>
 
-//======================================================================
-// Enums
-//======================================================================
+CTrade trade;
+
 enum ENUM_EZY_ACCOUNT_SCALE
 {
    EZY_ACCOUNT_AUTO     = 0,
@@ -147,466 +110,906 @@ enum ENUM_EZY_ACCOUNT_SCALE
    EZY_ACCOUNT_CENT     = 2
 };
 
-//======================================================================
-// Inputs
-//======================================================================
-input group "=== Level System: H1 current map + H4/D1/W1 outer levels ==="
-// Replicates the EzyMap Scalp Mastery V3.184 reference's entry-trigger
-// logic: levels are always the nearest historical bar CLOSE (never a
-// swing-pivot high/low). All four groups (H1/H4/D1/W1) get the full
-// S1/S2/R1/R2 tiers (nearest + next-nearest close each side), rebuilt
-// together on every new M5 bar close since that is what moves the
-// shared reference price (the last closed M5 bar's close) they are
-// all anchored to.
-input bool   InpEnableLevelTouchEntries     = true;
-input int    InpDirectionHistory            = 48;    // H1 lookback bars for S1/S2/R1/R2
-input double InpH1MinSeparationPips         = 70.0;
-input int    InpH4LookbackBars              = 48;
-input double InpH4MinSeparationPips         = 70.0;
-input int    InpD1LookbackBars              = 48;
-input double InpD1MinSeparationPips         = 120.0;
-input int    InpW1LookbackBars              = 48;
-input double InpW1MinSeparationPips         = 200.0;
-// Per-level touch tolerance is derived from that level's own anchor
-// bar's close-to-high (resistance) or close-to-low (support) distance
-// - this input is a FLOOR under that, in pips (matches the reference's
-// actual effective touch tolerance of ~9 pips - max(InpEntryTouchTolerancePips=5,
-// InpZeroConfTouchTolerancePips=9) there). Confirmed via live testing
-// that the original 1.5-pip floor (15 raw points) was far tighter than
-// the reference and a major cause of reduced trade frequency - most
-// H1/H4/D1/W1 anchor bars simply don't have a 9-pip wick on the
-// relevant side, so without this floor the derived tolerance was
-// usually much smaller than the reference's flat envelope.
-input double InpLevelTouchToleranceMinPips  = 9.0;
-// Explicit follow-up: still 10x fewer entries than the reference after
-// the fixes above. Traced to the reference's High-Risk/Low-Risk zones
-// (EZY_ZC_TRIGGER_HIGH_RISK/LOW_RISK, priorities 5-6 in
-// CollectEveryZeroConfCandidates) - these widen the H1 current-map
-// S1/S2 touch surface using an M15-average-range/ATR-derived width
-// (up to InpMaximumZoneRangeATR=1.80x), not just a flat pip tolerance,
-// so price sitting anywhere inside a wide zone counts as touching, not
-// only a brief pass through a narrow band. Approximated here (not the
-// reference's full asymmetric-skew/neighbor-capping/candle-snapping
-// formula, which is real complexity for a proportionally small extra
-// gain) by blending an M15-ATR-based width into EVERY level's
-// tolerance uniformly (not just H1's), applied symmetrically - still
-// zero-confluence, no new gating condition, just a wider touch surface
-// on the exact same marked levels.
-input double InpZoneAtrMultiplier           = 1.8;
-// A level only ever "consumed" (state-based re-entry, matching the
-// reference) after an ACTUAL successful fill - a rejected attempt
-// (spread guard, temporary broker rejection, etc.) leaves it
-// unconsumed so it retries. This throttle (matches the spirit of the
-// reference's InpDeploymentRetryIntervalMs=100ms retry cadence, at
-// TimeCurrent()-second granularity per this codebase's established
-// convention of never using GetTickCount64()) just stops a still-
-// touching, still-failing level from re-attempting and re-logging
-// every single tick.
-input int    InpEntryRetryThrottleSeconds   = 1;
+//------------------------------ Inputs ------------------------------
+input int    InpDirectionHistory       = 48;
+input int    InpSupportHistory         = 40;
+input int    InpEntryHistory           = 24;
+input int    InpSupportPivotBars       = 3;
+input int    InpEntryPivotBars         = 2;
+input bool   InpRequireDirectionalBody = false;
+input double InpRejectionWickRatio     = 0.25;
+input int    InpReadyExpiryBars        = 333;
+input double InpConfluenceTolerancePips= 70.0;
+input double InpMaximumZoneRangeATR     = 1.80;
 
-input group "=== Stops / Trail (fixed pips) ==="
-// Exact preset from the reference file: SL24 / TRAIL13.
-input double InpPresetStopLossPips          = 24.0;
-input double InpTrailingDistancePips        = 13.0;
-input double InpTrailActivationPips         = 0.0;
-input double InpXAUUSDscPipPrice            = 0.10;
-input double InpStandardXAUUSDPipPrice      = 0.10;
-input double InpTrailMinStepPoints          = 20.0;
+input double InpScalpStopPips          = 20.0;
+input double InpIntradayStopPips       = 35.0;
+input double InpSwingStopPips          = 70.0;
+input double InpScalpTargetMinPoints   = 15.0;
+input double InpScalpTargetMaxPoints   = 80.0;
+input double InpIntradayTargetMinPoints= 60.0;
+input double InpIntradayTargetMaxPoints= 250.0;
+input double InpSwingTargetMinPoints   = 180.0;
+input double InpSwingTargetMaxPoints   = 800.0;
+input double InpSnrFrontRunPips        = 10.0;
 
-input group "=== Hybrid Virtual Trail ==="
-input bool   InpUseVirtualTrailFallback     = true;
-input int    InpVirtualTrailCloseDeviationPts = 30;
-input bool   InpReconstructPeakFromM1       = true;
+input bool   InpShowDirectionLevels    = true;
+input bool   InpShowSupportingZones    = true;
+input bool   InpShowEntryZone          = true;
+input bool   InpShowDashboard          = true;
+input bool   InpShowTradeCard          = true;
+input bool   InpShowMonitoringCard     = true;
+input bool   InpShowHistoricalMarkers  = true;
+input int    InpMaxHistoricalMarkers   = 250;
+input bool   InpEnableAlerts           = true;
+input bool   InpAlertReady             = true;
+input bool   InpAlertLive              = true;
+input bool   InpAlertResult            = true;
+input bool   InpPushNotifications      = false;
 
-input group "=== Live Parity (live XAUUSD.sc chart only, inert in tester) ==="
-// Ported from the reference file's live-only trail-arming guards - a
-// restart mid-trade or a fresh live attach cannot immediately treat a
-// position as "already favourable enough to arm," the way it can in
-// the Strategy Tester where these are all inert.
-input bool   InpLiveXAUProtectionParity     = true;
-input bool   InpLiveXAURequireFullTrailBeforeArm = true;
-input bool   InpLiveXAUIncludeSpreadInTrailArm   = true;
-input int    InpLiveXAUTrailWarmupSeconds   = 15;
-input bool   InpLiveXAUDisableHistoricalPeakRebuild = true;
+input color  InpBuyColor               = C'0,208,142';
+input color  InpSellColor              = C'235,72,96';
+input color  InpSupportColor           = C'52,211,176';
+input color  InpResistanceColor        = C'237,185,58';
+input color  InpPanelColor             = C'7,10,14';
+input color  InpNeutralColor           = C'204,211,218';
 
-input group "=== Exit Management ==="
-input int    InpMaxHoldingMinutes           = 30;
+//
+// Premium MT5 presentation
+//
+input bool   InpApplyPremiumTheme       = true;
+input bool   InpShowDrawingLabels       = true;
+input bool   InpShowLowRiskSourceMarker = false;
+input bool   InpShowLowRiskZones        = false;
+input bool   InpLowRiskPreferNoOverlap  = true;
+input bool   InpLowRiskUseChartCandles  = true;
+input bool   InpShowBELevel             = true;
+input bool   InpHideNativeTickerOHLC    = true;
+input int    InpChartScale              = 3;
+input double InpRightShiftPercent       = 22.0;
 
-input group "=== Overall Drawdown Circuit Breaker (peak since attach) ==="
-input bool   InpEnableDrawdownBreaker       = true;
-input double InpMaxEquityDrawdownPct        = 10.0;
-input double InpDrawdownResumeFactor        = 0.5;
+input color  InpChartBackground         = C'8,11,15';
+input color  InpChartForeground         = C'176,185,195';
+input color  InpBullCandleColor         = C'0,208,142';
+input color  InpBearCandleColor         = C'235,72,96';
+input color  InpBullWickColor           = C'70,220,172';
+input color  InpBearWickColor           = C'245,105,125';
+input color  InpPanelBorderColor        = C'56,65,76';
+input color  InpPanelHeaderColor        = C'237,185,58';
 
-input group "=== Risk / Sizing ==="
-input double InpRiskPercentPerTrade         = 0.25;
-input bool   InpScaleRiskByCentDivisor      = false;
-input int    InpMaxConcurrentPositions      = 500;
-input double InpMaxLotsAbsolute             = 5.0;
-input double InpMaxMarginUsePct             = 40.0;
-input bool   InpAllowMinimumLotFallback     = true;
-input double InpMinimumLotFallbackMaxRiskPct = 1.0;
+input color  InpBuyHighRiskZoneColor    = C'18,74,61';
+input color  InpBuyLowRiskZoneColor     = C'11,45,38';
+input color  InpSellHighRiskZoneColor   = C'82,28,39';
+input color  InpSellLowRiskZoneColor    = C'58,42,19';
+input color  InpBEColor                 = C'126,137,150';
+input color  InpTradeLevelGold         = C'255,215,0';
 
-input group "=== Modify Backoff (TimeCurrent()-based, never GetTickCount64) ==="
-input int    InpModifyBackoffBaseSeconds    = 2;
-input int    InpModifyBackoffMaxSeconds     = 300;
-input int    InpModifyMaxConsecutiveFail    = 6;
 
-input group "=== Broker Minimum Distance ==="
-input int    InpExecutionStopCushionPoints  = 10;
-input double InpZeroStopsLevelFallbackPct   = 0.05;
+//
+// Phase 2 automated execution — M5 chart.
+// H4 SNR lines -> M15 overlap zone -> M3 reversal -> M5 READY.
+//
+// Fresh magic number distinct from every other EzyEA variant (V1/V1.1/
+// V2/V2.1/V3 families and the abandoned V4.000-4.002 attempts) so this
+// EA never cross-talks with another EzyEA/EzyMap EA's positions/orders
+// on the same account.
+input ulong  InpMagicNumber              = 190041;
 
-input group "=== Spread Guard (auto-calibrating) ==="
-input bool   InpAutoCalibrateSpreadCap      = true;
-input int    InpSpreadCalibrationTicks      = 200;
-input double InpSpreadCalibrationMultiplier = 2.5;
-input int    InpMaxSpreadPoints             = 350;
-
-input group "=== Cent-Account Handling ==="
+// Cent-account interpretation and hard exposure guards. AUTO detects
+// common cent currency/server labels; live .sc suffix detection is optional.
+// AUTO tester mode defaults to STANDARD to prevent false division by 100.
+// V2.009W uses BROKER-NATIVE deposit units for lot scaling by default:
+// 603.94 USC at 0.01 lot per 100 units requests 0.06 cent-account lots.
+// Monetary risk and margin remain broker-native via OrderCalcProfit/Margin.
 input ENUM_EZY_ACCOUNT_SCALE InpAccountScaleMode = EZY_ACCOUNT_AUTO;
-input double InpCentAccountUnitDivisor      = 100.0;
-input bool   InpTesterAutoModeIsStandard    = true;
-input bool   InpTreatSCSuffixAsCentOnLive   = true;
+input double InpCentAccountUnitDivisor            = 100.0;
+// Strategy Tester deposits are normally entered in standard account currency,
+// even when the tested symbol carries a broker suffix such as .sc.
+input bool   InpTesterAutoModeIsStandard          = true;
+// On a live chart, .sc may identify the broker's cent symbol. Disable this
+// only when the live account is definitely standard despite the suffix.
+input bool   InpTreatSCSuffixAsCentOnLive         = true;
+input bool   InpEnableCentSafetyCaps              = true;
+input double InpCentMaxRiskPerSetupPct            = 5.00;
+input double InpCentMaxMarginUsePct               = 25.0;
+input double InpCentAbsoluteMaxLots               = 0.20;
+// Live-cent execution may evaluate the broker minimum lot when proportional
+// sizing falls below the symbol minimum. The minimum is never accepted blindly:
+// OrderCalcProfit and OrderCalcMargin must satisfy the limits below.
+input bool   InpAllowCentMinimumLotFallback       = true;
+input double InpCentMinimumLotMaxRiskPct          = 5.00;
+input double InpCentMinimumLotMaxMarginPct        = 25.0;
+input double InpCentMinimumEffectiveEquity        = 1.0;
+// LIVE-CENT EXECUTION PROFILE. When proportional volume is below
+// the broker minimum, 0.01 is treated only as a candidate. It is
+// accepted solely when broker-native risk and margin calculations
+// remain inside the cent safety thresholds below. Tester sizing is
+// unchanged because Strategy Tester AUTO mode remains STANDARD.
+input bool   InpLiveCentBrokerMinimumExecution    = true;
+input double InpLiveCentRawBalanceFloor           = 100.0;
 
-input group "=== Execution ==="
-input ulong  InpMagicNumber                 = 190040;
-input int    InpDeviationPoints             = 30;
+// LIVE-CENT PARITY PROFILE. Broker-native lot volume is approved from the
+// immediate 30-pip protection risk plus broker-calculated margin. This keeps
+// cent-symbol lot scaling aligned with the displayed USC balance without
+// allowing margin-only approval to bypass the real stop-distance risk.
+input bool   InpLiveCentParityMode                 = true;
+input bool   InpLiveCentMarginOnlyMinimumApproval  = true; // compatibility switch; validates 30-pip risk + margin
+input double InpLiveCentMaximumMarginUsePct        = 25.0;
+input int    InpLiveCentMaximumOpenPositions       = 26;
+input bool   InpLiveCentMarketOnly                 = false;
+input bool   InpResetExecutionStateOnAttach        = true;
 
-input group "=== Reporting ==="
-input int    InpStatusLogIntervalSeconds    = 60;
+// BROKER-NATIVE LOT SCALING.
+// true: use the account's displayed deposit units for the per-100 rule.
+//       USD 600 -> 0.06 lot; USC 600 -> 0.06 cent-symbol lot.
+// false: legacy effective-USD conversion (USC divided by cent divisor).
+// Balance is used by default so an open floating P/L does not unexpectedly
+// reduce the next setup's intended account-tier lot.
+input bool   InpUseBrokerNativeDepositUnitsForLots = true;
+input bool   InpUseBalanceForLotSizing              = true;
 
-input group "=== Chart Drawing ==="
-input bool   InpDrawLevels                  = true;
-input bool   InpDrawStatusLabel             = true;
+// Percentage of CURRENT EQUITY allocated to the complete setup.
+// Requested aggressive campaign risk band: 25%-47% per setup.
+input double InpMaxRiskPct               = 47.0;
+input double InpRiskPct_1Conf            = 25.00;
+input double InpRiskPct_2Conf            = 25.00;
+input double InpRiskPct_3Conf            = 25.00;
+input double InpRiskPct_4Conf            = 33.00;
+input double InpRiskPct_5Plus            = 42.00;
 
-input group "=== Chart Drawing: Premium Theme ==="
-input bool   InpApplyPremiumTheme           = true;
-input color  InpChartBackground             = C'8,11,15';
-input color  InpChartForeground             = C'176,185,195';
-input color  InpBullCandleColor             = C'0,208,142';
-input color  InpBearCandleColor             = C'235,72,96';
-input bool   InpHideNativeTickerOHLC        = true;
-input bool   InpShowTradeCard               = true;
-input color  InpPanelColor                  = C'7,10,14';
-input color  InpPanelBorderColor            = C'56,65,76';
-input color  InpBuyColor                    = C'0,208,142';
-input color  InpSellColor                   = C'235,72,96';
-input color  InpNeutralColor                = C'204,211,218';
-input bool   InpShowLiveTradeLevels         = true;
-input color  InpTradeLevelGold              = C'255,215,0';
-input bool   InpShowHistoricalMarkers       = true;
-input int    InpMaxHistoricalMarkers        = 100;
+// SL distance modifies the confidence allocation, clamped to 25%-47%.
+input double InpRiskTightSLBonusPct       = 5.00;
+input double InpRiskWideSLPenaltyPct      = 7.00;
+input double InpTightSLRatio              = 0.80;
+input double InpWideSLRatio               = 1.35;
 
-//======================================================================
-// Types
-//======================================================================
-struct ManagedPositionState
+// Layering across the frozen READY rectangle.
+input int    InpMinLayers                = 1;
+input int    InpMaxLayers                = 3;
+input int    InpMaxImmediateLayers       = 2;
+input int    InpLayeringExpiryMinutes    = 30;
+
+// Automatic account-scaled layering.
+// $100 equity is the minimum trading account and corresponds to a 0.01-lot
+// BASE layer. Larger accounts scale that base layer proportionally.
+// Final layer count is still constrained by the setup's monetary risk budget.
+input bool   InpAutoScaleLayerLot         = true;
+input double InpMinimumAccountEquity      = 5.0; // keep $100 base sizing alive after small drawdown
+input double InpBaseEquity                = 100.0;
+input double InpBaseLayerLot              = 0.01;
+
+// V2.002 confidence-based SETUP volume.
+// These are TOTAL lots for the complete setup at $100 equity.
+// Standard = 1 layer, Good = 2 layers, Quality = 3 layers.
+// Larger accounts scale linearly from the $100 rule.
+input bool   InpUseConfidenceLotSizing     = true;
+input double InpStandardSetupLotPer100     = 0.01;
+input double InpGoodSetupLotPer100         = 0.02;
+input double InpQualitySetupLotPer100      = 0.03;
+input int    InpGoodConfidenceMin          = 3;
+input int    InpQualityConfidenceMin       = 5;
+
+// Manual risk-percent-of-equity override, matching the convention already
+// used across the rest of the EzyEA family (V1/V1.1/V2/V2.1/V3 all expose
+// InpRiskPercentPerTrade for hand-tuning between test sessions). This is
+// an ADDITIVE alternative sizing path only, wired in via RequestedSetupLot()
+// below - it does not touch any trigger/drawing/exit logic.
+// Default OFF: the reference's own confidence-tier $/lot-per-$100 sizing
+// (ConfidenceSetupLot/LotSizingCapitalUnits/CapSetupVolumeForCentSafety)
+// above remains the exact live default, completely unchanged.
+input bool   InpUseRiskPercentSizing       = false;
+// Manual override value, present now so it can be tuned in the Strategy
+// Tester / live inputs UI even before InpUseRiskPercentSizing is switched
+// on. Only takes effect when InpUseRiskPercentSizing=true.
+input double InpRiskPercentPerTrade        = 0.25;
+
+// Hard monetary-risk guard. Confidence lots are reduced if the frozen
+// Entry->SL distance would otherwise exceed this percentage of equity.
+input double InpConfidenceLotRiskGuardPct  = 47.0;
+
+// Soft daily-volume objective for reporting only.
+// The EA never invents a setup merely to reach these numbers.
+input double InpDailyVolumeTargetMinLots   = 0.50;
+input double InpDailyVolumeTargetMaxLots   = 1.50;
+
+// V2.008 PARALLEL M5 FREQUENCY.
+// Several valid M5 READY setups may wait simultaneously.
+// Frequency increases by creating more independent setups,
+// NOT by increasing the volume of any one setup.
+input bool   InpAllowParallelWaitingReady   = true;
+input int    InpMaxWaitingReadyPerDirection = 8;
+input int    InpMaxTotalWaitingReady        = 16;
+// V3.081 frequency governor: arm BUY and SELL independently when both are
+// valid, but freeze at most one new setup per direction for each completed M5.
+// This raises opportunity count without duplicating the same zone every tick.
+input bool   InpArmBothDirectionsWhenValid  = true;
+input bool   InpOneSetupPerDirectionPerM5   = true;
+
+// Normal confluence-qualified entry tolerance.
+// Zero-confluence fallbacks use their separate, wider profile below.
+input double InpEntryTouchTolerancePips     = 5.0;
+
+// V3.099 sensitive zero-confluence touch profile.
+// The detector checks CMP, Bid, Ask, Last and the tick path from the previous
+// observation, preventing fast movement or spread geometry from skipping a
+// READY, HIGH-RISK, S1 or R1 trigger.
+input double InpZeroConfTouchTolerancePips  = 12.0;
+input bool   InpZeroConfUseBidAskEnvelope   = true;
+input bool   InpZeroConfUseTickPathCrossing = true;
+input int    InpZeroConfTouchRetrySeconds   = 30;
+input int    InpZeroConfMaxDeployAttempts   = 15;
+
+// V2.009 PRECISE CMP EXECUTION.
+// READY touch is detected from the symbol's CHART price (Bid or Last),
+// matching what is visibly touching the rectangle. Actual BUY/SELL execution
+// still uses the broker's executable Ask/Bid prices.
+input bool   InpUseChartPriceForReadyTouch  = true;
+
+// Once a legitimate chart CMP touch occurs, keep a short execution latch so
+// a transient broker rejection / spread jump does not lose the signal.
+input int    InpTouchRetrySeconds           = 15;
+input int    InpMaxTouchDeployAttempts      = 7;
+
+// V3.104 prevents OnTick/OnTimer from submitting the same touched setup
+// repeatedly during the same tester/server moment. Forced zero-confluence
+// entries retry indefinitely at this interval until MARKET is accepted.
+input int    InpDeploymentRetryIntervalMs   = 500;
+
+// The user's confidence lot is the target volume. Percentage risk may still
+// be reported, but it does not silently shrink a valid 0.01/0.02/0.03 setup.
+input bool   InpHonorConfidenceLotAtTouch   = true;
+
+// If LIMIT/STOP geometry cannot be constructed at a real CMP touch,
+// fall back to MARKET layers using the same total setup volume.
+input bool   InpMarketFallbackOnTouch       = true;
+
+// Small broker stop-distance cushion.
+input int    InpExecutionStopCushionPoints  = 2;
+
+// V2.009D AGGRESSIVE MARKET + LIMIT.
+// The moment BUY/SELL READY is stored:
+// 1) one MARKET route executes immediately,
+// 2) retracement LIMIT route(s) are staged when broker-valid.
+//
+// Momentum STOP orders are removed from this aggressive branch.
+//
+// Total setup volume follows the original confidence sizing:
+// $100 STANDARD = 0.01 total
+// $100 GOOD     = 0.02 total
+// $100 QUALITY  = 0.03 total
+//
+// The total confidence volume is divided across the valid Market/LIMIT
+// routes. Standard normally uses Market only; Good uses Market + one
+// LIMIT; Quality can use Market + two LIMIT levels.
+input bool   InpAggressiveArmExecution        = true;
+input bool   InpAggressiveRequireMarketFill   = false;
+input bool   InpAggressivePlaceLimitRoute     = true;
+// V3.026 duplicate protection: a READY rectangle may contain at most one
+// EA LIMIT order for its direction. This check includes orders adjusted just
+// outside the visual edge by the live broker-distance extension.
+input bool   InpOneLimitPerReadyZone          = true;
+input double InpLimitZoneDuplicateTolerancePips = 1.0;
+
+// V3.081 directional exposure governor. Positions and pending entry orders
+// reserve a layer slot so a later pending fill cannot push the direction
+// above the cap. BUY and SELL capacity are independent. A slot is released
+// automatically when its position closes or its pending order is cancelled.
+input bool   InpEnforceDirectionalLayerCap       = true;
+input int    InpMaxActiveLayersPerDirection      = 13;
+input bool   InpCountPendingAsReservedLayer      = true;
+input bool   InpTrimExcessPendingToLayerCap      = true;
+input double InpAggressiveLimitDepthPct       = 25.0;
+// Real brokers may enforce a larger pending-order distance than Strategy Tester.
+// Permit a live LIMIT route to sit just beyond the READY edge when that is the
+// nearest broker-valid price. On XAU, 20 strategy pips = 2.00 price.
+input double InpLiveLimitGeometryExtensionPips = 20.0;
+
+// Execution controls.
+input int    InpMaxSpreadPoints          = 0;     // 0 = filter disabled
+input int    InpDeviationPoints          = 20;
+input bool   InpUseAsyncMode             = false;
+input bool   InpUseLimitStopLayers       = true;
+input bool   InpPrintExecutionLog        = true;
+
+// Safety.
+input bool   InpOneBasketAtATime         = false; // V2.002 can manage multiple deployed M5 setups
+
+// Persistent READY execution.
+input bool   InpPersistentReadyMode        = true;
+input int    InpMaxPersistentSetups        = 32;
+input bool   InpKeepZoneVisibleWhileLive   = true;
+input double InpLiveRR                     = 0.80; // final quick-win target
+
+// v1.014 QUALITY-FREQUENCY.
+// READY stays stored for 333 closed M5 candles.
+// Orders are deployed only when price returns near the zone and quality re-confirms.
+input bool   InpDelayedOrderDeployment        = true;
+input double InpDeploymentApproachPips        = 0.0;
+
+// Compatibility inputs retained for older SET files. The normal V3.081
+// policy remains exactly 2 trend-following and 3 counter-trend confluences.
+input int    InpTrendMinConfluences           = 2; // compatibility only
+input int    InpCounterMinConfluences         = 3; // compatibility only
+
+// V3.094 low-exposure exception.
+// A valid mapped READY zone may arm with zero required confluences only while
+// this EA has zero or one open position on the current symbol. Pending orders
+// do not count as a running entry. The same position-count condition is
+// checked again at CMP touch before deployment.
+const bool   V3104_ZERO_CONFLUENCE_TOUCH_RULE = true;
+const int    V3104_ZERO_CONF_MAX_OPEN_POSITIONS = 1;
+
+// Additional V3.102 zero-confluence trigger.
+// CMP touching the stored directional HIGH-RISK zone may deploy immediately,
+// even when CMP has not yet reached the narrower READY entry rectangle.
+const bool   V3104_ZERO_CONF_HIGH_RISK_TOUCH_RULE = true;
+
+// Additional V3.102 zero-confluence level trigger.
+// BUY fallback stores the current S1 level; SELL fallback stores current R1.
+// CMP touch of stored S1 -> BUY routing. Stored R1 -> SELL routing.
+const bool   V3104_ZERO_CONF_S1_R1_TOUCH_RULE = true;
+
+// V3.100 adds the outer support/resistance level trigger.
+// BUY fallback stores S2; SELL fallback stores R2.
+// CMP touch of stored S2 -> BUY routing. Stored R2 -> SELL routing.
+const bool   V3104_ZERO_CONF_S2_R2_TOUCH_RULE = true;
+
+// V3.104 has no zero-confluence fill limit per M5 candle.
+// Once a zero-confluence trigger touches, execution remains latched until its
+// MARKET route is accepted. Quality rechecks, retry expiry, attempt limits
+// and current-M5 permanent-failure pauses no longer cancel that entry.
+const bool   V3104_FORCE_ZERO_CONF_MARKET_EXECUTION = true;
+const bool   V3104_ZERO_CONF_RETRY_UNTIL_FILLED = true;
+
+// When no stored zero-confluence READY exists for a direction, the current
+// map itself may create a direct STANDARD MARKET entry:
+// READY / HIGH-RISK / S1 / S2 -> BUY.
+// READY / HIGH-RISK / R1 / R2 -> SELL.
+const bool   V3104_ZERO_CONF_DIRECT_MAP_FALLBACK = true;
+
+input bool   InpRequireCurrentM30Alignment    = true;
+input bool   InpRequireM5ZoneStillValid       = true;
+
+input int    InpM1QualityLookback             = 3;
+input double InpTrendRejectionWickRatio       = 0.20;
+input double InpCounterRejectionWickRatio     = 0.45;
+input double InpQualityCloseStrength          = 0.55;
+input double InpMomentumBodyFactor            = 1.05;
+
+input bool   InpTrendRequireMomentumOrBreak   = true;
+input bool   InpCounterRequireCHOCH           = true;
+
+// Daily cap on successfully deployed layer orders.
+input int    InpMaxLayerOrdersPerDay           = 0; // disabled; source signal controls frequency
+
+
+//
+// v1.015 REFINED M5 ROUTING
+// H4  = support/resistance lines only.
+// M15 = HIGH RISK candle zone physically overlapping an H4 S/R line.
+// M3  = reversal confirmation inside that M15 HIGH RISK zone.
+// M5  = READY signal candle rectangle.
+// CMP touch of the frozen M5 rectangle releases layered entries.
+//
+input int    InpH4LevelHistory                 = 72;
+input int    InpM15ZoneHistory                 = 48;
+input int    InpM5ReadyHistory                 = 24;
+
+// M3 confirmation controls. Default is rejection only.
+// Users may enable CHOCH, engulfing and/or momentum and choose how many must agree.
+input bool   InpM3UseRejection                 = true;
+input bool   InpM3UseCHOCH                     = false;
+input bool   InpM3UseEngulfing                 = false;
+input bool   InpM3UseMomentum                  = false;
+input int    InpM3MinConfirmations             = 1;
+input int    InpM3Lookback                     = 8;
+input int    InpM3StructureBars                = 3;
+input double InpM3RejectionWickRatio           = 0.15;
+input double InpM3CloseStrength                = 0.50;
+input double InpM3MomentumBodyFactor           = 1.10;
+
+// ACTIVE SIGNAL RECOVERY. These defaults prevent valid H1/M15 maps from
+// producing zero READY signals because one strict M5 condition is missing.
+input bool   InpActiveSignalMode                 = true;  // high-frequency signal recovery
+input bool   InpAllowDirectionalM5Fallback       = true;
+input bool   InpRequireZoneCorrectSide           = false;
+input int    InpActiveMaxZoneRetests             = 8;
+input int    InpActiveMinimumConfluences          = 0; // compatibility only; locked 2/3 policy overrides
+input double InpDirectionalM5CloseStrength       = 0.50;
+input bool   InpSignalDiagnostics                = true;
+
+// Last-zone continuation campaign.
+input bool   InpLatestZoneOnly                 = false; // source READY is frozen until touch/invalidation
+input bool   InpLockDirectionAfterFirstSetup   = false; // do not override source BUY/SELL selection
+input int    InpMaxCampaignSetupsPerDay        = 300; // effectively non-blocking
+input int    InpMaxCampaignZoneRetests         = 8;
+
+// Stop the campaign for the broker day after target/loss threshold.
+input double InpDailyEquityTargetPct           = 0.0; // disabled; exits are trade-structure based
+input double InpDailyLossStopPct               = 47.0;
+input bool   InpCloseAllAtDailyTarget          = true;
+
+// Take profit is disabled in V3.081. These inputs remain only for
+// backward-compatible SET files and inactive legacy paths.
+input bool   InpUseTakeProfit                  = false; // no take profit; exit by preset/trailing SL
+input double InpStandardTakeProfitPips         = 0.0;
+input double InpGoodTakeProfitPips             = 0.0;
+input double InpQualityTakeProfitPips          = 0.0;
+input double InpFixedTakeProfitPips            = 0.0;  // retained for compatibility; disabled
+
+// Legacy R target inputs retained for compatibility with inactive routes.
+// The active aggressive Market/LIMIT route does not use them for TP.
+input double InpContinuationMinRR              = 0.60;
+input double InpContinuationMaxRR              = 1.00;
+input bool   InpUseStagedProfitTaking          = false;
+input double InpLayer1TakeProfitR              = 0.35;
+input double InpLayer2TakeProfitR              = 0.55;
+
+// Preset protection. Every MARKET/LIMIT/STOP route first attempts to carry
+// a visible broker SL exactly 30 strategy pips from its entry. If the broker
+// rejects that SL with the opening request, the route is retried without SL
+// and the exact virtual stop protects it immediately after fill. No TP is used.
+input double InpPresetStopLossPips          = 30.0;
+input bool   InpRetryEntryWithoutSLOnReject = true;
+
+// V3.104 broker/virtual protection with no TP, a 30-pip preset SL and a 10-pip trailing stop.
+// A preset 30-pip SL is requested with every entry. No TP is submitted. The exact virtual
+// SL remains active when broker stop-distance rules require adjustment.
+// The initial exact virtual stop is InpPresetStopLossPips from entry, and the EA
+// immediately attempts to install the closest broker-compatible SL.
+// BUY  stop = best Bid - InpTrailingDistancePips * strategy pip
+// SELL stop = best Ask + InpTrailingDistancePips * strategy pip
+// On XAU, one strategy pip is 0.10 price; therefore SL30 is 3.00 price and trail10 is 1.00 price.
+input bool   InpUseFixedPipTrail               = true;
+input bool   InpEnableTrailingAfterEntry        = true;  // trail after first favourable broker point
+input double InpTrailingActivationPips         = 0.0;
+input double InpTrailingDistancePips           = 10.0;
+input double InpTrailingStepPips               = 1.0;
+input bool   InpUseVirtualTrailFallback        = true;
+input bool   InpReconstructTrailFromM1         = true;
+input int    InpVirtualTrailCloseDeviationPts  = 30;
+input int    InpTrailBrokerCushionPoints       = 2;
+
+// Legacy compatibility inputs retained but hard-disabled in V2.009F.
+input bool   InpUseContinuationTrail           = false;
+input double InpTrailStartR                    = 1.50;
+input double InpTrailInitialLockR              = 0.25;
+input double InpTrailStepR                     = 0.50;
+input bool   InpUsePeakProfitProtection        = false;
+input double InpPeakLockActivateR              = 1.00;
+input double InpPeakProfitGivebackPct          = 30.0;
+
+// Automatic post-test report.
+input bool   InpWriteCSVReport                 = true;
+input string InpCSVReportPrefix                = "EzyMap_Scalp_Mastery_V3_104_Force_ZeroConf_Market_Report";
+
+// Live/tester Journal performance reporting. Reconstructed from broker history
+// for this symbol and magic number, so the figures survive EA/chart restarts.
+// "total trades" means fully closed position campaigns; breakeven trades are
+// reported separately and excluded from the win-rate denominator.
+input bool   InpReportPerformanceToJournal      = true;
+input int    InpStatsHistoryDays                 = 0;   // 0 = all available history
+input int    InpStatsReportIntervalSeconds       = 300; // periodic report while attached
+
+
+// Signal parity mode:
+// true  = execute only after the V1.2 LIVE first-touch event.
+// false = permits the older READY pre-staging behaviour.
+input bool   InpV120SignalParityMode      = true; // retained for legacy mode only
+
+//
+// Phase 2 HYBRID execution model.
+// M5 = setup/quality map. M1 = precise execution confirmation.
+//
+input bool   InpQualityMode                    = true;
+input int    InpMinTrendExecutionConfluences   = 2; // compatibility only
+input int    InpMinCounterExecutionConfluences = 3; // compatibility only
+input bool   InpAllowCounterTrendTrades        = true;
+input int    InpMaxExecutionZoneRetests        = 2;
+
+// M1 execution confirmation.
+input bool   InpUseM1ExecutionConfirmation     = false; // keep OFF: M1 is already the signal timeframe
+input int    InpM1ConfirmationLookback         = 3;
+input double InpM1RejectionWickRatio           = 0.25;
+input double InpM1CloseStrength                = 0.55;
+input double InpM1MomentumBodyFactor           = 0.90;
+input double InpM1ZoneTolerancePips            = 8.0;
+input bool   InpCounterRequireM1Break          = true;
+
+//----------------------------- Constants ----------------------------
+#define PRODUCT_NAME "EzyMap Scalp Mastery"
+#define PRODUCT_VERSION "V3.104 • V3.103 BASE • FORCE ZERO-CONF MARKET • DIRECT MAP FALLBACK • SL30/TRAIL10"
+#define EMA_LEN 13
+#define TREND_MIN_CONFLUENCES 2
+#define COUNTER_MIN_CONFLUENCES 3
+#define MAX_ZONE_RETESTS 8
+#define CONFIRM_WINDOW 12
+#define MIN_RR 0.60
+#define MAX_RR 2.50
+#define BE_ARM_PROGRESS 0.40
+
+// Chart-object namespace renamed from the reference's own
+// "EZYSMV3104FORCEZEROCONF_" so drawn objects never collide with a
+// running copy of the original EzyMap EA or another EzyEA variant on
+// the same chart. Purely a naming change - every object created/found/
+// deleted through this prefix behaves identically to the reference.
+string PREFIX="EZYEAV4_";
+
+enum EzyState { ST_MONITORING=0, ST_READY=1, ST_ACTIVE=2, ST_TP=3, ST_SL=4, ST_BE=5 };
+
+struct ZoneInfo
+{
+   double lo;
+   double hi;
+   datetime time;
+   bool valid;
+};
+
+struct TradePlan
+{
+   double sl;
+   double tp;
+   double rr;
+   bool valid;
+};
+
+struct ReadySnapshot
+{
+   string direction;
+   bool counterTrend;
+   int confluences;
+   int requiredConfluences;
+   int zoneRetests;
+   double supportLo;
+   double supportHi;
+   double entryLo;
+   double entryHi;
+   datetime entryTime;
+   double planSL;
+   double planTP;
+   double planRR;
+   datetime armedClock;
+   datetime armedBarTime;
+   bool zoneExited;
+   bool armed;
+};
+
+struct ActiveSnapshot
+{
+   string direction;
+   bool counterTrend;
+   int confluences;
+   int zoneRetests;
+   long signalId;
+   double entry;
+   double sl;
+   double tp;
+   double rr;
+   double entryLo;
+   double entryHi;
+   datetime entryTime;
+   datetime startClock;
+   datetime startBarTime;
+   double beTrigger;
+   bool beArmed;
+};
+
+
+struct PersistentReadySetup
+{
+   bool active;
+   bool deployed;
+   bool triggered;
+   bool expiryHandled;
+   long id;
+   int direction;            // +1 BUY, -1 SELL
+   bool counterTrend;
+   int confluences;
+
+   // V3.102 zero-confluence READY-touch state.
+   int requiredConfluences;
+   bool zeroConfluenceFallback;
+
+   // Frozen directional levels captured when the setup is stored:
+   // BUY uses S1 and S2; SELL uses R1 and R2.
+   double zeroConfluenceLevelPrice;
+   double zeroConfluenceOuterLevelPrice;
+
+   int zoneRetests;
+   double supportLo;
+   double supportHi;
+   double entryLo;
+   double entryHi;
+   double structuralSL;
+   datetime entryTime;
+   datetime armedClock;
+   datetime armedBarTime;
+   datetime deployedClock;
+   bool zoneExited;
+   int layersPlanned;
+   int layersPlaced;
+   double riskPct;
+   double targetRR;
+
+   // V2.009 touch latch / retry state.
+   bool touchLatched;
+   bool highRiskTouchLatched;
+   bool s1r1TouchLatched;
+   bool s2r2TouchLatched;
+
+   // V3.100 sensitive touch path state.
+   bool hasPreviousTouchCMP;
+   double previousTouchCMP;
+
+   datetime touchClock;
+   double touchPrice;
+   int deployAttempts;
+
+   // V3.102 execution retry control.
+   datetime lastDeployAttemptClock;
+   ulong lastDeployAttemptTickMs;
+   datetime deploymentBlockedM5;
+};
+
+struct DirectZeroConfState
+{
+   bool active;
+   bool buyTouchConsumed;
+   bool sellTouchConsumed;
+   int direction;
+   string triggerText;
+   double triggerLo;
+   double triggerHi;
+   datetime latchedClock;
+   datetime lastAttemptClock;
+   ulong lastAttemptTickMs;
+   int attempts;
+};
+
+struct SetupAnalytics
+{
+   bool used;
+   bool peakRunnerArmed;
+   long id;
+   int direction;
+   int confidence;
+   double riskPct;
+   double targetRR;
+   int plannedLayers;
+   double plannedLots;
+   double actualEntryLots;
+   double realisedProfit;
+   double peakCampaignProfit;
+   double peakRunnerProfit;
+   int peakLockCloses;
+   datetime armedTime;
+   datetime deployedTime;
+};
+
+struct ReportPositionMap
+{
+   long positionId;
+   long setupId;
+   int layerIndex;
+   int totalLayers;
+};
+
+struct ReportSetupRow
+{
+   long id;
+   int direction;
+   int confidence;
+   double riskPct;
+   double targetRR;
+   int plannedLayers;
+   double entryLots;
+   double maxEntryDealLot;
+   double netProfit;
+   double peakCampaignProfit;
+   double peakRunnerProfit;
+   int layer1TPHits;
+   int layer2TPHits;
+   int runnerTPHits;
+   int peakLockCloses;
+};
+
+
+struct HybridTrailState
 {
    ulong    ticket;
-   int      consecutiveFailures;
-   datetime cooldownUntil;
+   bool     active;
+   bool     reconstructed;
    double   peakPrice;
-   double   virtualStop;       // tight logical stop, checked every tick, enforced by direct close
-   bool     peakReconstructed;
-   datetime firstSeenTime;     // when this EA first saw this ticket - live-parity warmup timer
+   double   virtualStop;
+   datetime positionTime;
 };
 
-struct LevelTouchState
+// Journal statistics aggregate one completed trade per broker position id,
+// preventing partial-fill deals from inflating the win/loss trade count.
+struct JournalTradeRow
 {
-   double   price;
-   double   tolerance;        // per-level touch tolerance, derived from close-to-high/low
-   int      fadeDirection;    // 1 = demand (support), fade BUY; -1 = supply (resistance), fade SELL
-   bool     inZone;
-   bool     consumed;         // state-based re-entry: only set true on an ACTUAL successful fill
-   datetime nextRetryTime;    // short throttle between repeated attempts while still touching and unconsumed
-   string   tfLabel;
+   long   positionId;
+   double entryLots;
+   double netPnl;
+   bool   hasExit;
 };
 
-//======================================================================
-// Globals
-//======================================================================
-CTrade trade;
+struct JournalPerformanceSnapshot
+{
+   double lotsTraded;
+   int    actualEntryFills;
+   int    totalTrades;
+   int    wins;
+   int    losses;
+   int    breakeven;
+   int    openTrades;
+   double closedNetPnl;
+};
 
-int g_handleAtrM15 = INVALID_HANDLE;
+//--------------------------- Global state ---------------------------
+EzyState g_state=ST_MONITORING;
+ReadySnapshot g_ready;       // UI compatibility snapshot
+ReadySnapshot g_buyReady;    // V1.2 independent BUY READY
+ReadySnapshot g_sellReady;   // V1.2 independent SELL READY
+ActiveSnapshot g_active;
+datetime g_lastEntryClosedTime=0;
+int g_structureDirection=0;
+int g_bullChochAge=9999, g_bearChochAge=9999;
+int g_bullRejectAge=9999, g_bearRejectAge=9999;
+string g_lastResult="";
+datetime g_resultTime=0;
 
-double g_peakEquity    = 0.0;
-bool   g_tradingHalted = false;
+string g_historicalMarkerNames[];
+int g_historicalMarkerSerial=0;
 
-double g_accountUnitDivisor = 1.0;
+ENUM_TIMEFRAMES g_directionTF=PERIOD_H1;
+ENUM_TIMEFRAMES g_supportTF=PERIOD_M15;
+ENUM_TIMEFRAMES g_confirmTF=PERIOD_M5;
+ENUM_TIMEFRAMES g_entryTF=PERIOD_M5;
+string g_mode="SCALP";
+string g_tfLabel="M5";
+string g_dirLabel="H1";
+string g_supLabel="M15";
+string g_confirmLabel="M5";
 
-double g_spreadCalSamples[];
-int    g_spreadCalCount        = 0;
-double g_spreadCalEffectiveCap = -1.0;
+// Current map snapshot
+double g_S1=0,g_S2=0,g_R1=0,g_R2=0;
+ZoneInfo g_buyHigh,g_buyLow,g_sellHigh,g_sellLow;
+int g_buyHighConf=0,g_sellHighConf=0;
+double g_pipSize=0,g_brnStep=0,g_microStep=0;
+double g_accountUnitDivisor=1.0;
+string g_biasText="NEUTRAL";
+double g_livePrice=0.0;
+bool g_trendBuyRoute=false;
+bool g_trendSellRoute=false;
+int g_readySignalCount=0;
+int g_liveSignalCount=0;
+int g_executedBasketCount=0;
 
-ManagedPositionState g_managed[];
+PersistentReadySetup g_persistentSetups[];
+long g_lastCapturedBuyId=0;
+long g_lastCapturedSellId=0;
+int g_persistentQueuedCount=0;
+int g_persistentTriggeredCount=0;
+int g_persistentCompletedCount=0;
+int g_qualityHoldCount=0;
+int g_qualityDeployCount=0;
+int g_dailyLayerOrders=0;
+int g_dailyDateKey=0;
+HybridTrailState g_hybridTrailStates[];
 
-datetime g_lastStatusLogTime = 0;
+DirectZeroConfState g_directZeroConf;
+bool   g_directZeroConfHasPreviousCMP=false;
+double g_directZeroConfPreviousCMP=0.0;
 
-int g_gateAttempts           = 0;
-int g_gateAccepted           = 0;
-int g_gateRejected           = 0;
-int g_gateSpreadRejects      = 0;
-int g_gateConcurrencyRejects = 0;
-int g_gateDistanceRejects    = 0;
-int g_gateSizingRejects      = 0;
-int g_gateDrawdownRejects    = 0;
+bool   g_deployFailureSet=false;
+bool   g_deployFailureTemporary=false;
+uint   g_deployFailureRetcode=0;
+string g_deployFailureReason="";
+string g_deployFailureDescription="";
+string g_deployFailureBrokerComment="";
 
-// Confirmed via direct code reading of the reference file that H4/D1/W1
-// each produce a full S1/S2/R1/R2 via the same PickDirectionLevels-style
-// selection H1 uses, not just one support/resistance pair - originally
-// under-built at 10 levels (2 each for H4/D1/W1), reducing tradeable
-// levels by 37.5% versus the reference and directly cutting entry
-// frequency. H1: S1/S2/R1/R2 (0-3). H4: S1/S2/R1/R2 (4-7). D1: S1/S2/R1/R2
-// (8-11). W1: S1/S2/R1/R2 (12-15).
-LevelTouchState g_levels[16];
+int g_buyM3Score=0;
+int g_sellM3Score=0;
+datetime g_buyM3ConfirmTime=0;
+datetime g_sellM3ConfirmTime=0;
+double g_buyHighLine=0.0;
+double g_sellHighLine=0.0;
+datetime g_lastBuyReadyEntryTime=0;
+datetime g_lastSellReadyEntryTime=0;
 
-// All four level groups share one M5-close-driven rebuild gate: the
-// reference price they're all anchored to (last closed M5 close)
-// only changes on a new M5 bar, so that is the natural cadence to
-// re-evaluate "nearest close to reference" for every timeframe.
-datetime g_lastLevelRebuildM5Time = 0;
+double g_dayStartEquity=0.0;
+double g_dayTargetEquity=0.0;
+double g_dayLossFloor=0.0;
+bool g_dayTradingLocked=false;
+string g_dayLockReason="";
+int g_campaignDirection=0;
+int g_campaignSetups=0;
 
-bool   g_hasPreviousCMP = false;
-double g_previousCMP    = 0.0;
+// v1.016 reporting and profit-capture analytics.
+SetupAnalytics g_setupAnalytics[];
+datetime g_reportFromTime=0;
+bool g_reportWritten=false;
+ulong g_lastAnalyticsDeal=0;
+datetime g_lastStatsReportClock=0;
+string g_lastStatsSignature="";
 
-datetime g_histMarkerTimes[];
-double   g_histMarkerPrices[];
-bool     g_histMarkerWins[];
-int      g_histMarkerCount = 0;
-ulong    g_lastSeenDealTicket = 0;
-
-//======================================================================
-// Forward declarations
-//======================================================================
-int    OnInit();
-void   OnDeinit(const int reason);
-void   OnTick();
-
-string Upper(string s);
-bool   IsGold();
-bool   IsCentSuffixSymbol();
-bool   IsLiveXAUUSDscProtectionChart();
-double StrategyPipSize();
-double PresetSlDistance();
-double TrailDistance();
-double TrailActivationDistance();
-double RoundPrice(double v);
-string PriceText(double v);
-void   Log(string msg);
-
+bool HasUntriggeredPersistentReady(int direction);
+int CountWaitingReadyDirection(int direction);
+int CountTotalWaitingReady();
+double ReadyTouchCMP(MqlTick &tick);
+bool TradeRetcodeAccepted(uint code);
+bool TemporaryTradeRetcode(uint code);
+bool RetryWithoutSLRetcode(uint code);
+void ResetDeploymentFailure();
+void SetDeploymentFailure(string reason,
+                          uint retcode,
+                          string description,
+                          string brokerComment,
+                          bool temporary);
+string DeploymentFailureSummary();
+bool DeploymentRetryIntervalElapsed(PersistentReadySetup &setup);
+void MarkDeploymentAttempt(PersistentReadySetup &setup);
+void ClearPersistentTouchLatch(PersistentReadySetup &setup);
+bool HasWaitingZeroConfluenceSetup(int direction);
+bool ResolveDirectZeroConfTrigger(int direction,double observedLo,double observedHi,
+                                  double tolerance,string &triggerText,
+                                  double &triggerLo,double &triggerHi);
+bool DirectZeroConfRetryElapsed();
+bool SubmitDirectZeroConfMarket();
+void ProcessDirectZeroConfluenceTriggers();
+double BrokerSafeExecutionSL(int direction,double marketPrice,double requestedSL);
+double BrokerSafeExecutionTP(int direction,
+                             double entryPrice,
+                             double requestedTP);
+void CapturePersistentReadySignals();
+void ProcessPersistentSetups();
+void DrawPersistentReadyZones();
+void RefreshPersistentPositionProtection();
+void ManageHybridTrailingPositions(string context);
+int HybridTrailStateIndex(ulong ticket);
+int EnsureHybridTrailState(ulong ticket,int direction,double entry,double current,datetime positionTime,MqlTick &tick);
+double ReconstructTrailPeak(int direction,double entry,datetime positionTime,MqlTick &tick);
+double BrokerTrailMinimumDistance();
+double BrokerCompatibleTrailSL(int direction,double current,double virtualStop);
+bool ClosePositionAtVirtualTrail(ulong ticket,string context,double current,double stop,double peak);
+void PruneHybridTrailStates();
+void ResetDailyFrequencyCounter();
+bool PersistentQualityPass(PersistentReadySetup &setup,string &reason);
+bool DeployPersistentSetup(int index);
+bool DeployAggressiveArmSetup(int index);
+void DeletePersistentObjects(long id);
+void ResetCampaignDay(bool forceReset);
+void CheckCampaignDay();
+void CloseAllEzyExposure();
+void SupersedeWaitingZones(int direction,long incomingId);
+double RiskPctForSetup(int conf,double entryLo,double entryHi,double sl);
+int DesiredLayersForSetup(int conf,double entryLo,double entryHi,double sl);
+double TargetRRForSetup(double riskPct);
+double ConfidenceSetupLot(int conf);
+double RequestedSetupLot(int conf,int direction,double entryPrice,double structuralSL);
 double ResolveAccountUnitDivisor();
 double EffectiveAccountEquity();
-int    VolumeDigits();
-double NormalizeVolumeDown(double vol);
-double OneLotLoss(int direction,double entry,double sl);
-double ComputeLotsForRisk(int direction,double entry,double sl);
+double LotSizingCapitalUnits();
+double MinimumTradingEquity();
+double CapSetupVolumeForCentSafety(int direction,double entry,double sl,double requested);
+string ConfidenceClassText(int conf);
+double ConfidenceTakeProfitPips(int conf);
+double FixedPipTPForSetup(int direction,double entry,int conf);
 
-bool   TradeRetcodeAccepted(uint code);
-bool   TemporaryTradeRetcode(uint code);
+double LayerRRForSetup(int layerIndex,int totalLayers,double runnerRR);
+bool ParsePersistentComment(string comment,long &setupId,int &layerIndex,int &totalLayers);
+datetime CurrentM5OpenTime();
+int AnalyticsIndex(long id);
+int EnsureAnalytics(long id);
+void RegisterSetupAnalytics(PersistentReadySetup &setup);
+void RegisterDealAnalytics(ulong dealTicket);
+void UpdateSetupPeakAnalytics(long setupId);
+bool BuildJournalPerformanceSnapshot(JournalPerformanceSnapshot &snapshot);
+void ReportJournalPerformance(bool force,string reason);
+void WriteEzyMapBacktestReport();
 
-double ZeroStopsLevelFallbackPrice(double referencePrice,long stopsLevel,long freezeLevel);
-double MinimumStopDistance(double referencePrice);
-
-int    SpreadCalibrationTicksEffective();
-double MedianOfSpreadSamples(double &values[],int count);
-bool   SpreadAllowed();
-
-int    CountOpenPositions();
-int    CountOpenPositionsByDirection(int direction);
-
-int    CopyBufferSeries(int handle,int bufferIndex,int count,double &out[]);
-
-void   CloseAllPositions(string reason);
-void   UpdateDrawdownBreaker();
-
-bool   TryOpenPosition(int direction,string tag,double slDistance);
-
-double ReconstructPeakFromM1(int direction,double entry,double current,datetime positionTime);
-bool   CloseAtVirtualStop(ulong ticket,string context,double current,double stop,double peak);
-int    EnsureManagedSlot(ulong ticket);
-void   PruneManagedSlots();
-void   ModifyPositionSafely(ulong ticket,double sl,double tp);
-void   ManageTrailing();
-void   EnforceMaxHoldingTime();
-
-bool   FindNearestCloses(ENUM_TIMEFRAMES tf,int lookback,double reference,double minSeparation,
-                         bool wantSecondTier,
-                         double &s1,datetime &s1Time,double &s2,datetime &s2Time,
-                         double &r1,datetime &r1Time,double &r2,datetime &r2Time);
-double ZoneAtrWidth();
-double LevelToleranceFromAnchor(ENUM_TIMEFRAMES tf,datetime anchorTime,int fadeDirection);
-void   SetLevelSlot(int idx,double price,int fadeDirection,double tolerance,string tfLabel);
-void   RebuildLevelGroup(int slotBase,ENUM_TIMEFRAMES tf,int lookback,double minSeparationPips,string tfLabel);
-void   UpdateLevelsOnNewBars();
-bool   TryLevelEntry(int direction,double levelPrice);
-void   ProcessTouchTriggers();
-
-void   ApplyPremiumChartTheme();
-void   DrawTradeCard();
-void   DrawLiveTradeLevels();
-void   AddHistoricalMarker(bool win,datetime tm,double price);
-void   RemoveOldestHistoricalMarker();
-void   ClearHistoricalMarkers();
-void   CheckForClosedDeals();
-
-void   DrawLevels();
-void   DrawStatusLabel();
-int    CountActiveLevels();
-void   RemoveAllDrawings();
-
-void   WriteFinalReport();
-void   PeriodicStatusLog();
-
-//======================================================================
-// Event handlers
-//======================================================================
-int OnInit()
-{
-   if(!IsGold())
-   {
-      Log("EzyEA V4 is XAUUSD-only. Attach to a XAUUSD/XAUUSD.sc chart. Current symbol="+_Symbol);
-      return INIT_FAILED;
-   }
-
-   trade.SetExpertMagicNumber(InpMagicNumber);
-   trade.SetDeviationInPoints(InpDeviationPoints);
-
-   g_handleAtrM15 = iATR(_Symbol,PERIOD_M15,14);
-   if(g_handleAtrM15==INVALID_HANDLE)
-   {
-      Log("Indicator handle creation failed.");
-      return INIT_FAILED;
-   }
-
-   g_accountUnitDivisor = ResolveAccountUnitDivisor();
-
-   int capacity = SpreadCalibrationTicksEffective();
-   ArrayResize(g_spreadCalSamples,capacity);
-   g_spreadCalCount        = 0;
-   g_spreadCalEffectiveCap = -1.0;
-
-   g_lastStatusLogTime = 0;
-
-   ArrayResize(g_managed,0);
-
-   for(int i=0;i<ArraySize(g_levels);i++)
-   {
-      g_levels[i].price=0.0;
-      g_levels[i].tolerance=0.0;
-      g_levels[i].fadeDirection=0;
-      g_levels[i].inZone=false;
-      g_levels[i].consumed=false;
-      g_levels[i].nextRetryTime=0;
-      g_levels[i].tfLabel="";
-   }
-   g_lastLevelRebuildM5Time = 0;
-
-   g_hasPreviousCMP=false;
-   g_previousCMP=0.0;
-
-   g_peakEquity=AccountInfoDouble(ACCOUNT_EQUITY);
-   g_tradingHalted=false;
-
-   ArrayResize(g_histMarkerTimes,0);
-   ArrayResize(g_histMarkerPrices,0);
-   ArrayResize(g_histMarkerWins,0);
-   g_histMarkerCount=0;
-   g_lastSeenDealTicket=0;
-
-   ApplyPremiumChartTheme();
-
-   Log("EzyEA V4 initialized on "+_Symbol+
-       " | account unit divisor="+DoubleToString(g_accountUnitDivisor,2)+
-       " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
-       " | max concurrent="+IntegerToString(InpMaxConcurrentPositions)+" (no entry governors)"+
-       " | max holding="+IntegerToString(InpMaxHoldingMinutes)+" min"+
-       " | drawdown breaker="+(InpEnableDrawdownBreaker?DoubleToString(InpMaxEquityDrawdownPct,1)+"%":"OFF")+
-       " | preset="+DoubleToString(InpPresetStopLossPips,0)+"p trail="+DoubleToString(InpTrailingDistancePips,0)+"p"+
-       " | live parity="+(InpLiveXAUProtectionParity?"ON":"OFF")+
-       " | levels=H1/H4/D1/W1(4 each)="+IntegerToString(ArraySize(g_levels)));
-
-   return INIT_SUCCEEDED;
-}
-
-void OnDeinit(const int reason)
-{
-   WriteFinalReport();
-   if(g_handleAtrM15!=INVALID_HANDLE) IndicatorRelease(g_handleAtrM15);
-   RemoveAllDrawings();
-}
-
-void OnTick()
-{
-   UpdateDrawdownBreaker();
-
-   if(InpEnableLevelTouchEntries)
-   {
-      UpdateLevelsOnNewBars();
-      ProcessTouchTriggers();
-      DrawLevels();
-   }
-
-   ManageTrailing();
-   EnforceMaxHoldingTime();
-   CheckForClosedDeals();
-   DrawTradeCard();
-   DrawLiveTradeLevels();
-   PeriodicStatusLog();
-}
-
-//======================================================================
-// Small helpers
-//======================================================================
-string Upper(string s)
-{
-   StringToUpper(s);
-   return s;
-}
-
-bool IsGold()
-{
-   string s=Upper(_Symbol);
-   return (StringFind(s,"XAU")>=0 || StringFind(s,"GOLD")>=0);
-}
-
-bool IsCentSuffixSymbol()
-{
-   string s=Upper(_Symbol);
-   return (StringFind(s,".SC")>=0 || StringFind(s,"_SC")>=0 || StringFind(s,"CENT")>=0);
-}
-
-// True only outside the Strategy Tester, on a gold symbol carrying a
-// cent-style suffix - the live-parity trail-arming guards are inert
-// everywhere else (tester runs, non-XAU symbols, standard-suffix live
-// symbols).
-bool IsLiveXAUUSDscProtectionChart()
-{
-   if(!InpLiveXAUProtectionParity) return false;
-   if((bool)MQLInfoInteger(MQL_TESTER)) return false;
-   return IsGold() && IsCentSuffixSymbol();
-}
-
-double StrategyPipSize()
-{
-   if(IsCentSuffixSymbol())
-      return MathMax(InpXAUUSDscPipPrice,_Point);
-   return MathMax(InpStandardXAUUSDPipPrice,_Point);
-}
-
-double PresetSlDistance()
-{
-   return MathMax(0.1,InpPresetStopLossPips)*StrategyPipSize();
-}
-
-double TrailDistance()
-{
-   return MathMax(0.1,InpTrailingDistancePips)*StrategyPipSize();
-}
-
-double TrailActivationDistance()
-{
-   return MathMax(0.0,InpTrailActivationPips)*StrategyPipSize();
-}
-
+//----------------------------- Helpers ------------------------------
 double RoundPrice(double v)
 {
    int digits=(int)SymbolInfoInteger(_Symbol,SYMBOL_DIGITS);
@@ -619,14 +1022,12 @@ string PriceText(double v)
    return DoubleToString(v,digits);
 }
 
-void Log(string msg)
+string Upper(string s)
 {
-   Print("EzyEA V4 | ",msg);
+   StringToUpper(s);
+   return s;
 }
 
-//======================================================================
-// Cent-account / equity / sizing
-//======================================================================
 double ResolveAccountUnitDivisor()
 {
    if(InpAccountScaleMode==EZY_ACCOUNT_STANDARD)
@@ -637,18 +1038,27 @@ double ResolveAccountUnitDivisor()
    if(InpAccountScaleMode==EZY_ACCOUNT_CENT)
       return configured;
 
+   // AUTO mode: a normal Strategy Tester deposit must not be divided merely
+   // because the historical symbol name ends in .sc. This was the main cause
+   // of V2.009N producing zero lots and therefore no tester entries.
    if((bool)MQLInfoInteger(MQL_TESTER) && InpTesterAutoModeIsStandard)
       return 1.0;
 
    string currency=Upper(AccountInfoString(ACCOUNT_CURRENCY));
-   string server  =Upper(AccountInfoString(ACCOUNT_SERVER));
-   string company =Upper(AccountInfoString(ACCOUNT_COMPANY));
+   string server=Upper(AccountInfoString(ACCOUNT_SERVER));
+   string company=Upper(AccountInfoString(ACCOUNT_COMPANY));
+   string symbol=Upper(_Symbol);
 
-   bool centCurrency=(currency=="USC" || currency=="USCENT" || StringFind(currency,"CENT")>=0);
-   bool centBrand   =(StringFind(server,"CENT")>=0 || StringFind(company,"CENT")>=0);
-   bool centSuffix  =InpTreatSCSuffixAsCentOnLive && IsCentSuffixSymbol();
+   bool centCurrency=(currency=="USC" || currency=="USCENT" ||
+                      StringFind(currency,"CENT")>=0);
+   bool centBrand=(StringFind(server,"CENT")>=0 ||
+                   StringFind(company,"CENT")>=0);
+   bool centSuffix=InpTreatSCSuffixAsCentOnLive &&
+                   (StringFind(symbol,".SC")>=0 ||
+                    StringFind(symbol,"_SC")>=0 ||
+                    StringFind(symbol,"CENT")>=0);
 
-   return (centCurrency || centBrand || centSuffix) ? configured : 1.0;
+   return (centCurrency || centBrand || centSuffix)?configured:1.0;
 }
 
 double EffectiveAccountEquity()
@@ -656,117 +1066,179 @@ double EffectiveAccountEquity()
    return AccountInfoDouble(ACCOUNT_EQUITY)/MathMax(1.0,g_accountUnitDivisor);
 }
 
-int VolumeDigits()
+double LotSizingCapitalUnits()
 {
-   double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
-   if(step<=0.0) return 2;
+   double raw=InpUseBalanceForLotSizing
+              ? AccountInfoDouble(ACCOUNT_BALANCE)
+              : AccountInfoDouble(ACCOUNT_EQUITY);
 
-   int digits=0;
-   while(step<0.999999 && digits<8)
-   {
-      step*=10.0;
-      digits++;
-   }
-   return digits;
+   if(InpUseBrokerNativeDepositUnitsForLots)
+      return MathMax(0.0,raw);
+
+   return MathMax(0.0,raw/MathMax(1.0,g_accountUnitDivisor));
 }
 
-double NormalizeVolumeDown(double vol)
+bool IsLiveCentAccount()
 {
-   double minVol=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
-   double maxVol=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
-   double step  =SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
-
-   if(step<=0) step=minVol;
-   if(step<=0) return 0.0;
-   if(vol<minVol) return 0.0;
-
-   vol=MathMin(vol,maxVol);
-   double v=MathFloor((vol+1e-12)/step)*step;
-   if(v<minVol) return 0.0;
-
-   return NormalizeDouble(v,VolumeDigits());
+   return (!(bool)MQLInfoInteger(MQL_TESTER) &&
+           g_accountUnitDivisor>1.0);
 }
 
-double OneLotLoss(int direction,double entry,double sl)
+double MinimumTradingEquity()
 {
-   if(entry<=0 || sl<=0) return 0.0;
-   if(direction==1  && sl>=entry) return 0.0;
-   if(direction==-1 && sl<=entry) return 0.0;
+   if(g_accountUnitDivisor>1.0)
+      return MathMax(0.0,InpCentMinimumEffectiveEquity);
 
-   double profit=0.0;
-   ENUM_ORDER_TYPE type=(direction==1)?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
-   if(!OrderCalcProfit(type,_Symbol,1.0,entry,sl,profit))
-   {
-      Log("OrderCalcProfit failed. Error "+IntegerToString(GetLastError()));
-      return 0.0;
-   }
-
-   return MathAbs(profit);
+   return MathMax(0.0,InpMinimumAccountEquity);
 }
 
-double ComputeLotsForRisk(int direction,double entry,double sl)
+bool IsGold()
 {
-   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
-   // See InpScaleRiskByCentDivisor's declaration comment: this is a
-   // deliberate, confirmed choice to size a cent account's trades as if
-   // it had (divisor)x more real buying power than it actually does.
-   double sizingEquity=(InpScaleRiskByCentDivisor)
-                       ?equity*MathMax(1.0,g_accountUnitDivisor)
-                       :equity;
-   double riskBudget=sizingEquity*InpRiskPercentPerTrade/100.0;
-   if(riskBudget<=0.0) return 0.0;
+   string s=Upper(_Symbol);
+   return (StringFind(s,"XAU")>=0 || StringFind(s,"GOLD")>=0);
+}
 
-   double perLotLoss=OneLotLoss(direction,entry,sl);
-   if(perLotLoss<=0.0) return 0.0;
+bool IsBTC()
+{
+   string s=Upper(_Symbol);
+   return (StringFind(s,"BTC")>=0 || StringFind(s,"XBT")>=0);
+}
 
-   double lots=NormalizeVolumeDown(riskBudget/perLotLoss);
+double StrategyPipSize()
+{
+   if(IsGold()) return MathMax(0.10,_Point);
+   if(IsBTC())  return MathMax(1.0,_Point);
+   return _Point;
+}
 
-   if(lots<=0.0)
+int TfSeconds(ENUM_TIMEFRAMES tf)
+{
+   return PeriodSeconds(tf);
+}
+
+
+bool HasActivePersistentSignal()
+{
+   // V2.008 parallel mode:
+   // a waiting READY no longer freezes the entire M5 signal scanner.
+   // New confirmed M5 setups may continue to arm until queue caps are reached.
+   if(InpAllowParallelWaitingReady)
+      return false;
+
+   // Exact V2.003 behaviour when parallel mode is disabled.
+   for(int i=0;i<ArraySize(g_persistentSetups);i++)
    {
-      if(!InpAllowMinimumLotFallback) return 0.0;
+      if(!g_persistentSetups[i].active)
+         continue;
 
-      double minVol=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
-      if(minVol<=0.0) return 0.0;
-
-      double minVolRiskPct=(equity>0.0)?(minVol*perLotLoss/equity)*100.0:1.0e9;
-      if(minVolRiskPct>InpMinimumLotFallbackMaxRiskPct) return 0.0;
-
-      lots=minVol;
+      if(!g_persistentSetups[i].deployed)
+         return true;
    }
 
-   lots=MathMin(lots,InpMaxLotsAbsolute);
+   return false;
+}
 
-   double marginRequired=0.0;
-   ENUM_ORDER_TYPE type=(direction==1)?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
-   if(OrderCalcMargin(type,_Symbol,lots,entry,marginRequired))
+
+double ReadyTouchCMP(MqlTick &tick)
+{
+   if(!InpUseChartPriceForReadyTouch)
+      return tick.bid;
+
+   long chartMode=SymbolInfoInteger(_Symbol,SYMBOL_CHART_MODE);
+
+   if(chartMode==SYMBOL_CHART_MODE_LAST && tick.last>0.0)
+      return tick.last;
+
+   // Most OTC/CFD charts use Bid mode.
+   return tick.bid;
+}
+
+void BuildZeroConfluenceTouchEnvelope(MqlTick &tick,
+                                      double cmp,
+                                      bool hasPreviousCMP,
+                                      double previousCMP,
+                                      double &observedLo,
+                                      double &observedHi)
+{
+   observedLo=cmp;
+   observedHi=cmp;
+
+   if(InpZeroConfUseBidAskEnvelope)
    {
-      // Portfolio-level: usedMargin already reflects every other open
-      // position, so the cap applies to usedMargin+this trade together,
-      // not just this trade in isolation.
-      double usedMargin=AccountInfoDouble(ACCOUNT_MARGIN);
-      double projectedMarginPct=(equity>0.0)
-                                ?((usedMargin+marginRequired)/equity)*100.0
-                                :DBL_MAX;
-
-      if(projectedMarginPct>InpMaxMarginUsePct)
+      if(tick.bid>0.0)
       {
-         double remainingBudget=MathMax(0.0,InpMaxMarginUsePct/100.0*equity-usedMargin);
-         lots=(remainingBudget<=0.0 || marginRequired<=0.0)
-              ?0.0
-              :NormalizeVolumeDown(lots*(remainingBudget/marginRequired));
+         observedLo=MathMin(observedLo,tick.bid);
+         observedHi=MathMax(observedHi,tick.bid);
       }
 
-      double freeMargin=AccountInfoDouble(ACCOUNT_MARGIN_FREE);
-      if(marginRequired>freeMargin)
-         lots=0.0;
+      if(tick.ask>0.0)
+      {
+         observedLo=MathMin(observedLo,tick.ask);
+         observedHi=MathMax(observedHi,tick.ask);
+      }
+
+      if(tick.last>0.0)
+      {
+         observedLo=MathMin(observedLo,tick.last);
+         observedHi=MathMax(observedHi,tick.last);
+      }
    }
 
-   return NormalizeVolumeDown(lots);
+   if(InpZeroConfUseTickPathCrossing &&
+      hasPreviousCMP &&
+      previousCMP>0.0)
+   {
+      observedLo=MathMin(observedLo,previousCMP);
+      observedHi=MathMax(observedHi,previousCMP);
+   }
 }
 
-//======================================================================
-// Retcode classification (includes TRADE_RETCODE_MARKET_CLOSED)
-//======================================================================
+bool SensitiveEnvelopeTouchesZone(double observedLo,
+                                  double observedHi,
+                                  double zoneLo,
+                                  double zoneHi,
+                                  double tolerance)
+{
+   double lo=MathMin(zoneLo,zoneHi);
+   double hi=MathMax(zoneLo,zoneHi);
+
+   if(lo<=0.0 || hi<=0.0 || hi<lo)
+      return false;
+
+   return observedHi>=lo-tolerance &&
+          observedLo<=hi+tolerance;
+}
+
+bool SensitiveEnvelopeTouchesLevel(double observedLo,
+                                   double observedHi,
+                                   double level,
+                                   double tolerance)
+{
+   if(level<=0.0)
+      return false;
+
+   return observedHi>=level-tolerance &&
+          observedLo<=level+tolerance;
+}
+
+string PersistentTouchTriggerText(PersistentReadySetup &setup)
+{
+   if(setup.s1r1TouchLatched)
+      return setup.direction==1
+             ? "ZERO-CONF S1"
+             : "ZERO-CONF R1";
+
+   if(setup.s2r2TouchLatched)
+      return setup.direction==1
+             ? "ZERO-CONF S2"
+             : "ZERO-CONF R2";
+
+   if(setup.highRiskTouchLatched)
+      return "ZERO-CONF HIGH RISK";
+
+   return "READY";
+}
+
 bool TradeRetcodeAccepted(uint code)
 {
    return (code==TRADE_RETCODE_DONE ||
@@ -786,564 +1258,532 @@ bool TemporaryTradeRetcode(uint code)
            code==TRADE_RETCODE_TOO_MANY_REQUESTS ||
            code==TRADE_RETCODE_LOCKED ||
            code==TRADE_RETCODE_FROZEN ||
-           code==TRADE_RETCODE_CONNECTION ||
-           code==TRADE_RETCODE_MARKET_CLOSED);
+           code==TRADE_RETCODE_CONNECTION);
 }
 
-//======================================================================
-// Broker minimum distance (zero-stops-level fallback)
-//======================================================================
-double ZeroStopsLevelFallbackPrice(double referencePrice,long stopsLevel,long freezeLevel)
+bool RetryWithoutSLRetcode(uint code)
 {
-   if(stopsLevel>0 || freezeLevel>0 || referencePrice<=0.0)
-      return 0.0;
-   return referencePrice*MathMax(0.0,InpZeroStopsLevelFallbackPct)/100.0;
+   return (code==TRADE_RETCODE_INVALID_STOPS ||
+           code==TRADE_RETCODE_REJECT);
 }
 
-double MinimumStopDistance(double referencePrice)
+void ResetDeploymentFailure()
 {
-   long stopsLevel =SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
-   long freezeLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL);
-
-   double base=MathMax(_Point,
-               ((double)MathMax(stopsLevel,freezeLevel)+InpExecutionStopCushionPoints)*_Point);
-
-   return base+ZeroStopsLevelFallbackPrice(referencePrice,stopsLevel,freezeLevel);
+   g_deployFailureSet=false;
+   g_deployFailureTemporary=false;
+   g_deployFailureRetcode=0;
+   g_deployFailureReason="";
+   g_deployFailureDescription="";
+   g_deployFailureBrokerComment="";
 }
 
-//======================================================================
-// Spread guard (auto-calibrating: median * multiplier, optional ceiling)
-//======================================================================
-int SpreadCalibrationTicksEffective()
+void SetDeploymentFailure(string reason,
+                          uint retcode,
+                          string description,
+                          string brokerComment,
+                          bool temporary)
 {
-   return (int)MathMax(20,MathMin(2000,InpSpreadCalibrationTicks));
+   g_deployFailureSet=true;
+   g_deployFailureTemporary=temporary;
+   g_deployFailureRetcode=retcode;
+   g_deployFailureReason=reason;
+   g_deployFailureDescription=description;
+   g_deployFailureBrokerComment=brokerComment;
 }
 
-double MedianOfSpreadSamples(double &values[],int count)
+string DeploymentFailureSummary()
 {
-   if(count<=0) return 0.0;
+   string summary="reason="+
+                  (g_deployFailureReason==""
+                   ? "unspecified deployment failure"
+                   : g_deployFailureReason);
 
-   double copy[];
-   ArrayResize(copy,count);
-   for(int i=0;i<count;i++) copy[i]=values[i];
-   ArraySort(copy);
+   if(g_deployFailureRetcode>0)
+   {
+      summary+=" | retcode="+
+               IntegerToString((int)g_deployFailureRetcode);
 
-   if(count%2==1) return copy[count/2];
-   return 0.5*(copy[count/2-1]+copy[count/2]);
+      if(g_deployFailureDescription!="")
+         summary+=" | description="+g_deployFailureDescription;
+
+      if(g_deployFailureBrokerComment!="")
+         summary+=" | broker comment="+
+                  g_deployFailureBrokerComment;
+   }
+
+   return summary;
 }
 
-bool SpreadAllowed()
+bool DeploymentRetryIntervalElapsed(PersistentReadySetup &setup)
 {
+   if(setup.lastDeployAttemptClock<=0)
+      return true;
+
+   datetime nowClock=TimeCurrent();
+
+   if(nowClock>setup.lastDeployAttemptClock)
+      return true;
+
+   ulong nowMs=GetTickCount64();
+
+   if(nowMs<setup.lastDeployAttemptTickMs)
+      return true;
+
+   return (nowMs-setup.lastDeployAttemptTickMs >=
+           (ulong)MathMax(0,InpDeploymentRetryIntervalMs));
+}
+
+void MarkDeploymentAttempt(PersistentReadySetup &setup)
+{
+   setup.lastDeployAttemptClock=TimeCurrent();
+   setup.lastDeployAttemptTickMs=GetTickCount64();
+}
+
+void ClearPersistentTouchLatch(PersistentReadySetup &setup)
+{
+   setup.touchLatched=false;
+   setup.highRiskTouchLatched=false;
+   setup.s1r1TouchLatched=false;
+   setup.s2r2TouchLatched=false;
+   setup.touchClock=0;
+}
+
+bool HasWaitingZeroConfluenceSetup(int direction)
+{
+   for(int i=0;i<ArraySize(g_persistentSetups);i++)
+   {
+      if(!g_persistentSetups[i].active ||
+         g_persistentSetups[i].deployed ||
+         g_persistentSetups[i].triggered)
+         continue;
+
+      if(g_persistentSetups[i].direction==direction &&
+         g_persistentSetups[i].zeroConfluenceFallback)
+         return true;
+   }
+   return false;
+}
+
+bool ResolveDirectZeroConfTrigger(int direction,double observedLo,double observedHi,
+                                  double tolerance,string &triggerText,
+                                  double &triggerLo,double &triggerHi)
+{
+   triggerText="";
+   triggerLo=0.0;
+   triggerHi=0.0;
+
+   if(direction==1 && g_buyReady.armed &&
+      SensitiveEnvelopeTouchesZone(observedLo,observedHi,
+                                   g_buyReady.entryLo,g_buyReady.entryHi,tolerance))
+   {
+      triggerText="DIRECT ZERO-CONF READY";
+      triggerLo=g_buyReady.entryLo;
+      triggerHi=g_buyReady.entryHi;
+      return true;
+   }
+
+   if(direction==-1 && g_sellReady.armed &&
+      SensitiveEnvelopeTouchesZone(observedLo,observedHi,
+                                   g_sellReady.entryLo,g_sellReady.entryHi,tolerance))
+   {
+      triggerText="DIRECT ZERO-CONF READY";
+      triggerLo=g_sellReady.entryLo;
+      triggerHi=g_sellReady.entryHi;
+      return true;
+   }
+
+   double level1=(direction==1)?g_S1:g_R1;
+   double level2=(direction==1)?g_S2:g_R2;
+
+   if(SensitiveEnvelopeTouchesLevel(observedLo,observedHi,level1,tolerance))
+   {
+      triggerText=(direction==1)?"DIRECT ZERO-CONF S1":"DIRECT ZERO-CONF R1";
+      triggerLo=level1;
+      triggerHi=level1;
+      return true;
+   }
+
+   if(SensitiveEnvelopeTouchesLevel(observedLo,observedHi,level2,tolerance))
+   {
+      triggerText=(direction==1)?"DIRECT ZERO-CONF S2":"DIRECT ZERO-CONF R2";
+      triggerLo=level2;
+      triggerHi=level2;
+      return true;
+   }
+
+   if(direction==1 && g_buyHigh.valid &&
+      SensitiveEnvelopeTouchesZone(observedLo,observedHi,
+                                   g_buyHigh.lo,g_buyHigh.hi,tolerance))
+   {
+      triggerText="DIRECT ZERO-CONF HIGH RISK";
+      triggerLo=g_buyHigh.lo;
+      triggerHi=g_buyHigh.hi;
+      return true;
+   }
+
+   if(direction==-1 && g_sellHigh.valid &&
+      SensitiveEnvelopeTouchesZone(observedLo,observedHi,
+                                   g_sellHigh.lo,g_sellHigh.hi,tolerance))
+   {
+      triggerText="DIRECT ZERO-CONF HIGH RISK";
+      triggerLo=g_sellHigh.lo;
+      triggerHi=g_sellHigh.hi;
+      return true;
+   }
+
+   return false;
+}
+
+bool DirectZeroConfRetryElapsed()
+{
+   if(g_directZeroConf.lastAttemptClock<=0)
+      return true;
+
+   if(TimeCurrent()>g_directZeroConf.lastAttemptClock)
+      return true;
+
+   ulong nowMs=GetTickCount64();
+   if(nowMs<g_directZeroConf.lastAttemptTickMs)
+      return true;
+
+   return (nowMs-g_directZeroConf.lastAttemptTickMs >=
+           (ulong)MathMax(0,InpDeploymentRetryIntervalMs));
+}
+
+bool SubmitDirectZeroConfMarket()
+{
+   if(!g_directZeroConf.active || !DirectZeroConfRetryElapsed())
+      return false;
+
+   g_directZeroConf.lastAttemptClock=TimeCurrent();
+   g_directZeroConf.lastAttemptTickMs=GetTickCount64();
+   g_directZeroConf.attempts++;
+
+   int direction=g_directZeroConf.direction;
+
+   if(!DirectionalLayerSlotAvailable(direction,g_directZeroConf.triggerText))
+   {
+      Log("DIRECT ZERO-CONF MARKET RETRY | trigger="+g_directZeroConf.triggerText+
+          " | direction="+string(direction==1?"BUY":"SELL")+
+          " | attempt="+IntegerToString(g_directZeroConf.attempts)+
+          " | reason=directional 13-layer ceiling reached");
+      return false;
+   }
+
+   string envReason="";
+   if(!TradingEnvironmentReady(envReason))
+   {
+      Log("DIRECT ZERO-CONF MARKET RETRY | trigger="+g_directZeroConf.triggerText+
+          " | direction="+string(direction==1?"BUY":"SELL")+
+          " | attempt="+IntegerToString(g_directZeroConf.attempts)+
+          " | reason="+envReason);
+      return false;
+   }
+
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol,tick))
       return false;
 
-   double spread=(tick.ask-tick.bid)/_Point;
-
-   if(!InpAutoCalibrateSpreadCap)
-   {
-      if(InpMaxSpreadPoints<=0) return true;
-      return (spread<=InpMaxSpreadPoints);
-   }
-
-   if(g_spreadCalEffectiveCap>=0.0)
-      return (spread<=g_spreadCalEffectiveCap);
-
-   int required=SpreadCalibrationTicksEffective();
-
-   if(g_spreadCalCount<ArraySize(g_spreadCalSamples))
-   {
-      g_spreadCalSamples[g_spreadCalCount]=spread;
-      g_spreadCalCount++;
-   }
-
-   if(g_spreadCalCount>=required)
-   {
-      double median=MedianOfSpreadSamples(g_spreadCalSamples,g_spreadCalCount);
-      double mult  =MathMax(1.0,InpSpreadCalibrationMultiplier);
-      double effective=median*mult;
-
-      if(InpMaxSpreadPoints>0)
-         effective=MathMin(effective,(double)InpMaxSpreadPoints);
-
-      g_spreadCalEffectiveCap=MathMax(1.0,effective);
-
-      Log("SPREAD AUTO-CALIBRATION COMPLETE"+
-          " | samples="+IntegerToString(g_spreadCalCount)+
-          " | median="+DoubleToString(median,1)+" pts"+
-          " | multiplier="+DoubleToString(mult,2)+
-          " | effective cap="+DoubleToString(g_spreadCalEffectiveCap,1)+" pts");
-   }
-
-   return true; // fail open while calibrating
-}
-
-//======================================================================
-// Position accounting
-//======================================================================
-int CountOpenPositions()
-{
-   int count=0;
-   for(int i=PositionsTotal()-1;i>=0;i--)
-   {
-      ulong ticket=PositionGetTicket(i);
-      if(ticket==0) continue;
-      if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
-      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
-      count++;
-   }
-   return count;
-}
-
-int CountOpenPositionsByDirection(int direction)
-{
-   int count=0;
-   for(int i=PositionsTotal()-1;i>=0;i--)
-   {
-      ulong ticket=PositionGetTicket(i);
-      if(ticket==0) continue;
-      if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
-      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
-
-      int posDirection=((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)?1:-1;
-      if(posDirection==direction) count++;
-   }
-   return count;
-}
-
-//======================================================================
-// Indicator buffer helper (as-series: out[0]=forming/live bar, out[1]=
-// last closed bar, out[2]=the bar before it)
-//======================================================================
-int CopyBufferSeries(int handle,int bufferIndex,int count,double &out[])
-{
-   ArraySetAsSeries(out,true);
-   int copied=CopyBuffer(handle,bufferIndex,0,count,out);
-   if(copied<=0) return 0;
-   return copied;
-}
-
-//======================================================================
-// Emergency stop: closes every position this EA opened. Used by the
-// overall drawdown breaker.
-//======================================================================
-void CloseAllPositions(string reason)
-{
-   for(int i=PositionsTotal()-1;i>=0;i--)
-   {
-      ulong ticket=PositionGetTicket(i);
-      if(ticket==0) continue;
-      if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
-      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
-
-      bool ok=trade.PositionClose(ticket);
-      uint retcode=trade.ResultRetcode();
-      if(!ok || !TradeRetcodeAccepted(retcode))
-         Log("EMERGENCY CLOSE FAILED ticket="+IntegerToString((int)ticket)+
-             " retcode="+IntegerToString(retcode)+" reason="+reason);
-   }
-}
-
-//======================================================================
-// Overall drawdown circuit breaker: peak equity seen since attach.
-// Closes everything and halts new entries the moment it trips; resumes
-// with hysteresis.
-//======================================================================
-void UpdateDrawdownBreaker()
-{
-   if(!InpEnableDrawdownBreaker)
-   {
-      g_tradingHalted=false;
-      return;
-   }
-
-   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
-   if(equity<=0.0) return;
-
-   g_peakEquity=MathMax(g_peakEquity,equity);
-   if(g_peakEquity<=0.0) return;
-
-   double drawdownPct=(g_peakEquity-equity)/g_peakEquity*100.0;
-   double resumeThreshold=InpMaxEquityDrawdownPct*MathMax(0.0,MathMin(1.0,InpDrawdownResumeFactor));
-
-   if(!g_tradingHalted && drawdownPct>=InpMaxEquityDrawdownPct)
-   {
-      g_tradingHalted=true;
-      Log("DRAWDOWN BREAKER TRIPPED - closing all positions and halting new entries"+
-          " | drawdown="+DoubleToString(drawdownPct,2)+"%"+
-          " | peakEquity="+DoubleToString(g_peakEquity,2)+
-          " | equity="+DoubleToString(equity,2));
-      CloseAllPositions("drawdown breaker");
-   }
-   else if(g_tradingHalted && drawdownPct<=resumeThreshold)
-   {
-      g_tradingHalted=false;
-      Log("DRAWDOWN BREAKER RESET - new entries resumed"+
-          " | drawdown="+DoubleToString(drawdownPct,2)+"%"+
-          " | resumeThreshold="+DoubleToString(resumeThreshold,2)+"%");
-   }
-}
-
-//======================================================================
-// Entry execution (shared by all level triggers). No entry governors:
-// no trend filter, no per-direction cap - matching the reference
-// file's "NO_ENTRY_GOVERNORS" naming, confirmed via code reading that
-// its own directional-losing-cap/M5-closed-loss-cap/daily-risk-lock/
-// layer-cap machinery is disabled both by input default AND by not
-// being wired into its live entry path. The drawdown breaker below is
-// a basic safety backstop, not an entry governor - it doesn't limit
-// which signals fire, only caps worst-case tail risk.
-//======================================================================
-// Returns true only on an ACTUAL successful fill - callers use this to
-// decide whether a touched level is genuinely "consumed" (state-based
-// re-entry) or should keep retrying on the next tick while still
-// touching. A rejection for any reason (spread, sizing, distance,
-// broker) must NOT permanently consume the touch the way an unconditional
-// consumed=true would - that was found to silently drop a level for the
-// rest of its zone visit after a single transient rejection.
-bool TryOpenPosition(int direction,string tag,double slDistance)
-{
-   g_gateAttempts++;
-
-   if(g_tradingHalted)
-   {
-      g_gateDrawdownRejects++;
-      return false;
-   }
-
-   if(CountOpenPositions()>=InpMaxConcurrentPositions)
-   {
-      g_gateConcurrencyRejects++;
-      return false;
-   }
-
-   if(!SpreadAllowed())
-   {
-      g_gateSpreadRejects++;
-      return false;
-   }
-
-   MqlTick tick;
-   if(!SymbolInfoTick(_Symbol,tick)) return false;
-
    double entry=(direction==1)?tick.ask:tick.bid;
-   double sl=RoundPrice((direction==1)?entry-slDistance:entry+slDistance);
+   double exactDistance=MathMax(0.1,InpPresetStopLossPips)*StrategyPipSize();
+   double exactSL=RoundPrice(direction==1?entry-exactDistance:entry+exactDistance);
+   double brokerSL=BrokerSafeExecutionSL(direction,entry,exactSL);
 
-   double minDist=MinimumStopDistance(entry);
-   if(MathAbs(entry-sl)<minDist)
+   double requested=RequestedSetupLot(0,direction,entry,brokerSL);
+   double volume=CapSetupVolumeForCentSafety(direction,entry,brokerSL,requested);
+   double minVolume=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+
+   if(volume<minVolume-1e-12)
    {
-      g_gateDistanceRejects++;
-      Log("ENTRY REJECTED "+tag+" reason=SL_DISTANCE_TOO_TIGHT"+
-          " slDistance="+PriceText(slDistance)+
-          " minDist="+PriceText(minDist));
+      Log("DIRECT ZERO-CONF MARKET RETRY | trigger="+g_directZeroConf.triggerText+
+          " | direction="+string(direction==1?"BUY":"SELL")+
+          " | attempt="+IntegerToString(g_directZeroConf.attempts)+
+          " | reason=STANDARD volume below broker/safety minimum"+
+          " | requested="+DoubleToString(requested,VolumeDigits())+
+          " | safe="+DoubleToString(volume,VolumeDigits())+
+          " | minimum="+DoubleToString(minVolume,VolumeDigits()));
       return false;
    }
 
-   double lots=ComputeLotsForRisk(direction,entry,sl);
-   if(lots<=0.0)
-   {
-      g_gateSizingRejects++;
-      Log("ENTRY REJECTED "+tag+" reason=ZERO_LOTS"+
-          " riskEquity="+DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2)+
-          " entry="+PriceText(entry)+" sl="+PriceText(sl)+
-          " perLotLoss="+DoubleToString(OneLotLoss(direction,entry,sl),2));
-      return false;
-   }
+   string comment=PREFIX+"DIRECT_ZC_"+string(direction==1?"BUY_":"SELL_")+
+                  IntegerToString(g_directZeroConf.attempts);
 
    bool sent=(direction==1)
-             ? trade.Buy(lots,_Symbol,0.0,sl,0.0,tag)
-             : trade.Sell(lots,_Symbol,0.0,sl,0.0,tag);
+             ? trade.Buy(volume,_Symbol,0.0,brokerSL,0.0,comment)
+             : trade.Sell(volume,_Symbol,0.0,brokerSL,0.0,comment);
 
    uint retcode=trade.ResultRetcode();
+   bool accepted=(sent && TradeRetcodeAccepted(retcode));
+   bool openedWithoutSL=false;
 
-   if(sent && TradeRetcodeAccepted(retcode))
+   if(!accepted && InpRetryEntryWithoutSLOnReject && RetryWithoutSLRetcode(retcode))
    {
-      g_gateAccepted++;
-      Log("ENTRY "+tag+" dir="+IntegerToString(direction)+
-          " lots="+DoubleToString(lots,2)+
-          " entry="+PriceText(entry)+
-          " sl="+PriceText(sl));
-      return true;
+      sent=(direction==1)
+           ? trade.Buy(volume,_Symbol,0.0,0.0,0.0,comment)
+           : trade.Sell(volume,_Symbol,0.0,0.0,0.0,comment);
+      retcode=trade.ResultRetcode();
+      accepted=(sent && TradeRetcodeAccepted(retcode));
+      openedWithoutSL=accepted;
    }
 
-   g_gateRejected++;
-   Log("ENTRY REJECTED "+tag+" retcode="+IntegerToString(retcode)+
-       " desc="+trade.ResultRetcodeDescription());
-   return false;
-}
-
-//======================================================================
-// Level system: replicates the EzyMap Scalp Mastery V3.184 reference's
-// entry-trigger logic. Levels are always the nearest historical bar
-// CLOSE (never a swing-pivot high/low) relative to a shared reference
-// price (the last closed M5 bar's close) - all four groups (H1, H4,
-// D1, W1) get the full S1/S2/R1/R2 tiers, confirmed via direct code
-// reading that H4/D1/W1 use the identical selection rule H1 does, not
-// a single support/resistance pair. All four groups rebuild together
-// on every new M5 bar close, since that is what moves the reference
-// price they are all anchored to.
-//======================================================================
-bool FindNearestCloses(ENUM_TIMEFRAMES tf,int lookback,double reference,double minSeparation,
-                       bool wantSecondTier,
-                       double &s1,datetime &s1Time,double &s2,datetime &s2Time,
-                       double &r1,datetime &r1Time,double &r2,datetime &r2Time)
-{
-   s1=0.0; s2=0.0; r1=0.0; r2=0.0;
-   s1Time=0; s2Time=0; r1Time=0; r2Time=0;
-
-   bool foundS1=false, foundR1=false;
-
-   for(int shift=1;shift<=lookback;shift++)
+   if(!accepted)
    {
-      double c=iClose(_Symbol,tf,shift);
-      if(c<=0.0) continue;
-      datetime t=iTime(_Symbol,tf,shift);
-
-      if(c<=reference && (!foundS1 || c>s1))
-      {
-         s1=c; s1Time=t; foundS1=true;
-      }
-      if(c>=reference && (!foundR1 || c<r1))
-      {
-         r1=c; r1Time=t; foundR1=true;
-      }
+      Log("DIRECT ZERO-CONF MARKET RETRY | trigger="+g_directZeroConf.triggerText+
+          " | direction="+string(direction==1?"BUY":"SELL")+
+          " | attempt="+IntegerToString(g_directZeroConf.attempts)+
+          " | retcode="+IntegerToString((int)retcode)+
+          " | description="+trade.ResultRetcodeDescription()+
+          " | broker comment="+trade.ResultComment()+
+          " | retry remains latched=YES");
+      return false;
    }
 
-   if(!foundS1 && !foundR1) return false;
+   g_dailyLayerOrders++;
 
-   if(wantSecondTier)
-   {
-      bool foundS2=false, foundR2=false;
-      double s1Floor=foundS1?(s1-minSeparation):-DBL_MAX;
-      double r1Ceil =foundR1?(r1+minSeparation):DBL_MAX;
+   Log("DIRECT ZERO-CONF MARKET EXECUTED | trigger="+g_directZeroConf.triggerText+
+       " | direction="+string(direction==1?"BUY":"SELL")+
+       " | volume="+DoubleToString(volume,VolumeDigits())+
+       " | attempts="+IntegerToString(g_directZeroConf.attempts)+
+       " | SL30="+string(openedWithoutSL?"virtual/broker install pending":
+                         DoubleToString(brokerSL,_Digits))+
+       " | TP=NONE | trail10=ACTIVE");
 
-      for(int shift=1;shift<=lookback;shift++)
-      {
-         double c=iClose(_Symbol,tf,shift);
-         if(c<=0.0) continue;
-         datetime t=iTime(_Symbol,tf,shift);
-
-         if(foundS1 && c<=s1Floor && (!foundS2 || c>s2))
-         {
-            s2=c; s2Time=t; foundS2=true;
-         }
-         if(foundR1 && c>=r1Ceil && (!foundR2 || c<r2))
-         {
-            r2=c; r2Time=t; foundR2=true;
-         }
-      }
-   }
-
+   g_directZeroConf.active=false;
+   if(direction==1) g_directZeroConf.buyTouchConsumed=true;
+   else g_directZeroConf.sellTouchConsumed=true;
    return true;
 }
 
-// Zone precision (explicit request): the touch tolerance around a
-// level is derived from that level's own anchor bar's close-to-high
-// (resistance/SELL) or close-to-low (support/BUY) distance, not the
-// full candle high-low range - a wick can be a brief spike; the close
-// is where price actually settled. Floored at
-// InpLevelTouchToleranceMinPips (pip-based, matches the reference's
-// actual ~9-pip touch tolerance) so a near-zero-wick bar still gets a
-// usable zone, and so a genuinely small-wicked anchor doesn't produce
-// a far tighter zone than the reference ever used.
-// Approximates the reference's M15-average-range/ATR-derived High-Risk/
-// Low-Risk zone widening (up to InpMaximumZoneRangeATR) using a plain
-// M15 ATR(14) read - the actual reference formula also blends in a
-// 40-bar M15 average range, caps against the distance to the nearest
-// neighbouring level, and skews asymmetrically toward the fade side;
-// this is a deliberately simpler symmetric approximation of the same
-// underlying idea (wider zones on real recent volatility, not a flat
-// number) rather than that full formula.
-double ZoneAtrWidth()
+void ProcessDirectZeroConfluenceTriggers()
 {
-   double atrBuf[];
-   if(CopyBufferSeries(g_handleAtrM15,0,2,atrBuf)<2) return 0.0;
-   return MathMax(0.0,atrBuf[1])*MathMax(0.0,InpZoneAtrMultiplier);
-}
-
-double LevelToleranceFromAnchor(ENUM_TIMEFRAMES tf,datetime anchorTime,int fadeDirection)
-{
-   double floorTol=MathMax(0.0,InpLevelTouchToleranceMinPips)*StrategyPipSize();
-   double zoneWidth=ZoneAtrWidth();
-   double tol=MathMax(floorTol,zoneWidth);
-
-   if(anchorTime<=0) return tol;
-
-   int shift=iBarShift(_Symbol,tf,anchorTime,true);
-   if(shift<0) return tol;
-
-   double h=iHigh(_Symbol,tf,shift);
-   double l=iLow(_Symbol,tf,shift);
-   double c=iClose(_Symbol,tf,shift);
-   if(h<=0.0 || l<=0.0 || c<=0.0) return tol;
-
-   double dist=(fadeDirection==-1)?(h-c):(c-l);
-   return MathMax(tol,dist);
-}
-
-void SetLevelSlot(int idx,double price,int fadeDirection,double tolerance,string tfLabel)
-{
-   if(idx<0 || idx>=ArraySize(g_levels)) return;
-
-   if(price<=0.0)
-   {
-      g_levels[idx].price=0.0;
-      g_levels[idx].tolerance=0.0;
-      g_levels[idx].fadeDirection=0;
-      g_levels[idx].inZone=false;
-      g_levels[idx].consumed=false;
-      g_levels[idx].nextRetryTime=0;
-      g_levels[idx].tfLabel="";
+   if(!V3104_ZERO_CONF_DIRECT_MAP_FALLBACK)
       return;
-   }
-
-   g_levels[idx].price=RoundPrice(price);
-   g_levels[idx].fadeDirection=fadeDirection;
-   g_levels[idx].tolerance=tolerance;
-   g_levels[idx].tfLabel=tfLabel;
-   // inZone/consumed are deliberately NOT reset here - a rebuild that
-   // reproduces the same level shouldn't let a position that already
-   // fired re-fire immediately just because the slot was repopulated.
-}
-
-// Every group (H1 "current map" and the H4/D1/W1 "outer levels") uses
-// the identical selection rule confirmed via direct code reading of
-// the reference: nearest + next-nearest close each side of the shared
-// M5-close reference, at least minSeparationPips apart within lookback
-// bars. Originally H1 alone got the full S1/S2/R1/R2 treatment while
-// H4/D1/W1 only got a single S/R pair each - fixed so all four groups
-// get all four tiers, matching the reference's actual level count.
-void RebuildLevelGroup(int slotBase,ENUM_TIMEFRAMES tf,int lookback,double minSeparationPips,string tfLabel)
-{
-   double reference=iClose(_Symbol,PERIOD_M5,1);
-   if(reference<=0.0) return;
-
-   double minSep=MathMax(0.0,minSeparationPips)*StrategyPipSize();
-
-   double s1,s2,r1,r2;
-   datetime s1Time,s2Time,r1Time,r2Time;
-   if(!FindNearestCloses(tf,MathMax(1,lookback),reference,minSep,true,
-                          s1,s1Time,s2,s2Time,r1,r1Time,r2,r2Time))
-      return;
-
-   SetLevelSlot(slotBase,  s1,1, LevelToleranceFromAnchor(tf,s1Time,1), tfLabel+"-S1");
-   SetLevelSlot(slotBase+1,s2,1, LevelToleranceFromAnchor(tf,s2Time,1), tfLabel+"-S2");
-   SetLevelSlot(slotBase+2,r1,-1,LevelToleranceFromAnchor(tf,r1Time,-1),tfLabel+"-R1");
-   SetLevelSlot(slotBase+3,r2,-1,LevelToleranceFromAnchor(tf,r2Time,-1),tfLabel+"-R2");
-}
-
-void UpdateLevelsOnNewBars()
-{
-   if(!InpEnableLevelTouchEntries) return;
-
-   datetime m5=iTime(_Symbol,PERIOD_M5,0);
-   if(m5==0 || m5==g_lastLevelRebuildM5Time) return;
-   g_lastLevelRebuildM5Time=m5;
-
-   RebuildLevelGroup(0, PERIOD_H1,MathMax(1,InpDirectionHistory),InpH1MinSeparationPips,"H1");
-   RebuildLevelGroup(4, PERIOD_H4,InpH4LookbackBars,InpH4MinSeparationPips,"H4");
-   RebuildLevelGroup(8, PERIOD_D1,InpD1LookbackBars,InpD1MinSeparationPips,"D1");
-   RebuildLevelGroup(12,PERIOD_W1,InpW1LookbackBars,InpW1MinSeparationPips,"W1");
-}
-
-bool TryLevelEntry(int direction,double levelPrice)
-{
-   double slDistance=PresetSlDistance();
-   if(slDistance<=0.0) return false;
-
-   return TryOpenPosition(direction,"V4SND",slDistance);
-}
-
-//======================================================================
-// Touch trigger processing. Direction is by level type (support=BUY,
-// resistance=SELL), never by which side price approached from - touch
-// = immediate trade, no reclaim/confirmation required, matching the
-// reference exactly. Re-entry is STATE-based, not time-based: a level
-// fires once (consumed=true) and will not fire again while price stays
-// inside its touch zone; it only re-arms once price fully leaves the
-// zone (consumed resets to false the moment it's observed out-of-zone).
-//======================================================================
-void ProcessTouchTriggers()
-{
-   if(!InpEnableLevelTouchEntries) return;
 
    MqlTick tick;
-   if(!SymbolInfoTick(_Symbol,tick)) return;
+   if(!SymbolInfoTick(_Symbol,tick))
+      return;
 
-   double cmp=(tick.bid>0.0)?tick.bid:tick.last;
-   if(cmp<=0.0) return;
+   double cmp=ReadyTouchCMP(tick);
+   if(cmp<=0.0)
+      return;
 
-   double observedLo=cmp, observedHi=cmp;
-   if(tick.bid>0.0)
+   double observedLo=cmp,observedHi=cmp;
+   BuildZeroConfluenceTouchEnvelope(tick,cmp,
+                                    g_directZeroConfHasPreviousCMP,
+                                    g_directZeroConfPreviousCMP,
+                                    observedLo,observedHi);
+   g_directZeroConfPreviousCMP=cmp;
+   g_directZeroConfHasPreviousCMP=true;
+
+   double tolerance=MathMax(MathMax(0.0,InpEntryTouchTolerancePips),
+                            MathMax(0.0,InpZeroConfTouchTolerancePips))*g_pipSize;
+
+   string buyTrigger="",sellTrigger="";
+   double buyLo=0.0,buyHi=0.0,sellLo=0.0,sellHi=0.0;
+
+   bool buyTouched=ResolveDirectZeroConfTrigger(1,observedLo,observedHi,tolerance,
+                                               buyTrigger,buyLo,buyHi);
+   bool sellTouched=ResolveDirectZeroConfTrigger(-1,observedLo,observedHi,tolerance,
+                                                sellTrigger,sellLo,sellHi);
+
+   if(!buyTouched && !g_directZeroConf.active)
+      g_directZeroConf.buyTouchConsumed=false;
+   if(!sellTouched && !g_directZeroConf.active)
+      g_directZeroConf.sellTouchConsumed=false;
+
+   if(HasWaitingZeroConfluenceSetup(1)) buyTouched=false;
+   if(HasWaitingZeroConfluenceSetup(-1)) sellTouched=false;
+
+   if(!g_directZeroConf.active)
    {
-      observedLo=MathMin(observedLo,tick.bid);
-      observedHi=MathMax(observedHi,tick.bid);
-   }
-   if(tick.ask>0.0)
-   {
-      observedLo=MathMin(observedLo,tick.ask);
-      observedHi=MathMax(observedHi,tick.ask);
-   }
-   if(g_hasPreviousCMP && g_previousCMP>0.0)
-   {
-      observedLo=MathMin(observedLo,g_previousCMP);
-      observedHi=MathMax(observedHi,g_previousCMP);
-   }
+      int runningPositions=CountOurPositions();
 
-   for(int i=0;i<ArraySize(g_levels);i++)
-   {
-      if(g_levels[i].price<=0.0) continue;
-
-      double tolerance=(g_levels[i].tolerance>0.0)
-                       ?g_levels[i].tolerance
-                       :MathMax(0.0,InpLevelTouchToleranceMinPips)*StrategyPipSize();
-
-      bool touching=(observedHi>=g_levels[i].price-tolerance &&
-                     observedLo<=g_levels[i].price+tolerance);
-
-      if(!touching)
+      if(runningPositions<=V3104_ZERO_CONF_MAX_OPEN_POSITIONS)
       {
-         g_levels[i].inZone=false;
-         g_levels[i].consumed=false;
-         g_levels[i].nextRetryTime=0;
-         continue;
+         bool chooseBuy=buyTouched && !g_directZeroConf.buyTouchConsumed;
+         bool chooseSell=sellTouched && !g_directZeroConf.sellTouchConsumed;
+         int chosenDirection=0;
+         string chosenTrigger="";
+         double chosenLo=0.0,chosenHi=0.0;
+
+         if(chooseBuy && chooseSell)
+         {
+            double buyCentre=(buyLo+buyHi)*0.5;
+            double sellCentre=(sellLo+sellHi)*0.5;
+            if(MathAbs(cmp-buyCentre)<=MathAbs(cmp-sellCentre))
+            {
+               chosenDirection=1; chosenTrigger=buyTrigger;
+               chosenLo=buyLo; chosenHi=buyHi;
+            }
+            else
+            {
+               chosenDirection=-1; chosenTrigger=sellTrigger;
+               chosenLo=sellLo; chosenHi=sellHi;
+            }
+         }
+         else if(chooseBuy)
+         {
+            chosenDirection=1; chosenTrigger=buyTrigger;
+            chosenLo=buyLo; chosenHi=buyHi;
+         }
+         else if(chooseSell)
+         {
+            chosenDirection=-1; chosenTrigger=sellTrigger;
+            chosenLo=sellLo; chosenHi=sellHi;
+         }
+
+         if(chosenDirection!=0)
+         {
+            g_directZeroConf.active=true;
+            g_directZeroConf.direction=chosenDirection;
+            g_directZeroConf.triggerText=chosenTrigger;
+            g_directZeroConf.triggerLo=chosenLo;
+            g_directZeroConf.triggerHi=chosenHi;
+            g_directZeroConf.latchedClock=TimeCurrent();
+            g_directZeroConf.lastAttemptClock=0;
+            g_directZeroConf.lastAttemptTickMs=0;
+            g_directZeroConf.attempts=0;
+
+            Log("DIRECT ZERO-CONF TOUCH LATCHED | trigger="+chosenTrigger+
+                " | direction="+string(chosenDirection==1?"BUY":"SELL")+
+                " | CMP="+DoubleToString(cmp,_Digits)+
+                " | observed path="+DoubleToString(observedLo,_Digits)+".."+
+                DoubleToString(observedHi,_Digits)+
+                " | zone="+DoubleToString(chosenLo,_Digits)+".."+
+                DoubleToString(chosenHi,_Digits)+
+                " | running positions at latch="+IntegerToString(runningPositions)+
+                " | retry until MARKET accepted=YES");
+         }
       }
-
-      g_levels[i].inZone=true;
-
-      if(g_levels[i].consumed) continue;
-      if(TimeCurrent()<g_levels[i].nextRetryTime) continue;
-
-      bool filled=TryLevelEntry(g_levels[i].fadeDirection,g_levels[i].price);
-      if(filled)
-         g_levels[i].consumed=true;
-      else
-         g_levels[i].nextRetryTime=TimeCurrent()+MathMax(0,InpEntryRetryThrottleSeconds);
    }
 
-   g_previousCMP=cmp;
-   g_hasPreviousCMP=true;
+   if(g_directZeroConf.active)
+      SubmitDirectZeroConfMarket();
 }
 
-//======================================================================
-// Per-position management state (backoff + peak tracking + live-parity
-// warmup timer)
-//======================================================================
-double ReconstructPeakFromM1(int direction,double entry,double current,datetime positionTime)
+
+
+double BrokerSafeExecutionSL(int direction,
+                             double marketPrice,
+                             double requestedSL)
 {
-   double peak=current;
+   long stopsLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
 
-   if(!InpReconstructPeakFromM1 || positionTime<=0)
-      return peak;
+   double minDist=
+      MathMax(_Point,
+              ((double)stopsLevel+
+               MathMax(0,InpExecutionStopCushionPoints))*_Point);
 
-   // Live parity: on a genuine live XAUUSD.sc chart, skip historical M1
-   // reconstruction entirely - the peak starts at the current tick
-   // only, so a restart mid-trade cannot immediately treat a position
-   // as "already favourable" purely from replayed history.
-   if(IsLiveXAUUSDscProtectionChart() && InpLiveXAUDisableHistoricalPeakRebuild)
+   double safeSL=requestedSL;
+
+   if(direction==1)
+   {
+      double maxSL=marketPrice-minDist;
+
+      if(safeSL<=0 || safeSL>maxSL)
+         safeSL=maxSL;
+   }
+   else
+   {
+      double minSL=marketPrice+minDist;
+
+      if(safeSL<=0 || safeSL<minSL)
+         safeSL=minSL;
+   }
+
+   return RoundPrice(safeSL);
+}
+
+
+double BrokerSafeExecutionTP(int direction,
+                             double entryPrice,
+                             double requestedTP)
+{
+   if(entryPrice<=0 || requestedTP<=0)
+      return requestedTP;
+
+   long stopsLevel=
+      SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
+
+   double minDist=
+      MathMax(_Point,
+              ((double)stopsLevel+
+               MathMax(0,InpExecutionStopCushionPoints))*_Point);
+
+   double safeTP=requestedTP;
+
+   if(direction==1)
+   {
+      double minTP=entryPrice+minDist;
+
+      if(safeTP<minTP)
+         safeTP=minTP;
+   }
+   else
+   {
+      double maxTP=entryPrice-minDist;
+
+      if(safeTP>maxTP)
+         safeTP=maxTP;
+   }
+
+   return RoundPrice(safeTP);
+}
+
+
+
+bool FixedTrailSLBrokerValid(int direction,
+                             double currentPrice,
+                             double requestedSL)
+{
+   if(currentPrice<=0 || requestedSL<=0)
+      return false;
+
+   long stopsLevel=
+      SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
+
+   long freezeLevel=
+      SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL);
+
+   double minimumDistance=
+      MathMax(_Point,
+              ((double)MathMax(stopsLevel,freezeLevel)+
+               MathMax(0,InpExecutionStopCushionPoints))*_Point);
+
+   if(direction==1)
+      return requestedSL<=currentPrice-minimumDistance+_Point*0.25;
+
+   return requestedSL>=currentPrice+minimumDistance-_Point*0.25;
+}
+
+double FixedTrailCandidateSL(int direction,
+                             double currentPrice)
+{
+   double distance=
+      MathMax(0.1,InpTrailingDistancePips)*StrategyPipSize();
+
+   return RoundPrice(
+      direction==1
+      ? currentPrice-distance
+      : currentPrice+distance);
+}
+
+int HybridTrailStateIndex(ulong ticket)
+{
+   for(int i=0;i<ArraySize(g_hybridTrailStates);i++)
+      if(g_hybridTrailStates[i].ticket==ticket)
+         return i;
+   return -1;
+}
+
+double ReconstructTrailPeak(int direction,
+                            double entry,
+                            datetime positionTime,
+                            MqlTick &tick)
+{
+   double peak=(direction==1)?tick.bid:tick.ask;
+
+   if(!InpReconstructTrailFromM1 || positionTime<=0)
       return peak;
 
    MqlRates rates[];
@@ -1352,12 +1792,14 @@ double ReconstructPeakFromM1(int direction,double entry,double current,datetime 
    if(copied<=0)
       return peak;
 
+   double spread=MathMax(0.0,tick.ask-tick.bid);
+
    for(int i=0;i<copied;i++)
    {
       if(direction==1)
          peak=MathMax(peak,rates[i].high);
       else
-         peak=MathMin(peak,rates[i].low);
+         peak=MathMin(peak,rates[i].low+spread);
    }
 
    if(direction==1)
@@ -1368,77 +1810,61 @@ double ReconstructPeakFromM1(int direction,double entry,double current,datetime 
    return RoundPrice(peak);
 }
 
-int EnsureManagedSlot(ulong ticket)
+int EnsureHybridTrailState(ulong ticket,
+                           int direction,
+                           double entry,
+                           double current,
+                           datetime positionTime,
+                           MqlTick &tick)
 {
-   int n=ArraySize(g_managed);
-   for(int i=0;i<n;i++)
-      if(g_managed[i].ticket==ticket) return i;
+   int index=HybridTrailStateIndex(ticket);
+   if(index>=0)
+      return index;
 
-   if(!PositionSelectByTicket(ticket)) return -1;
+   index=ArraySize(g_hybridTrailStates);
+   ArrayResize(g_hybridTrailStates,index+1);
 
-   int direction=((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)?1:-1;
-   double openPrice   =PositionGetDouble(POSITION_PRICE_OPEN);
-   double openSl       =PositionGetDouble(POSITION_SL);
-   double currentPrice =PositionGetDouble(POSITION_PRICE_CURRENT);
-   datetime positionTime=(datetime)PositionGetInteger(POSITION_TIME);
+   g_hybridTrailStates[index].ticket=ticket;
+   g_hybridTrailStates[index].active=false;
+   g_hybridTrailStates[index].reconstructed=false;
+   g_hybridTrailStates[index].peakPrice=current;
+   g_hybridTrailStates[index].virtualStop=0.0;
+   g_hybridTrailStates[index].positionTime=positionTime;
 
-   int idx=n;
-   ArrayResize(g_managed,n+1);
-   g_managed[idx].ticket=ticket;
-   g_managed[idx].consecutiveFailures=0;
-   g_managed[idx].cooldownUntil=0;
-   g_managed[idx].peakPrice=ReconstructPeakFromM1(direction,openPrice,currentPrice,positionTime);
-   g_managed[idx].peakReconstructed=true;
-   g_managed[idx].virtualStop=openSl;
-   g_managed[idx].firstSeenTime=TimeCurrent();
-   return idx;
+   g_hybridTrailStates[index].peakPrice=
+      ReconstructTrailPeak(direction,entry,positionTime,tick);
+   g_hybridTrailStates[index].reconstructed=true;
+   return index;
 }
 
-void PruneManagedSlots()
+double BrokerTrailMinimumDistance()
 {
-   for(int i=ArraySize(g_managed)-1;i>=0;i--)
-   {
-      if(PositionSelectByTicket(g_managed[i].ticket)) continue;
+   long stopsLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
+   long freezeLevel=SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL);
+   int cushion=MathMax(MathMax(0,InpExecutionStopCushionPoints),
+                       MathMax(0,InpTrailBrokerCushionPoints));
 
-      int last=ArraySize(g_managed)-1;
-      g_managed[i]=g_managed[last];
-      ArrayResize(g_managed,last);
-   }
+   return MathMax(_Point,
+                  ((double)MathMax(stopsLevel,freezeLevel)+cushion)*_Point);
 }
 
-void ModifyPositionSafely(ulong ticket,double sl,double tp)
+double BrokerCompatibleTrailSL(int direction,
+                               double current,
+                               double virtualStop)
 {
-   int slot=EnsureManagedSlot(ticket);
-   if(slot<0) return;
-
-   if(g_managed[slot].cooldownUntil>0 && TimeCurrent()<g_managed[slot].cooldownUntil)
-      return;
-
-   if(!PositionSelectByTicket(ticket)) return;
-
-   bool ok=trade.PositionModify(ticket,sl,tp);
-   uint retcode=trade.ResultRetcode();
-
-   if(ok && TradeRetcodeAccepted(retcode))
-   {
-      g_managed[slot].consecutiveFailures=0;
-      g_managed[slot].cooldownUntil=0;
-      return;
-   }
-
-   g_managed[slot].consecutiveFailures++;
-   int steps=(int)MathMin((double)g_managed[slot].consecutiveFailures,(double)InpModifyMaxConsecutiveFail);
-   int backoffSeconds=(int)MathMin((double)InpModifyBackoffMaxSeconds,
-                       (double)InpModifyBackoffBaseSeconds*MathPow(2.0,steps-1));
-   g_managed[slot].cooldownUntil=TimeCurrent()+backoffSeconds;
-
-   if(!TemporaryTradeRetcode(retcode))
-      Log("MODIFY REJECTED ticket="+IntegerToString((int)ticket)+
-          " retcode="+IntegerToString(retcode)+
-          " backoff="+IntegerToString(backoffSeconds)+"s");
+   double minDistance=BrokerTrailMinimumDistance();
+   double allowed=(direction==1)?current-minDistance:current+minDistance;
+   double candidate=(direction==1)
+                    ? MathMin(virtualStop,allowed)
+                    : MathMax(virtualStop,allowed);
+   return RoundPrice(candidate);
 }
 
-bool CloseAtVirtualStop(ulong ticket,string context,double current,double stop,double peak)
+bool ClosePositionAtVirtualTrail(ulong ticket,
+                                 string context,
+                                 double current,
+                                 double stop,
+                                 double peak)
 {
    ulong deviation=(ulong)MathMax(0,InpVirtualTrailCloseDeviationPts);
    trade.SetDeviationInPoints(deviation);
@@ -1449,196 +1875,872 @@ bool CloseAtVirtualStop(ulong ticket,string context,double current,double stop,d
 
    if(accepted)
    {
-      Log("VIRTUAL TRAIL CLOSE | "+context+
-          " | ticket="+IntegerToString((int)ticket)+
-          " | current="+PriceText(current)+
-          " | virtualSL="+PriceText(stop)+
-          " | peak="+PriceText(peak));
+      Log("HYBRID VIRTUAL TRAIL CLOSE | "+context+
+          " | ticket="+(string)ticket+
+          " | current="+DoubleToString(current,_Digits)+
+          " | virtualSL="+DoubleToString(stop,_Digits)+
+          " | peak="+DoubleToString(peak,_Digits));
       return true;
    }
 
-   Log("VIRTUAL TRAIL CLOSE FAILED | "+context+
-       " | ticket="+IntegerToString((int)ticket)+
-       " | current="+PriceText(current)+
-       " | virtualSL="+PriceText(stop)+
+   Log("HYBRID VIRTUAL TRAIL CLOSE FAILED | "+context+
+       " | ticket="+(string)ticket+
+       " | current="+DoubleToString(current,_Digits)+
+       " | virtualSL="+DoubleToString(stop,_Digits)+
        " | retcode="+IntegerToString((int)code)+
        " | "+trade.ResultRetcodeDescription());
    return false;
 }
 
-//======================================================================
-// Exit 1: hybrid virtual trail, no TP - preset SL 24 pips, trail 13
-// pips (exact reference values). Real protection no longer depends on
-// the broker accepting a tight SL modify() - a virtual stop is tracked
-// in EA memory and checked every tick; the moment price crosses it the
-// position is force-closed directly. The broker-side SL is still
-// pushed via the existing backoff-protected ModifyPositionSafely as a
-// best-effort backup net, clamped to whatever distance the broker will
-// actually accept.
-//
-// Live parity: on a genuine live XAUUSD.sc chart, trail activation
-// requires the FULL trail distance (not just InpTrailActivationPips),
-// adds the current spread on top, and cannot arm until
-// InpLiveXAUTrailWarmupSeconds have passed since the EA first saw the
-// position - a restart mid-trade cannot immediately treat a position
-// as "already favourable enough to arm." All inert in the tester.
-//======================================================================
-void ManageTrailing()
+void PruneHybridTrailStates()
 {
-   PruneManagedSlots();
-
-   for(int i=PositionsTotal()-1;i>=0;i--)
+   for(int i=ArraySize(g_hybridTrailStates)-1;i>=0;i--)
    {
-      ulong ticket=PositionGetTicket(i);
+      ulong ticket=g_hybridTrailStates[i].ticket;
+      if(ticket>0 && PositionSelectByTicket(ticket))
+         continue;
+
+      int last=ArraySize(g_hybridTrailStates)-1;
+      if(i<last)
+         g_hybridTrailStates[i]=g_hybridTrailStates[last];
+      ArrayResize(g_hybridTrailStates,last);
+   }
+}
+
+void ManageHybridTrailingPositions(string context)
+{
+   if(!InpUseFixedPipTrail)
+      return;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol,tick))
+      return;
+
+   double strategyPip=StrategyPipSize();
+   double activationDistance=MathMax(_Point,MathMax(0.0,InpTrailingActivationPips)*strategyPip);
+   double trailDistance=MathMax(0.1,InpTrailingDistancePips)*strategyPip;
+   double presetDistance=MathMax(0.1,InpPresetStopLossPips)*strategyPip;
+   double minimumStep=MathMax(_Point,MathMax(0.1,InpTrailingStepPips)*strategyPip);
+
+   for(int p=PositionsTotal()-1;p>=0;p--)
+   {
+      ulong ticket=PositionGetTicket(p);
       if(ticket==0) continue;
-      if(!PositionSelectByTicket(ticket)) continue;
       if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
       if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
 
-      int slot=EnsureManagedSlot(ticket);
-      if(slot<0) continue;
+      ENUM_POSITION_TYPE type=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      int direction=(type==POSITION_TYPE_BUY)?1:-1;
+      double entry=PositionGetDouble(POSITION_PRICE_OPEN);
+      double current=(direction==1)?tick.bid:tick.ask;
+      double currentSL=PositionGetDouble(POSITION_SL);
+      double currentTP=PositionGetDouble(POSITION_TP);
+      datetime positionTime=(datetime)PositionGetInteger(POSITION_TIME);
 
-      double slDistance=PresetSlDistance();
-      if(slDistance<=0.0) continue;
+      // V3.081 has no take profit. Remove a TP left by an older EA build
+      // while preserving the currently installed broker SL.
+      if(!InpUseTakeProfit && currentTP>0.0)
+      {
+         bool tpRemoved=trade.PositionModify(ticket,currentSL,0.0);
+         uint tpRemoveCode=trade.ResultRetcode();
+         if(tpRemoved && TradeRetcodeAccepted(tpRemoveCode))
+         {
+            currentTP=0.0;
+            Log("NO-TP CLEANUP | removed inherited TP | "+context+
+                " | ticket="+(string)ticket);
+         }
+         else
+         {
+            Log("NO-TP CLEANUP FAILED | "+context+
+                " | ticket="+(string)ticket+
+                " | retcode="+IntegerToString((int)tpRemoveCode)+
+                " | "+trade.ResultRetcodeDescription());
+         }
+      }
 
-      double trailDistance=TrailDistance();
-      if(trailDistance<=0.0) trailDistance=slDistance;
-
-      int direction=((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE)==POSITION_TYPE_BUY)?1:-1;
-      double openPrice   =PositionGetDouble(POSITION_PRICE_OPEN);
-      double currentSl   =PositionGetDouble(POSITION_SL);
-      double currentPrice=PositionGetDouble(POSITION_PRICE_CURRENT);
+      int stateIndex=EnsureHybridTrailState(ticket,direction,entry,current,positionTime,tick);
+      if(stateIndex<0) continue;
 
       if(direction==1)
-         g_managed[slot].peakPrice=MathMax(g_managed[slot].peakPrice,currentPrice);
+         g_hybridTrailStates[stateIndex].peakPrice=MathMax(g_hybridTrailStates[stateIndex].peakPrice,current);
       else
-         g_managed[slot].peakPrice=MathMin(g_managed[slot].peakPrice,currentPrice);
+         g_hybridTrailStates[stateIndex].peakPrice=MathMin(g_hybridTrailStates[stateIndex].peakPrice,current);
 
-      double peak=g_managed[slot].peakPrice;
-      double favorable=(direction==1)?(peak-openPrice):(openPrice-peak);
+      double peak=g_hybridTrailStates[stateIndex].peakPrice;
+      double peakFavourable=(direction==1)?peak-entry:entry-peak;
 
-      double activationDistance=TrailActivationDistance();
-      bool liveParity=IsLiveXAUUSDscProtectionChart();
-      bool warmedUp=true;
+      // Exact preset protection is active from fill, before favourable movement.
+      double initialVirtualStop=RoundPrice(direction==1 ? entry-presetDistance
+                                                        : entry+presetDistance);
+      if(g_hybridTrailStates[stateIndex].virtualStop<=0.0)
+         g_hybridTrailStates[stateIndex].virtualStop=initialVirtualStop;
 
-      if(liveParity)
+      bool initialVirtualHit=(direction==1)
+                             ? current<=initialVirtualStop+_Point*0.25
+                             : current>=initialVirtualStop-_Point*0.25;
+      if(InpUseVirtualTrailFallback && initialVirtualHit)
       {
-         if(InpLiveXAURequireFullTrailBeforeArm)
-            activationDistance=MathMax(activationDistance,trailDistance);
-
-         if(InpLiveXAUIncludeSpreadInTrailArm)
-         {
-            MqlTick liveTick;
-            if(SymbolInfoTick(_Symbol,liveTick))
-               activationDistance+=MathMax(0.0,liveTick.ask-liveTick.bid);
-         }
-
-         warmedUp=(TimeCurrent()-g_managed[slot].firstSeenTime)>=MathMax(0,InpLiveXAUTrailWarmupSeconds);
-      }
-
-      // WIDE preset floor from entry - always the starting protection,
-      // regardless of activation state.
-      if(g_managed[slot].virtualStop<=0.0)
-         g_managed[slot].virtualStop=RoundPrice((direction==1)?openPrice-slDistance:openPrice+slDistance);
-
-      if(warmedUp && favorable>=activationDistance)
-      {
-         double trailedStop=RoundPrice((direction==1)?peak-trailDistance:peak+trailDistance);
-         bool trailedImproves=(direction==1)
-                              ?(trailedStop>g_managed[slot].virtualStop)
-                              :(trailedStop<g_managed[slot].virtualStop);
-         if(trailedImproves)
-            g_managed[slot].virtualStop=trailedStop;
-      }
-
-      double virtualStop=g_managed[slot].virtualStop;
-
-      bool virtualHit=(direction==1)
-                      ?currentPrice<=virtualStop+_Point*0.25
-                      :currentPrice>=virtualStop-_Point*0.25;
-
-      if(InpUseVirtualTrailFallback && virtualHit)
-      {
-         CloseAtVirtualStop(ticket,"ManageTrailing",currentPrice,virtualStop,peak);
+         ClosePositionAtVirtualTrail(ticket,context,current,initialVirtualStop,peak);
          continue;
       }
 
-      // Best-effort broker-side SL backup only from here - clamp to the
-      // closest the broker will legally accept rather than skip
-      // outright, so the backup net stays as tight as the broker allows
-      // even when the true virtual stop is tighter still.
-      double minDist=MinimumStopDistance(currentPrice);
-      double brokerAllowed=(direction==1)?currentPrice-minDist:currentPrice+minDist;
-      double desiredSl=(direction==1)
-                       ?MathMin(virtualStop,brokerAllowed)
-                       :MathMax(virtualStop,brokerAllowed);
-      desiredSl=RoundPrice(desiredSl);
+      double initialBrokerSL=BrokerCompatibleTrailSL(direction,current,initialVirtualStop);
+      bool initialImproves=currentSL<=0.0 ||
+         (direction==1 ? initialBrokerSL>currentSL+_Point*0.25
+                       : initialBrokerSL<currentSL-_Point*0.25);
+      if(initialImproves && initialBrokerSL>0.0 &&
+         FixedTrailSLBrokerValid(direction,current,initialBrokerSL))
+      {
+         bool initialSent=trade.PositionModify(ticket,initialBrokerSL,currentTP);
+         uint initialCode=trade.ResultRetcode();
+         if(!initialSent || !TradeRetcodeAccepted(initialCode))
+            Log("PRESET 30P BROKER SL INSTALL FAILED | "+context+
+                " | ticket="+(string)ticket+
+                " | virtualSL="+DoubleToString(initialVirtualStop,_Digits)+
+                " | brokerSL="+DoubleToString(initialBrokerSL,_Digits)+
+                " | retcode="+IntegerToString((int)initialCode)+
+                " | "+trade.ResultRetcodeDescription());
+         else
+            currentSL=initialBrokerSL;
+      }
 
-      bool improves=(currentSl<=0.0) ||
-                    ((direction==1)?(desiredSl>currentSl):(desiredSl<currentSl));
-      if(!improves) continue;
+      if(InpEnableTrailingAfterEntry &&
+         !g_hybridTrailStates[stateIndex].active &&
+         peakFavourable>=activationDistance-_Point*0.25)
+      {
+         g_hybridTrailStates[stateIndex].active=true;
+         Log("HYBRID 10-PIP TRAIL ARMED | "+context+
+             " | ticket="+(string)ticket+
+             " | entry="+DoubleToString(entry,_Digits)+
+             " | peak="+DoubleToString(peak,_Digits)+
+             " | favourable="+DoubleToString(peakFavourable/strategyPip,1)+" pips");
+      }
 
-      double minStep=InpTrailMinStepPoints*_Point;
-      if(currentSl>0.0 && MathAbs(desiredSl-currentSl)<minStep) continue;
+      if(InpEnableTrailingAfterEntry && g_hybridTrailStates[stateIndex].active)
+      {
+         double virtualStop=RoundPrice(direction==1?peak-trailDistance:peak+trailDistance);
+         if(direction==1) virtualStop=MathMax(virtualStop,initialVirtualStop);
+         else             virtualStop=MathMin(virtualStop,initialVirtualStop);
+         g_hybridTrailStates[stateIndex].virtualStop=virtualStop;
 
-      bool validSide=(direction==1)?(desiredSl<currentPrice):(desiredSl>currentPrice);
-      if(!validSide) continue;
+         bool virtualHit=(direction==1)
+                         ? current<=virtualStop+_Point*0.25
+                         : current>=virtualStop-_Point*0.25;
 
-      ModifyPositionSafely(ticket,desiredSl,PositionGetDouble(POSITION_TP));
+         if(InpUseVirtualTrailFallback && virtualHit)
+         {
+            ClosePositionAtVirtualTrail(ticket,context,current,virtualStop,peak);
+            continue;
+         }
+
+         double desiredSL=BrokerCompatibleTrailSL(direction,current,virtualStop);
+         bool improves=currentSL<=0.0 ||
+            (direction==1
+             ? desiredSL>currentSL+minimumStep-_Point*0.25
+             : desiredSL<currentSL-minimumStep+_Point*0.25);
+
+         if(improves && desiredSL>0.0 && FixedTrailSLBrokerValid(direction,current,desiredSL))
+         {
+            bool sent=trade.PositionModify(ticket,desiredSL,currentTP);
+            uint code=trade.ResultRetcode();
+            bool accepted=sent && TradeRetcodeAccepted(code);
+
+            if(!accepted)
+            {
+               Log("HYBRID BROKER SL MODIFY FAILED | "+context+
+                   " | ticket="+(string)ticket+
+                   " | virtualSL="+DoubleToString(virtualStop,_Digits)+
+                   " | brokerSL="+DoubleToString(desiredSL,_Digits)+
+                   " | stopLevel="+IntegerToString((int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL))+
+                   " | freezeLevel="+IntegerToString((int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL))+
+                   " | retcode="+IntegerToString((int)code)+
+                   " | "+trade.ResultRetcodeDescription());
+            }
+            else
+            {
+               Log("HYBRID BROKER SL MOVED | "+context+
+                   " | ticket="+(string)ticket+
+                   " | peak="+DoubleToString(peak,_Digits)+
+                   " | virtualSL="+DoubleToString(virtualStop,_Digits)+
+                   " | brokerSL="+DoubleToString(desiredSL,_Digits));
+            }
+         }
+      }
+
+      // Optional fixed take-profit compatibility path. Disabled by default in V3.081.
+      // When disabled, any TP inherited from a previous build is removed.
+
+      if(InpUseTakeProfit)
+      {
+         double requestedTP=RoundPrice(direction==1
+                                       ? entry+MathMax(0.1,InpFixedTakeProfitPips)*strategyPip
+                                       : entry-MathMax(0.1,InpFixedTakeProfitPips)*strategyPip);
+         bool exactTPHit=(direction==1)
+                         ? current>=requestedTP-_Point*0.25
+                         : current<=requestedTP+_Point*0.25;
+         if(exactTPHit)
+         {
+         ulong deviation=(ulong)MathMax(0,InpVirtualTrailCloseDeviationPts);
+         trade.SetDeviationInPoints(deviation);
+         bool tpClosed=trade.PositionClose(ticket,deviation);
+         uint tpCode=trade.ResultRetcode();
+         trade.SetDeviationInPoints((ulong)MathMax(0,InpDeviationPoints));
+         if(tpClosed && TradeRetcodeAccepted(tpCode))
+         {
+            Log("FIXED VIRTUAL TP CLOSE | "+context+
+                " | ticket="+(string)ticket+
+                " | entry="+DoubleToString(entry,_Digits)+
+                " | target="+DoubleToString(requestedTP,_Digits)+
+                " | current="+DoubleToString(current,_Digits));
+            continue;
+         }
+         Log("FIXED VIRTUAL TP CLOSE FAILED | "+context+
+             " | ticket="+(string)ticket+
+             " | target="+DoubleToString(requestedTP,_Digits)+
+             " | retcode="+IntegerToString((int)tpCode)+
+             " | "+trade.ResultRetcodeDescription());
+      }
+
+      double brokerTP=BrokerSafeExecutionTP(direction,entry,requestedTP);
+      bool tpNeedsInstall=InpUseTakeProfit &&
+                          (currentTP<=0.0 || MathAbs(currentTP-brokerTP)>_Point*0.5);
+      if(tpNeedsInstall && PositionSelectByTicket(ticket))
+      {
+         double retainedSL=PositionGetDouble(POSITION_SL);
+         bool sent=trade.PositionModify(ticket,retainedSL,brokerTP);
+         uint code=trade.ResultRetcode();
+         if(!sent || !TradeRetcodeAccepted(code))
+            Log("FIXED TP INSTALL FAILED | "+context+
+                " | ticket="+(string)ticket+
+                " | requestedTP="+DoubleToString(requestedTP,_Digits)+
+                " | brokerTP="+DoubleToString(brokerTP,_Digits)+
+                " | retcode="+IntegerToString((int)code)+
+                " | "+trade.ResultRetcodeDescription());
+         else
+            currentTP=brokerTP;
+         }
+      }
    }
+
+   PruneHybridTrailStates();
 }
 
-//======================================================================
-// Exit 2: hard, unconditional force-close once a position has been open
-// InpMaxHoldingMinutes, regardless of P&L or whether the trail has
-// resolved yet.
-//======================================================================
-void EnforceMaxHoldingTime()
+
+
+bool ConfigureRouting()
 {
-   if(InpMaxHoldingMinutes<=0) return;
+   // EzyMap Scalp Mastery V2 uses the uploaded V1.1.0 M5 route:
+   // H1 direction -> M15 supporting zone -> M5 signal/entry.
+   g_directionTF=PERIOD_H1;
+   g_supportTF=PERIOD_M15;
+   g_confirmTF=PERIOD_M5;
+   g_entryTF=PERIOD_M5;
 
-   long cutoffSeconds=(long)InpMaxHoldingMinutes*60;
+   g_mode="SCALP";
+   g_tfLabel="M5";
+   g_dirLabel="H1";
+   g_supLabel="M15";
+   g_confirmLabel="M5";
+   return true;
+}
 
-   for(int i=PositionsTotal()-1;i>=0;i--)
+bool LoadRatesFlexible(ENUM_TIMEFRAMES tf,int requested,int minimum,MqlRates &rates[])
+{
+   ArraySetAsSeries(rates,true);
+   ResetLastError();
+   int got=CopyRates(_Symbol,tf,0,requested,rates);
+
+   if(got<minimum)
    {
-      ulong ticket=PositionGetTicket(i);
-      if(ticket==0) continue;
-      if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
-      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+      // Trigger/allow MT5 history synchronization and report only when genuinely insufficient.
+      Print("EzyMap: insufficient ",EnumToString(tf),
+            " history. Loaded=",got,
+            " Minimum=",minimum,
+            " Error=",GetLastError());
+      return false;
+   }
 
-      datetime openTime=(datetime)PositionGetInteger(POSITION_TIME);
-      long heldSeconds=(long)(TimeCurrent()-openTime);
-      if(heldSeconds<cutoffSeconds) continue;
+   return true;
+}
 
-      bool ok=trade.PositionClose(ticket);
-      uint retcode=trade.ResultRetcode();
+double EMAFromRates(MqlRates &r[],int total,int period,int shift)
+{
+   if(total<=period+shift+5) return EMPTY_VALUE;
+   int oldest=total-1;
+   double alpha=2.0/(period+1.0);
+   double ema=r[oldest].close;
+   for(int i=oldest-1;i>=shift;i--)
+      ema=alpha*r[i].close+(1.0-alpha)*ema;
+   return ema;
+}
 
-      if(ok && TradeRetcodeAccepted(retcode))
-         Log("MAX HOLDING TIME EXIT ticket="+IntegerToString((int)ticket)+
-             " heldMinutes="+DoubleToString(heldSeconds/60.0,1));
+double ATRFromRates(MqlRates &r[],int total,int period,int shift)
+{
+   if(total<=period+shift+5) return EMPTY_VALUE;
+   int oldest=total-2;
+   double atr=0.0;
+   int seedCount=0;
+   for(int i=oldest;i>=MathMax(shift,oldest-period+1);i--)
+   {
+      double prev=r[i+1].close;
+      double tr=MathMax(r[i].high-r[i].low,MathMax(MathAbs(r[i].high-prev),MathAbs(r[i].low-prev)));
+      atr+=tr; seedCount++;
+   }
+   if(seedCount==0) return EMPTY_VALUE;
+   atr/=seedCount;
+   for(int i=oldest-period;i>=shift;i--)
+   {
+      if(i+1>=total) continue;
+      double prev=r[i+1].close;
+      double tr=MathMax(r[i].high-r[i].low,MathMax(MathAbs(r[i].high-prev),MathAbs(r[i].low-prev)));
+      atr=(atr*(period-1)+tr)/period;
+   }
+   return atr;
+}
+
+bool Near(double a,double b,double tol) { return MathAbs(a-b)<=tol; }
+
+bool NearRound(double v,double step,double tol)
+{
+   if(step<=0) return false;
+   double nearest=MathRound(v/step)*step;
+   return MathAbs(v-nearest)<=tol;
+}
+
+double Clamp(double v,double lo,double hi) { return MathMax(lo,MathMin(hi,v)); }
+
+bool Overlap(double lo,double hi,double zlo,double zhi)
+{
+   return (hi>=zlo && lo<=zhi);
+}
+
+void PickDirectionLevels(MqlRates &d[],int total,double reference,double minDist,double fallbackLow,double fallbackHigh,double fallbackATR,
+                         double &s1,double &s2,double &r1,double &r2)
+{
+   s1=s2=r1=r2=EMPTY_VALUE;
+   double s1d=DBL_MAX,s2d=DBL_MAX,r1d=DBL_MAX,r2d=DBL_MAX;
+   int maxN=MathMin(InpDirectionHistory,total-1);
+   for(int i=1;i<=maxN;i++)
+   {
+      double level=d[i].close;
+      if(level<reference && reference-level<s1d) { s1=level; s1d=reference-level; }
+      if(level>reference && level-reference<r1d) { r1=level; r1d=level-reference; }
+   }
+   for(int i=1;i<=maxN;i++)
+   {
+      double level=d[i].close;
+      if(s1!=EMPTY_VALUE && level<=s1-minDist && s1-level<s2d) { s2=level; s2d=s1-level; }
+      if(r1!=EMPTY_VALUE && level>=r1+minDist && level-r1<r2d) { r2=level; r2d=level-r1; }
+   }
+   double safeATR=MathMax(fallbackATR,minDist*5.0);
+   if(s1==EMPTY_VALUE) s1=MathMin(fallbackLow,reference-minDist);
+   if(r1==EMPTY_VALUE) r1=MathMax(fallbackHigh,reference+minDist);
+   if(s2==EMPTY_VALUE) s2=MathMin(fallbackLow,s1-minDist);
+   if(r2==EMPTY_VALUE) r2=MathMax(fallbackHigh,r1+minDist);
+   s1=RoundPrice(s1); s2=RoundPrice(s2); r1=RoundPrice(r1); r2=RoundPrice(r2);
+}
+
+ZoneInfo SupportZone(double level,MqlRates &s[],int total)
+{
+   ZoneInfo z; z.valid=false; z.lo=0; z.hi=0; z.time=0;
+   double nearestDistance=DBL_MAX, nearestRange=0; datetime nearestTime=0;
+   int maxN=MathMin(InpSupportHistory,total-1);
+   for(int i=1;i<=maxN;i++)
+   {
+      if(s[i].high<=s[i].low) continue;
+      if(s[i].low<=level && s[i].high>=level && !z.valid)
+      {
+         z.lo=RoundPrice(s[i].low); z.hi=RoundPrice(s[i].high); z.time=s[i].time; z.valid=true;
+      }
+      double mid=(s[i].high+s[i].low)/2.0;
+      double dist=MathAbs(mid-level);
+      if(dist<nearestDistance) { nearestDistance=dist; nearestRange=s[i].high-s[i].low; nearestTime=s[i].time; }
+   }
+   if(!z.valid && nearestTime>0)
+   {
+      double range=MathMax(nearestRange,_Point*10.0);
+      z.lo=RoundPrice(level-range*0.5); z.hi=RoundPrice(level+range*0.5); z.time=nearestTime; z.valid=true;
+   }
+   return z;
+}
+
+// Refined LOW RISK zone selector.
+//
+// LOW RISK zones remain drawing-only and do not participate in READY/LIVE.
+//
+// BUY LOW RISK at S2:
+//   1) Candle must overlap S2: low <= S2 <= high.
+//   2) Prefer candles where the resulting zone [S2, candle high]
+//      stays below the BUY HIGH RISK zone.
+//   3) From the preferred set, choose the candle with the LOWEST LOW.
+//   4) Zone is S2 -> selected candle HIGH.
+//
+// SELL LOW RISK at R2:
+//   1) Candle must overlap R2: low <= R2 <= high.
+//   2) Prefer candles where the resulting zone [candle low, R2]
+//      stays above the SELL HIGH RISK zone.
+//   3) From the preferred set, choose the candle with the HIGHEST HIGH.
+//   4) Zone is selected candle LOW -> R2.
+//
+// If no non-overlapping candle exists, the same extreme rule is used
+// without the separation requirement.
+
+ZoneInfo V120SignalZoneFromLevel(double level,
+                                 double neighborLevel,
+                                 bool isDemand,
+                                 MqlRates &s[],
+                                 int total,
+                                 double supportATR)
+{
+   ZoneInfo z;
+   z.valid=false; z.lo=0; z.hi=0; z.time=0;
+
+   if(level<=0 || level==EMPTY_VALUE || total<3)
+      return z;
+
+   int maxN=MathMin(InpSupportHistory,total-1);
+
+   double averageRange=0.0;
+   int validCount=0;
+
+   for(int i=1;i<=maxN;i++)
+   {
+      if(s[i].high>s[i].low)
+      {
+         averageRange += s[i].high-s[i].low;
+         validCount++;
+      }
+   }
+
+   if(validCount>0)
+      averageRange/=validCount;
+   else
+      averageRange=MathMax(supportATR,g_pipSize*20.0);
+
+   double preferredMaximum=MathMax(averageRange*InpMaximumZoneRangeATR,
+                                   g_pipSize*10.0);
+   double atrWidth=MathMax(supportATR*0.75,averageRange*0.80);
+
+   double neighborDistance=(neighborLevel>0 && neighborLevel!=EMPTY_VALUE)
+                           ? MathAbs(level-neighborLevel)
+                           : atrWidth;
+   double neighborWidthCap=neighborDistance*0.75;
+   double maximumWidth=MathMax(g_pipSize*10.0,
+                               MathMin(atrWidth,neighborWidthCap));
+   double minimumWidth=MathMax(g_pipSize*5.0,_Point*10.0);
+
+   int preferred=-1;
+   int overlap=-1;
+
+   // Series arrays are newest first; therefore first match is the newest.
+   for(int i=1;i<=maxN;i++)
+   {
+      if(s[i].high<=s[i].low)
+         continue;
+
+      bool intersects=(s[i].low<=level && s[i].high>=level);
+      if(!intersects)
+         continue;
+
+      if(overlap<0)
+         overlap=i;
+
+      if(preferred<0 && (s[i].high-s[i].low)<=preferredMaximum)
+         preferred=i;
+   }
+
+   int source=(preferred>=0)?preferred:overlap;
+
+   double lowerAllowance=isDemand?maximumWidth*0.80:maximumWidth*0.20;
+   double upperAllowance=isDemand?maximumWidth*0.20:maximumWidth*0.80;
+   double allowedLo=level-lowerAllowance;
+   double allowedHi=level+upperAllowance;
+
+   double zoneLo=allowedLo;
+   double zoneHi=allowedHi;
+   datetime zoneTime=TimeCurrent();
+
+   if(source>=0)
+   {
+      zoneLo=MathMax(s[source].low,allowedLo);
+      zoneHi=MathMin(s[source].high,allowedHi);
+      zoneTime=s[source].time;
+
+      if(zoneHi<=zoneLo || zoneLo>level || zoneHi<level)
+      {
+         zoneLo=allowedLo;
+         zoneHi=allowedHi;
+      }
+   }
+
+   if(zoneHi-zoneLo<minimumWidth)
+   {
+      if(isDemand)
+      {
+         zoneLo=level-minimumWidth*0.80;
+         zoneHi=level+minimumWidth*0.20;
+      }
       else
-         Log("MAX HOLDING TIME EXIT FAILED ticket="+IntegerToString((int)ticket)+
-             " retcode="+IntegerToString(retcode)+
-             " desc="+trade.ResultRetcodeDescription());
+      {
+         zoneLo=level-minimumWidth*0.20;
+         zoneHi=level+minimumWidth*0.80;
+      }
+   }
+
+   zoneLo=MathMin(zoneLo,level);
+   zoneHi=MathMax(zoneHi,level);
+
+   z.lo=RoundPrice(zoneLo);
+   z.hi=RoundPrice(zoneHi);
+   z.time=zoneTime;
+   z.valid=(z.hi>z.lo);
+
+   return z;
+}
+
+ZoneInfo LowRiskExtremeOverlapZone(double level,
+                                   ZoneInfo &highRisk,
+                                   MqlRates &candles[],
+                                   int total,
+                                   bool buy)
+{
+   ZoneInfo z;
+   z.valid=false;
+   z.lo=0.0;
+   z.hi=0.0;
+   z.time=0;
+
+   if(level<=0 || level==EMPTY_VALUE || total<2)
+      return z;
+
+   int maxN=MathMin(InpEntryHistory,total-1);
+   if(maxN<1)
+      return z;
+
+   int bestSeparated=-1;
+   int bestFallback=-1;
+
+   double bestSeparatedExtreme = buy ? DBL_MAX : -DBL_MAX;
+   double bestFallbackExtreme  = buy ? DBL_MAX : -DBL_MAX;
+
+   for(int i=1;i<=maxN;i++)
+   {
+      if(candles[i].high<=candles[i].low)
+         continue;
+
+      // Candle must physically overlap S2/R2.
+      bool crosses=(candles[i].low<=level && candles[i].high>=level);
+      if(!crosses)
+         continue;
+
+      double zoneLo = buy ? level : candles[i].low;
+      double zoneHi = buy ? candles[i].high : level;
+
+      if(zoneHi<=zoneLo+_Point)
+         continue;
+
+      // Avoid same-side HIGH RISK overlap whenever possible.
+      bool separated=true;
+
+      if(InpLowRiskPreferNoOverlap && highRisk.valid)
+      {
+         if(buy)
+         {
+            // BUY LOW RISK must remain underneath BUY HIGH RISK.
+            separated=(zoneHi < highRisk.lo-_Point);
+         }
+         else
+         {
+            // SELL LOW RISK must remain above SELL HIGH RISK.
+            separated=(zoneLo > highRisk.hi+_Point);
+         }
+      }
+
+      // Extreme selection requested by user:
+      // BUY = lowest LOW; SELL = highest HIGH.
+      double extreme = buy ? candles[i].low : candles[i].high;
+
+      if(buy)
+      {
+         if(extreme<bestFallbackExtreme ||
+            (MathAbs(extreme-bestFallbackExtreme)<=_Point && (bestFallback<0 || i<bestFallback)))
+         {
+            bestFallbackExtreme=extreme;
+            bestFallback=i;
+         }
+
+         if(separated &&
+            (extreme<bestSeparatedExtreme ||
+             (MathAbs(extreme-bestSeparatedExtreme)<=_Point && (bestSeparated<0 || i<bestSeparated))))
+         {
+            bestSeparatedExtreme=extreme;
+            bestSeparated=i;
+         }
+      }
+      else
+      {
+         if(extreme>bestFallbackExtreme ||
+            (MathAbs(extreme-bestFallbackExtreme)<=_Point && (bestFallback<0 || i<bestFallback)))
+         {
+            bestFallbackExtreme=extreme;
+            bestFallback=i;
+         }
+
+         if(separated &&
+            (extreme>bestSeparatedExtreme ||
+             (MathAbs(extreme-bestSeparatedExtreme)<=_Point && (bestSeparated<0 || i<bestSeparated))))
+         {
+            bestSeparatedExtreme=extreme;
+            bestSeparated=i;
+         }
+      }
+   }
+
+   int selected=(bestSeparated>=0)?bestSeparated:bestFallback;
+
+   if(selected<0)
+      return z;
+
+   if(buy)
+   {
+      z.lo=RoundPrice(level);
+      z.hi=RoundPrice(candles[selected].high);
+   }
+   else
+   {
+      z.lo=RoundPrice(candles[selected].low);
+      z.hi=RoundPrice(level);
+   }
+
+   z.time=candles[selected].time;
+   z.valid=(z.hi>z.lo+_Point);
+   return z;
+}
+
+bool IsPivotHigh(MqlRates &s[],int total,int idx,int bars)
+{
+   if(idx-bars<0 || idx+bars>=total) return false;
+   double v=s[idx].high;
+   for(int k=1;k<=bars;k++) if(s[idx-k].high>=v || s[idx+k].high>v) return false;
+   return true;
+}
+
+bool IsPivotLow(MqlRates &s[],int total,int idx,int bars)
+{
+   if(idx-bars<0 || idx+bars>=total) return false;
+   double v=s[idx].low;
+   for(int k=1;k<=bars;k++) if(s[idx-k].low<=v || s[idx+k].low<v) return false;
+   return true;
+}
+
+void SupportMetrics(MqlRates &s[],int total,int piv,double &swingHigh,double &swingLow,double &trendSupport,double &trendResistance)
+{
+   swingHigh=swingLow=trendSupport=trendResistance=EMPTY_VALUE;
+   int ph1=-1,ph2=-1,pl1=-1,pl2=-1;
+   for(int i=piv+1;i<MathMin(total-piv,120);i++)
+   {
+      if(ph1<0 && IsPivotHigh(s,total,i,piv)) ph1=i;
+      else if(ph1>=0 && ph2<0 && IsPivotHigh(s,total,i,piv)) ph2=i;
+      if(pl1<0 && IsPivotLow(s,total,i,piv)) pl1=i;
+      else if(pl1>=0 && pl2<0 && IsPivotLow(s,total,i,piv)) pl2=i;
+      if(ph2>=0 && pl2>=0) break;
+   }
+   if(ph1>=0) swingHigh=s[ph1].high;
+   if(pl1>=0) swingLow=s[pl1].low;
+   if(ph1>=0 && ph2>=0)
+   {
+      double dx=(double)(ph2-ph1);
+      trendResistance=s[ph1].high+(s[ph1].high-s[ph2].high)/dx*(double)ph1;
+   }
+   if(pl1>=0 && pl2>=0)
+   {
+      double dx=(double)(pl2-pl1);
+      trendSupport=s[pl1].low+(s[pl1].low-s[pl2].low)/dx*(double)pl1;
    }
 }
 
-//======================================================================
-// Premium presentation: dark chart theme, portfolio trade card, gold
-// live entry/SL/virtual-trail lines per open position, small win/loss
-// markers at each closed trade. Purely visual - no effect on entries
-// or exits.
-//======================================================================
+int ZoneRetests(ZoneInfo &z,MqlRates &e[],int total,datetime currentEntryTime)
+{
+   if(!z.valid) return 999;
+   datetime readyTime=z.time+TfSeconds(g_supportTF);
+   int maxN=MathMin(InpEntryHistory,total-1);
+   int retests=0; bool prevInside=false;
+   for(int i=maxN;i>=1;i--)
+   {
+      bool eligible=(e[i].time>=readyTime && e[i].time<=currentEntryTime);
+      if(!eligible) continue;
+      bool inside=Overlap(e[i].low,e[i].high,z.lo,z.hi);
+      if(inside && !prevInside) retests++;
+      prevInside=inside;
+   }
+   return retests;
+}
+
+bool SelectEntryCandle(ZoneInfo &z,double cmp,bool buy,MqlRates &e[],int total,double &lo,double &hi,datetime &tm)
+{
+   lo=hi=0; tm=0; double best=DBL_MAX; bool found=false;
+   int maxN=MathMin(InpEntryHistory,total-1);
+   for(int i=1;i<=maxN;i++)
+   {
+      bool inside=(e[i].low>=z.lo && e[i].high<=z.hi && e[i].high>e[i].low);
+      bool side=buy ? (e[i].high<cmp-_Point) : (e[i].low>cmp+_Point);
+      if(!inside || !side) continue;
+      double dist=buy ? cmp-e[i].high : e[i].low-cmp;
+      if(dist<best) { best=dist; lo=RoundPrice(e[i].low); hi=RoundPrice(e[i].high); tm=e[i].time; found=true; }
+   }
+   return found;
+}
+
+int ConfluenceCount(ZoneInfo &z,double ema,double trend,double fib50,double fib618,double tol)
+{
+   if(!z.valid) return 0;
+   double mid=(z.lo+z.hi)/2.0;
+   int c=1;
+   bool brn=NearRound(mid,g_brnStep,tol);
+   bool micro=(!brn && NearRound(mid,g_microStep,tol));
+   bool em=Near(mid,ema,tol);
+   bool tr=(trend!=EMPTY_VALUE && Near(mid,trend,tol));
+   bool fib=((fib50!=EMPTY_VALUE && Near(mid,fib50,tol)) || (fib618!=EMPTY_VALUE && Near(mid,fib618,tol)));
+   if(brn) c++; if(micro)c++; if(em)c++; if(tr)c++; if(fib)c++;
+   return c;
+}
+
+double NearestBelow4(double ref,double a,double b,double c,double d)
+{
+   double result=EMPTY_VALUE; double v[4]={a,b,c,d};
+   for(int i=0;i<4;i++) if(v[i]!=EMPTY_VALUE && v[i]<ref && (result==EMPTY_VALUE || v[i]>result)) result=v[i];
+   return result;
+}
+
+double NearestAbove4(double ref,double a,double b,double c,double d)
+{
+   double result=EMPTY_VALUE; double v[4]={a,b,c,d};
+   for(int i=0;i<4;i++) if(v[i]!=EMPTY_VALUE && v[i]>ref && (result==EMPTY_VALUE || v[i]<result)) result=v[i];
+   return result;
+}
+
+TradePlan BuildTradePlan(string dir,double entry,double entryLo,double entryHi,double volStop,double volTarget,double snr,
+                         double targetMin,double targetMax,double s1,double s2,double r1,double r2,
+                         double swingLow,double swingHigh,double trendSupport,double trendResistance)
+{
+   TradePlan p; p.valid=false; p.sl=p.tp=p.rr=0;
+
+   if(dir=="BUY")
+   {
+      double baseSL=RoundPrice(entryLo-volStop);
+      double fs=NearestBelow4(entryLo-snr,s1,s2,swingLow,trendSupport);
+      double protectedSL=(fs!=EMPTY_VALUE)?RoundPrice(fs+snr):baseSL;
+      p.sl=MathMax(baseSL,protectedSL);
+
+      if(p.sl<entry)
+      {
+         double risk=entry-p.sl;
+         double desired=Clamp(MathMax(volTarget,risk*1.5),targetMin,targetMax);
+         desired=MathMin(desired,risk*MAX_RR);
+         double fr=NearestAbove4(entry,r1,r2,swingHigh,trendResistance);
+         double available=(fr!=EMPTY_VALUE)?fr-snr-entry:desired;
+         double reward=MathMin(desired,available);
+
+         if(reward>=risk*MIN_RR)
+         {
+            p.tp=RoundPrice(entry+reward);
+            p.rr=(p.tp-entry)/risk;
+            p.valid=(p.rr>=MIN_RR-0.0001 && p.rr<=MAX_RR+0.0001);
+         }
+      }
+   }
+   else
+   {
+      double baseSL=RoundPrice(entryHi+volStop);
+      double fr=NearestAbove4(entryHi+snr,r1,r2,swingHigh,trendResistance);
+      double protectedSL=(fr!=EMPTY_VALUE)?RoundPrice(fr-snr):baseSL;
+      p.sl=MathMin(baseSL,protectedSL);
+
+      if(p.sl>entry)
+      {
+         double risk=p.sl-entry;
+         double desired=Clamp(MathMax(volTarget,risk*1.5),targetMin,targetMax);
+         desired=MathMin(desired,risk*MAX_RR);
+         double fs=NearestBelow4(entry,s1,s2,swingLow,trendSupport);
+         double available=(fs!=EMPTY_VALUE)?entry-(fs+snr):desired;
+         double reward=MathMin(desired,available);
+
+         if(reward>=risk*MIN_RR)
+         {
+            p.tp=RoundPrice(entry-reward);
+            p.rr=(entry-p.tp)/risk;
+            p.valid=(p.rr>=MIN_RR-0.0001 && p.rr<=MAX_RR+0.0001);
+         }
+      }
+   }
+
+   // V1.2 bounded fallback: valid touch should not vanish simply because
+   // the nearest structural target is too close.
+   if(!p.valid)
+   {
+      double fallbackRisk=MathMax(volStop,targetMin/MAX_RR);
+      double rewardFloor=fallbackRisk*MIN_RR;
+      double rewardCeiling=MathMax(rewardFloor,
+                                   MathMin(targetMax,fallbackRisk*MAX_RR));
+      double fallbackReward=Clamp(MathMax(volTarget,targetMin),
+                                  rewardFloor,rewardCeiling);
+
+      if(dir=="BUY")
+      {
+         p.sl=RoundPrice(entry-fallbackRisk);
+         p.tp=RoundPrice(entry+fallbackReward);
+      }
+      else
+      {
+         p.sl=RoundPrice(entry+fallbackRisk);
+         p.tp=RoundPrice(entry-fallbackReward);
+      }
+
+      p.rr=fallbackReward/fallbackRisk;
+      p.valid=(p.rr>=MIN_RR-0.0001 && p.rr<=MAX_RR+0.0001);
+   }
+
+   return p;
+}
+
+//----------------------------- Drawing ------------------------------
+void DeleteObject(string suffix)
+{
+   ObjectDelete(0,PREFIX+suffix);
+}
+
+void SetObjectCommon(string n,bool back=false)
+{
+   ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,n,OBJPROP_SELECTED,false);
+   ObjectSetInteger(0,n,OBJPROP_HIDDEN,false);
+   ObjectSetInteger(0,n,OBJPROP_BACK,back);
+   ObjectSetInteger(0,n,OBJPROP_TIMEFRAMES,OBJ_ALL_PERIODS);
+   ObjectSetInteger(0,n,OBJPROP_ZORDER,100);
+}
+
 void ApplyPremiumChartTheme()
 {
    if(!InpApplyPremiumTheme) return;
 
+   int scale=(int)MathMax(0,MathMin(5,InpChartScale));
+   double shift=MathMax(10.0,MathMin(50.0,InpRightShiftPercent));
+
    ChartSetInteger(0,CHART_MODE,CHART_CANDLES);
+   ChartSetInteger(0,CHART_AUTOSCROLL,true);
+   ChartSetInteger(0,CHART_SHIFT,true);
+   ChartSetDouble(0,CHART_SHIFT_SIZE,shift);
+   ChartSetInteger(0,CHART_SCALE,scale);
+   ChartSetInteger(0,CHART_FOREGROUND,false);
+
    ChartSetInteger(0,CHART_SHOW_GRID,false);
    ChartSetInteger(0,CHART_SHOW_VOLUMES,CHART_VOLUME_HIDE);
    ChartSetInteger(0,CHART_SHOW_PERIOD_SEP,false);
+   ChartSetInteger(0,CHART_SHOW_ASK_LINE,false);
+   ChartSetInteger(0,CHART_SHOW_LAST_LINE,false);
+   ChartSetInteger(0,CHART_SHOW_BID_LINE,true);
    ChartSetInteger(0,CHART_SHOW_OBJECT_DESCR,false);
+   ChartSetInteger(0,CHART_SHOW_ONE_CLICK,false);
 
    if(InpHideNativeTickerOHLC)
    {
@@ -1649,399 +2751,5374 @@ void ApplyPremiumChartTheme()
    ChartSetInteger(0,CHART_COLOR_BACKGROUND,InpChartBackground);
    ChartSetInteger(0,CHART_COLOR_FOREGROUND,InpChartForeground);
    ChartSetInteger(0,CHART_COLOR_GRID,InpChartBackground);
+   ChartSetInteger(0,CHART_COLOR_VOLUME,C'48,56,66');
 
+   // Candle bodies
    ChartSetInteger(0,CHART_COLOR_CANDLE_BULL,InpBullCandleColor);
    ChartSetInteger(0,CHART_COLOR_CANDLE_BEAR,InpBearCandleColor);
-   ChartSetInteger(0,CHART_COLOR_CHART_UP,InpBullCandleColor);
-   ChartSetInteger(0,CHART_COLOR_CHART_DOWN,InpBearCandleColor);
+
+   // Wick / outline colors
+   ChartSetInteger(0,CHART_COLOR_CHART_UP,InpBullWickColor);
+   ChartSetInteger(0,CHART_COLOR_CHART_DOWN,InpBearWickColor);
    ChartSetInteger(0,CHART_COLOR_CHART_LINE,InpChartForeground);
+
+   ChartSetInteger(0,CHART_COLOR_BID,C'78,88,100');
+   ChartSetInteger(0,CHART_COLOR_ASK,C'78,88,100');
+   ChartSetInteger(0,CHART_COLOR_LAST,C'78,88,100');
+   ChartSetInteger(0,CHART_COLOR_STOP_LEVEL,InpPanelHeaderColor);
+}
+
+void HLine(string suffix,double price,color clr,ENUM_LINE_STYLE style=STYLE_DOT,int width=1)
+{
+   if(price<=0 || price==EMPTY_VALUE) return;
+
+   string n=PREFIX+suffix;
+   if(ObjectFind(0,n)<0)
+      ObjectCreate(0,n,OBJ_HLINE,0,0,price);
+
+   ObjectSetDouble(0,n,OBJPROP_PRICE,price);
+   ObjectSetInteger(0,n,OBJPROP_COLOR,clr);
+   ObjectSetInteger(0,n,OBJPROP_STYLE,style);
+   ObjectSetInteger(0,n,OBJPROP_WIDTH,width);
+   SetObjectCommon(n,true);
+}
+
+
+// Draw the broker's actual pending/filled entry and active SL in gold.
+// V3.081 submits no TP. The exact virtual 10-pip stop and any broker-compatible SL are shown.
+void DrawActualTradeLevelsGold()
+{
+   ObjectsDeleteAll(0,PREFIX+"LIVE_");
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+
+      string key=(string)ticket;
+      double entry=PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl=PositionGetDouble(POSITION_SL);
+      double tp=PositionGetDouble(POSITION_TP);
+
+      HLine("LIVE_ENTRY_"+key,entry,InpTradeLevelGold,STYLE_SOLID,2);
+      if(sl>0.0)
+         HLine("LIVE_SL_"+key,sl,InpTradeLevelGold,STYLE_DASH,2);
+      if(tp>0.0)
+         HLine("LIVE_TP_"+key,tp,InpTradeLevelGold,STYLE_DOT,2);
+
+      int trailIndex=HybridTrailStateIndex(ticket);
+      if(trailIndex>=0 &&
+         g_hybridTrailStates[trailIndex].active &&
+         g_hybridTrailStates[trailIndex].virtualStop>0.0)
+      {
+         HLine("LIVE_VIRTUAL_SL_"+key,
+               g_hybridTrailStates[trailIndex].virtualStop,
+               InpTradeLevelGold,STYLE_DOT,1);
+      }
+   }
+
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0) continue;
+      if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+      if((ulong)OrderGetInteger(ORDER_MAGIC)!=InpMagicNumber) continue;
+
+      double price=OrderGetDouble(ORDER_PRICE_OPEN);
+      if(price>0.0)
+         HLine("LIVE_PENDING_"+(string)ticket,
+               price,InpTradeLevelGold,STYLE_DASHDOT,2);
+   }
+}
+
+void Rect(string suffix,datetime t1,double p1,datetime t2,double p2,color clr,bool back=true,int width=1,ENUM_LINE_STYLE style=STYLE_SOLID)
+{
+   if(t1<=0 || t2<=0 || p1<=0 || p2<=0) return;
+
+   string n=PREFIX+suffix;
+   double lo=MathMin(p1,p2), hi=MathMax(p1,p2);
+
+   if(ObjectFind(0,n)<0)
+      ObjectCreate(0,n,OBJ_RECTANGLE,0,t1,lo,t2,hi);
+   else
+   {
+      ObjectMove(0,n,0,t1,lo);
+      ObjectMove(0,n,1,t2,hi);
+   }
+
+   ObjectSetInteger(0,n,OBJPROP_COLOR,clr);
+   ObjectSetInteger(0,n,OBJPROP_FILL,true);
+   ObjectSetInteger(0,n,OBJPROP_STYLE,style);
+   ObjectSetInteger(0,n,OBJPROP_WIDTH,width);
+   SetObjectCommon(n,back);
+}
+
+void Panel(string suffix,int x,int y,int width,int height,color bg,color border)
+{
+   string n=PREFIX+suffix;
+   if(ObjectFind(0,n)<0)
+      ObjectCreate(0,n,OBJ_RECTANGLE_LABEL,0,0,0);
+
+   ObjectSetInteger(0,n,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0,n,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(0,n,OBJPROP_YDISTANCE,y);
+   ObjectSetInteger(0,n,OBJPROP_XSIZE,width);
+   ObjectSetInteger(0,n,OBJPROP_YSIZE,height);
+   ObjectSetInteger(0,n,OBJPROP_BGCOLOR,bg);
+   ObjectSetInteger(0,n,OBJPROP_BORDER_COLOR,border);
+   ObjectSetInteger(0,n,OBJPROP_COLOR,border);
+   ObjectSetInteger(0,n,OBJPROP_STYLE,STYLE_SOLID);
+   ObjectSetInteger(0,n,OBJPROP_WIDTH,1);
+   SetObjectCommon(n,false);
+}
+
+void CornerLabel(string suffix,string value,int x,int y,color clr,int size=9,string font="Arial")
+{
+   string n=PREFIX+suffix;
+   if(ObjectFind(0,n)<0)
+      ObjectCreate(0,n,OBJ_LABEL,0,0,0);
+
+   // Correct right-side anchoring: the text expands LEFT into the chart.
+   ObjectSetInteger(0,n,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0,n,OBJPROP_ANCHOR,ANCHOR_RIGHT_UPPER);
+   ObjectSetInteger(0,n,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(0,n,OBJPROP_YDISTANCE,y);
+   ObjectSetInteger(0,n,OBJPROP_COLOR,clr);
+   ObjectSetInteger(0,n,OBJPROP_FONTSIZE,size);
+   ObjectSetString(0,n,OBJPROP_FONT,font);
+   ObjectSetString(0,n,OBJPROP_TEXT,value);
+   SetObjectCommon(n,false);
+}
+
+void ChartText(string suffix,datetime tm,double price,string value,color clr,int size=8,ENUM_ANCHOR_POINT anchor=ANCHOR_LEFT)
+{
+   if(tm<=0 || price<=0 || price==EMPTY_VALUE) return;
+
+   string n=PREFIX+suffix;
+   if(ObjectFind(0,n)<0)
+      ObjectCreate(0,n,OBJ_TEXT,0,tm,price);
+   else
+      ObjectMove(0,n,0,tm,price);
+
+   ObjectSetString(0,n,OBJPROP_TEXT,value);
+   ObjectSetInteger(0,n,OBJPROP_COLOR,clr);
+   ObjectSetInteger(0,n,OBJPROP_FONTSIZE,size);
+   ObjectSetInteger(0,n,OBJPROP_ANCHOR,anchor);
+   ObjectSetString(0,n,OBJPROP_FONT,"Arial Bold");
+   SetObjectCommon(n,false);
+}
+
+void PriceMarker(string suffix,datetime tm,double price,string value,color clr)
+{
+   ChartText(suffix,tm,price,value,clr,10,ANCHOR_LEFT);
+}
+
+void AlertUser(string msg)
+{
+   if(!InpEnableAlerts) return;
+   Alert(msg);
+   if(InpPushNotifications) SendNotification(msg);
+}
+
+string StateText()
+{
+   if(g_state==ST_READY) return "READY";
+   if(g_state==ST_ACTIVE) return "LIVE";
+   if(g_state==ST_TP) return "TP HIT";
+   if(g_state==ST_SL) return "SL HIT";
+   if(g_state==ST_BE) return "BE HIT";
+   return "MONITORING";
+}
+
+color StateColor()
+{
+   if(g_state==ST_READY)
+      return (g_ready.direction=="BUY")?InpBuyColor:InpSellColor;
+   if(g_state==ST_ACTIVE)
+      return (g_active.direction=="BUY")?InpBuyColor:InpSellColor;
+   if(g_state==ST_TP) return InpBuyColor;
+   if(g_state==ST_SL) return InpSellColor;
+   if(g_state==ST_BE) return InpNeutralColor;
+   return InpPanelHeaderColor;
+}
+
+void DrawDashboard()
+{
+   if(!InpShowDashboard)
+   {
+      DeleteObject("DASH_PANEL");
+      DeleteObject("DASH_TITLE");
+      DeleteObject("DASH_BODY");
+      DeleteObject("DASH_STATE");
+      DeleteObject("DASH_COMPACT");
+      DeleteObject("DASH_COMPACT_LEFT");
+      DeleteObject("DASH_COMPACT_BIAS");
+      DeleteObject("DASH_RIGHT");
+      return;
+   }
+
+   // Remove legacy dashboard objects from prior builds.
+   DeleteObject("DASH_PANEL");
+   DeleteObject("DASH_TITLE");
+   DeleteObject("DASH_BODY");
+   DeleteObject("DASH_STATE");
+   DeleteObject("DASH_COMPACT");
+   DeleteObject("DASH_COMPACT_LEFT");
+   DeleteObject("DASH_COMPACT_BIAS");
+
+   // Privacy-safe single line:
+   // XAUUSD • SCALP • M1 | BIAS BULLISH
+   string biasText=(g_biasText=="")?"NEUTRAL":g_biasText;
+   string compact=_Symbol+" • "+g_mode+" • "+g_tfLabel+" | BIAS "+biasText;
+
+   color clr=InpNeutralColor;
+   if(biasText=="BULLISH")
+      clr=InpBuyColor;
+   else if(biasText=="BEARISH")
+      clr=InpSellColor;
+
+   string n=PREFIX+"DASH_RIGHT";
+   if(ObjectFind(0,n)<0)
+      ObjectCreate(0,n,OBJ_LABEL,0,0,0);
+
+   ObjectSetInteger(0,n,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0,n,OBJPROP_ANCHOR,ANCHOR_RIGHT_UPPER);
+   ObjectSetInteger(0,n,OBJPROP_XDISTANCE,18);
+   ObjectSetInteger(0,n,OBJPROP_YDISTANCE,8);
+   ObjectSetInteger(0,n,OBJPROP_COLOR,clr);
+   ObjectSetInteger(0,n,OBJPROP_FONTSIZE,9);
+   ObjectSetString(0,n,OBJPROP_FONT,"Arial Bold");
+   ObjectSetString(0,n,OBJPROP_TEXT,compact);
+   SetObjectCommon(n,false);
+}
+
+void ClearTradeCardRows()
+{
+   DeleteObject("CARD_PANEL");
+   for(int i=0;i<10;i++)
+      DeleteObject("CARD_ROW_"+IntegerToString(i));
+   DeleteObject("CARD");
+}
+
+void CardRow(int row,string value,color clr,bool bold=false)
+{
+   string suffix="CARD_ROW_"+IntegerToString(row);
+   string n=PREFIX+suffix;
+
+   if(ObjectFind(0,n)<0)
+      ObjectCreate(0,n,OBJ_LABEL,0,0,0);
+
+   ObjectSetInteger(0,n,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0,n,OBJPROP_ANCHOR,ANCHOR_RIGHT_UPPER);
+   ObjectSetInteger(0,n,OBJPROP_XDISTANCE,30);
+   ObjectSetInteger(0,n,OBJPROP_YDISTANCE,50+row*17);
+   ObjectSetInteger(0,n,OBJPROP_COLOR,clr);
+   ObjectSetInteger(0,n,OBJPROP_FONTSIZE,8);
+   ObjectSetString(0,n,OBJPROP_FONT,bold?"Arial Bold":"Arial");
+   ObjectSetString(0,n,OBJPROP_TEXT,value);
+   SetObjectCommon(n,false);
 }
 
 void DrawTradeCard()
 {
    if(!InpShowTradeCard)
    {
-      ObjectDelete(0,"V4_CARD_PANEL");
-      for(int i=0;i<8;i++)
-         ObjectDelete(0,"V4_CARD_ROW_"+IntegerToString(i));
+      ClearTradeCardRows();
       return;
    }
 
-   int buys =CountOpenPositionsByDirection(1);
-   int sells=CountOpenPositionsByDirection(-1);
-   int total=buys+sells;
+   // Always delete legacy single-label card.
+   DeleteObject("CARD");
 
-   double floatingPl=0.0;
-   for(int i=PositionsTotal()-1;i>=0;i--)
+   int rows=0;
+   color accent=InpNeutralColor;
+
+   if(g_state==ST_READY)
    {
-      ulong ticket=PositionGetTicket(i);
-      if(ticket==0) continue;
-      if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
-      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
-      floatingPl+=PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
+      accent=(g_ready.direction=="BUY")?InpBuyColor:InpSellColor;
+      rows=g_ready.counterTrend?6:5;
+      Panel("CARD_PANEL",14,38,300,34+rows*17,InpPanelColor,InpPanelBorderColor);
+
+      CardRow(0,"SETUP READY • "+g_ready.direction,accent,true);
+      CardRow(1,_Symbol+" • "+g_mode+" • "+g_tfLabel,InpNeutralColor,false);
+      CardRow(2,"ENTRY  "+PriceText(g_ready.entryLo)+" - "+PriceText(g_ready.entryHi),InpNeutralColor,false);
+      CardRow(3,"CONFIRMATION  ENTRY ZONE REJECTION",InpNeutralColor,false);
+      CardRow(4,"CONFLUENCES  "+IntegerToString(g_ready.confluences),InpNeutralColor,false);
+      if(g_ready.counterTrend)
+         CardRow(5,"⚠ COUNTER-TREND",InpPanelHeaderColor,true);
+   }
+   else if(g_state==ST_ACTIVE)
+   {
+      accent=(g_active.direction=="BUY")?InpBuyColor:InpSellColor;
+      rows=7+(g_active.beArmed?1:0)+(g_active.counterTrend?1:0);
+      Panel("CARD_PANEL",14,38,300,34+rows*17,InpPanelColor,InpPanelBorderColor);
+
+      int r=0;
+      CardRow(r++,"TRADE ACTIVE • "+g_active.direction,accent,true);
+      CardRow(r++,_Symbol+" • "+g_mode+" • "+g_tfLabel,InpNeutralColor,false);
+      CardRow(r++,"ENTRY  "+PriceText(g_active.entry),InpNeutralColor,false);
+      CardRow(r++,"TP     "+PriceText(g_active.tp),InpBuyColor,false);
+      CardRow(r++,"SL     "+PriceText(g_active.sl),InpSellColor,false);
+      CardRow(r++,"R:R    1:"+DoubleToString(g_active.rr,2),InpNeutralColor,false);
+      CardRow(r++,"CONFLUENCES  "+IntegerToString(g_active.confluences),InpNeutralColor,false);
+
+      if(g_active.beArmed)
+         CardRow(r++,"BE ARMED @ +1R",InpBEColor,true);
+      if(g_active.counterTrend)
+         CardRow(r++,"⚠ COUNTER-TREND",InpPanelHeaderColor,true);
+   }
+   else if(g_state==ST_TP || g_state==ST_SL || g_state==ST_BE)
+   {
+      accent=(g_state==ST_TP)?InpBuyColor:(g_state==ST_SL?InpSellColor:InpNeutralColor);
+      rows=2;
+      Panel("CARD_PANEL",14,38,300,70,InpPanelColor,InpPanelBorderColor);
+      CardRow(0,g_lastResult,accent,true);
+      CardRow(1,_Symbol+" • "+g_tfLabel,InpNeutralColor,false);
+   }
+   else
+   {
+      if(!InpShowMonitoringCard)
+      {
+         ClearTradeCardRows();
+         return;
+      }
+
+      rows=3;
+      Panel("CARD_PANEL",14,38,300,86,InpPanelColor,InpPanelBorderColor);
+      CardRow(0,"MONITORING",InpNeutralColor,true);
+      CardRow(1,_Symbol+" • "+g_mode+" • "+g_tfLabel,InpNeutralColor,false);
+      CardRow(2,"WAITING FOR VALID SETUP",InpNeutralColor,false);
    }
 
-   int rows=6;
-   string panel="V4_CARD_PANEL";
-   if(ObjectFind(0,panel)<0)
-      ObjectCreate(0,panel,OBJ_RECTANGLE_LABEL,0,0,0);
-   ObjectSetInteger(0,panel,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
-   ObjectSetInteger(0,panel,OBJPROP_XDISTANCE,14);
-   ObjectSetInteger(0,panel,OBJPROP_YDISTANCE,38);
-   ObjectSetInteger(0,panel,OBJPROP_XSIZE,290);
-   ObjectSetInteger(0,panel,OBJPROP_YSIZE,20+rows*17);
-   ObjectSetInteger(0,panel,OBJPROP_BGCOLOR,InpPanelColor);
-   ObjectSetInteger(0,panel,OBJPROP_BORDER_COLOR,InpPanelBorderColor);
-   ObjectSetInteger(0,panel,OBJPROP_COLOR,InpPanelBorderColor);
-   ObjectSetInteger(0,panel,OBJPROP_STYLE,STYLE_SOLID);
-   ObjectSetInteger(0,panel,OBJPROP_WIDTH,1);
-   ObjectSetInteger(0,panel,OBJPROP_SELECTABLE,false);
-   ObjectSetInteger(0,panel,OBJPROP_BACK,false);
-
-   color plColor=(floatingPl>0.0)?InpBuyColor:(floatingPl<0.0?InpSellColor:InpNeutralColor);
-
-   string rowText[6];
-   color  rowColor[6];
-   rowText[0]=_Symbol+" - EzyEA V4";                                             rowColor[0]=InpNeutralColor;
-   rowText[1]="OPEN  "+IntegerToString(total)+"  (BUY "+IntegerToString(buys)+" / SELL "+IntegerToString(sells)+")"; rowColor[1]=InpNeutralColor;
-   rowText[2]="FLOATING P/L  "+DoubleToString(floatingPl,2)+" "+AccountInfoString(ACCOUNT_CURRENCY); rowColor[2]=plColor;
-   rowText[3]="LEVELS  "+IntegerToString(CountActiveLevels())+"/"+IntegerToString(ArraySize(g_levels)); rowColor[3]=InpNeutralColor;
-   rowText[4]="EXIT  preset="+DoubleToString(InpPresetStopLossPips,0)+"p trail="+DoubleToString(InpTrailingDistancePips,0)+"p" +(IsLiveXAUUSDscProtectionChart()?" [LIVE PARITY]":""); rowColor[4]=InpNeutralColor;
-   rowText[5]=g_tradingHalted?"DRAWDOWN BREAKER: HALTED":"STATUS: ACTIVE"; rowColor[5]=g_tradingHalted?InpSellColor:InpBuyColor;
-
-   for(int r=0;r<rows;r++)
-   {
-      string n="V4_CARD_ROW_"+IntegerToString(r);
-      if(ObjectFind(0,n)<0)
-         ObjectCreate(0,n,OBJ_LABEL,0,0,0);
-      ObjectSetInteger(0,n,OBJPROP_CORNER,CORNER_RIGHT_UPPER);
-      ObjectSetInteger(0,n,OBJPROP_ANCHOR,ANCHOR_RIGHT_UPPER);
-      ObjectSetInteger(0,n,OBJPROP_XDISTANCE,30);
-      ObjectSetInteger(0,n,OBJPROP_YDISTANCE,50+r*17);
-      ObjectSetInteger(0,n,OBJPROP_COLOR,rowColor[r]);
-      ObjectSetInteger(0,n,OBJPROP_FONTSIZE,(r==0)?9:8);
-      ObjectSetString(0,n,OBJPROP_FONT,(r==0)?"Arial Bold":"Arial");
-      ObjectSetString(0,n,OBJPROP_TEXT,rowText[r]);
-      ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
-   }
+   // Remove unused rows from a previous larger state.
+   for(int i=rows;i<10;i++)
+      DeleteObject("CARD_ROW_"+IntegerToString(i));
 }
 
-void DrawLiveTradeLevels()
+void DrawLevelLabel(string suffix,string tag,double price,color clr,datetime labelTime)
 {
-   if(!InpShowLiveTradeLevels)
+   if(!InpShowDrawingLabels)
    {
-      ObjectsDeleteAll(0,"V4_LIVE_");
+      DeleteObject(suffix);
       return;
    }
+   ChartText(suffix,labelTime,price,tag+"  "+PriceText(price),clr,8,ANCHOR_LEFT);
+}
 
-   ObjectsDeleteAll(0,"V4_LIVE_");
-
-   for(int i=PositionsTotal()-1;i>=0;i--)
+void DrawZoneLabel(string suffix,string tag,const ZoneInfo &z,color clr,datetime labelTime)
+{
+   if(!InpShowDrawingLabels || !z.valid)
    {
-      ulong ticket=PositionGetTicket(i);
-      if(ticket==0) continue;
-      if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
-      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+      DeleteObject(suffix);
+      return;
+   }
+   ChartText(suffix,labelTime,(z.lo+z.hi)/2.0,tag,clr,8,ANCHOR_LEFT);
+}
 
-      string key=IntegerToString((int)ticket);
-      double entry=PositionGetDouble(POSITION_PRICE_OPEN);
-      double sl   =PositionGetDouble(POSITION_SL);
+void DrawMap(datetime now)
+{
+   datetime mapFuture=now+TfSeconds(g_entryTF)*22;
+   datetime labelTime=now+TfSeconds(g_entryTF)*3;
 
-      string entryName="V4_LIVE_ENTRY_"+key;
-      if(ObjectFind(0,entryName)<0)
-         ObjectCreate(0,entryName,OBJ_HLINE,0,0,entry);
-      ObjectSetDouble(0,entryName,OBJPROP_PRICE,entry);
-      ObjectSetInteger(0,entryName,OBJPROP_COLOR,InpTradeLevelGold);
-      ObjectSetInteger(0,entryName,OBJPROP_STYLE,STYLE_SOLID);
-      ObjectSetInteger(0,entryName,OBJPROP_WIDTH,2);
-      ObjectSetInteger(0,entryName,OBJPROP_BACK,true);
-      ObjectSetInteger(0,entryName,OBJPROP_SELECTABLE,false);
+   // Direction S/R levels + labels
+   if(InpShowDirectionLevels)
+   {
+      HLine("S1",g_S1,InpSupportColor,STYLE_DOT,1);
+      HLine("S2",g_S2,InpSupportColor,STYLE_DASH,1);
+      HLine("R1",g_R1,InpResistanceColor,STYLE_DOT,1);
+      HLine("R2",g_R2,InpResistanceColor,STYLE_DASH,1);
 
-      if(sl>0.0)
+      DrawLevelLabel("LBL_S1","S1",g_S1,InpSupportColor,labelTime);
+      DrawLevelLabel("LBL_S2","S2",g_S2,InpSupportColor,labelTime);
+      DrawLevelLabel("LBL_R1","R1",g_R1,InpResistanceColor,labelTime);
+      DrawLevelLabel("LBL_R2","R2",g_R2,InpResistanceColor,labelTime);
+   }
+   else
+   {
+      DeleteObject("S1"); DeleteObject("S2"); DeleteObject("R1"); DeleteObject("R2");
+      DeleteObject("LBL_S1"); DeleteObject("LBL_S2"); DeleteObject("LBL_R1"); DeleteObject("LBL_R2");
+   }
+
+   // FOUR support/resistance zones:
+   // S1 = BUY HIGH RISK, S2 = BUY LOW RISK
+   // R1 = SELL HIGH RISK, R2 = SELL LOW RISK
+   if(InpShowSupportingZones)
+   {
+      if(g_buyHigh.valid)
+         Rect("BUY_HIGH_ZONE",g_buyHigh.time,g_buyHigh.lo,mapFuture,g_buyHigh.hi,InpBuyHighRiskZoneColor,true,1,STYLE_SOLID);
+
+      if(g_sellHigh.valid)
+         Rect("SELL_HIGH_ZONE",g_sellHigh.time,g_sellHigh.lo,mapFuture,g_sellHigh.hi,InpSellHighRiskZoneColor,true,1,STYLE_SOLID);
+
+      if(InpShowLowRiskZones && g_buyLow.valid)
+         Rect("BUY_LOW_ZONE",g_buyLow.time,g_buyLow.lo,mapFuture,g_buyLow.hi,InpBuyLowRiskZoneColor,true,1,STYLE_DASH);
+
+      if(InpShowLowRiskZones && g_sellLow.valid)
+         Rect("SELL_LOW_ZONE",g_sellLow.time,g_sellLow.lo,mapFuture,g_sellLow.hi,InpSellLowRiskZoneColor,true,1,STYLE_DASH);
+
+      DrawZoneLabel("LBL_BUY_HIGH","BUY • HIGH RISK",g_buyHigh,InpBuyColor,labelTime);
+      DrawZoneLabel("LBL_SELL_HIGH","SELL • HIGH RISK",g_sellHigh,InpSellColor,labelTime);
+
+      if(InpShowLowRiskZones)
       {
-         string slName="V4_LIVE_SL_"+key;
-         if(ObjectFind(0,slName)<0)
-            ObjectCreate(0,slName,OBJ_HLINE,0,0,sl);
-         ObjectSetDouble(0,slName,OBJPROP_PRICE,sl);
-         ObjectSetInteger(0,slName,OBJPROP_COLOR,InpTradeLevelGold);
-         ObjectSetInteger(0,slName,OBJPROP_STYLE,STYLE_DASH);
-         ObjectSetInteger(0,slName,OBJPROP_WIDTH,2);
-         ObjectSetInteger(0,slName,OBJPROP_BACK,true);
-         ObjectSetInteger(0,slName,OBJPROP_SELECTABLE,false);
+         DrawZoneLabel("LBL_BUY_LOW","BUY • LOW RISK",g_buyLow,InpSupportColor,labelTime);
+         DrawZoneLabel("LBL_SELL_LOW","SELL • LOW RISK",g_sellLow,InpResistanceColor,labelTime);
+
+         // Optional temporary validation marker for the exact candle chosen.
+         if(InpShowLowRiskSourceMarker)
+         {
+            if(g_buyLow.valid)
+               ChartText("SRC_BUY_LOW",g_buyLow.time,g_buyLow.hi,
+                         "BUY LOW SOURCE",InpBuyColor,7,ANCHOR_LOWER);
+            if(g_sellLow.valid)
+               ChartText("SRC_SELL_LOW",g_sellLow.time,g_sellLow.lo,
+                         "SELL LOW SOURCE",InpSellColor,7,ANCHOR_UPPER);
+         }
+         else
+         {
+            DeleteObject("SRC_BUY_LOW");
+            DeleteObject("SRC_SELL_LOW");
+         }
       }
-
-      int slot=EnsureManagedSlot(ticket);
-      if(slot>=0 && g_managed[slot].virtualStop>0.0)
+      else
       {
-         string vName="V4_LIVE_VSL_"+key;
-         if(ObjectFind(0,vName)<0)
-            ObjectCreate(0,vName,OBJ_HLINE,0,0,g_managed[slot].virtualStop);
-         ObjectSetDouble(0,vName,OBJPROP_PRICE,g_managed[slot].virtualStop);
-         ObjectSetInteger(0,vName,OBJPROP_COLOR,InpTradeLevelGold);
-         ObjectSetInteger(0,vName,OBJPROP_STYLE,STYLE_DOT);
-         ObjectSetInteger(0,vName,OBJPROP_WIDTH,1);
-         ObjectSetInteger(0,vName,OBJPROP_BACK,true);
-         ObjectSetInteger(0,vName,OBJPROP_SELECTABLE,false);
+         DeleteObject("BUY_LOW_ZONE"); DeleteObject("SELL_LOW_ZONE");
+         DeleteObject("LBL_BUY_LOW"); DeleteObject("LBL_SELL_LOW");
+         DeleteObject("SRC_BUY_LOW"); DeleteObject("SRC_SELL_LOW");
       }
    }
+   else
+   {
+      DeleteObject("BUY_HIGH_ZONE"); DeleteObject("BUY_LOW_ZONE");
+      DeleteObject("SELL_HIGH_ZONE"); DeleteObject("SELL_LOW_ZONE");
+      DeleteObject("LBL_BUY_HIGH"); DeleteObject("LBL_BUY_LOW");
+      DeleteObject("LBL_SELL_HIGH"); DeleteObject("LBL_SELL_LOW");
+      DeleteObject("SRC_BUY_LOW"); DeleteObject("SRC_SELL_LOW");
+   }
+
+   // V1.2 dual READY rectangles + immutable LIVE rectangle.
+   if(InpShowEntryZone && g_state==ST_READY)
+   {
+      if(g_buyReady.armed)
+      {
+         Rect("ENTRY_BUY_READY",g_buyReady.entryTime,g_buyReady.entryLo,
+              mapFuture,g_buyReady.entryHi,InpBuyColor,false,2,STYLE_SOLID);
+
+         if(InpShowDrawingLabels)
+            ChartText("LBL_ENTRY_BUY",labelTime,
+                      (g_buyReady.entryLo+g_buyReady.entryHi)/2.0,
+                      "READY BUY • ENTRY ZONE",InpBuyColor,9,ANCHOR_LEFT);
+      }
+      else
+      {
+         DeleteObject("ENTRY_BUY_READY");
+         DeleteObject("LBL_ENTRY_BUY");
+      }
+
+      if(g_sellReady.armed)
+      {
+         Rect("ENTRY_SELL_READY",g_sellReady.entryTime,g_sellReady.entryLo,
+              mapFuture,g_sellReady.entryHi,InpSellColor,false,2,STYLE_SOLID);
+
+         if(InpShowDrawingLabels)
+            ChartText("LBL_ENTRY_SELL",labelTime,
+                      (g_sellReady.entryLo+g_sellReady.entryHi)/2.0,
+                      "READY SELL • ENTRY ZONE",InpSellColor,9,ANCHOR_LEFT);
+      }
+      else
+      {
+         DeleteObject("ENTRY_SELL_READY");
+         DeleteObject("LBL_ENTRY_SELL");
+      }
+
+      DeleteObject("ENTRY");
+      DeleteObject("LBL_ENTRY");
+      DeleteObject("ACTIVE_ENTRY");
+      DeleteObject("ACTIVE_TP");
+      DeleteObject("ACTIVE_SL");
+      DeleteObject("ACTIVE_BE");
+      DeleteObject("LBL_ACTIVE_ENTRY");
+      DeleteObject("LBL_ACTIVE_TP");
+      DeleteObject("LBL_ACTIVE_SL");
+      DeleteObject("LBL_ACTIVE_BE");
+   }
+   else if(InpShowEntryZone && g_state==ST_ACTIVE)
+   {
+      DeleteObject("ENTRY_BUY_READY");
+      DeleteObject("ENTRY_SELL_READY");
+      DeleteObject("LBL_ENTRY_BUY");
+      DeleteObject("LBL_ENTRY_SELL");
+
+      color c=(g_active.direction=="BUY")?InpBuyColor:InpSellColor;
+
+      Rect("ENTRY",g_active.entryTime,g_active.entryLo,
+           mapFuture,g_active.entryHi,c,false,2,STYLE_SOLID);
+
+      if(InpShowDrawingLabels)
+         ChartText("LBL_ENTRY",labelTime,
+                   (g_active.entryLo+g_active.entryHi)/2.0,
+                   "LIVE "+g_active.direction+" • ENTRY ZONE",c,9,ANCHOR_LEFT);
+
+      HLine("ACTIVE_ENTRY",g_active.entry,c,STYLE_SOLID,2);
+      HLine("ACTIVE_TP",g_active.tp,InpBuyColor,STYLE_DASH,1);
+      HLine("ACTIVE_SL",g_active.sl,InpSellColor,STYLE_DASH,1);
+
+      if(InpShowBELevel)
+         HLine("ACTIVE_BE",g_active.beTrigger,InpBEColor,STYLE_DOT,1);
+      else
+         DeleteObject("ACTIVE_BE");
+
+      if(InpShowDrawingLabels)
+      {
+         ChartText("LBL_ACTIVE_ENTRY",labelTime,g_active.entry,
+                   "ENTRY  "+PriceText(g_active.entry),c,8,ANCHOR_LEFT);
+         ChartText("LBL_ACTIVE_TP",labelTime,g_active.tp,
+                   "TP  "+PriceText(g_active.tp),InpBuyColor,8,ANCHOR_LEFT);
+         ChartText("LBL_ACTIVE_SL",labelTime,g_active.sl,
+                   "SL  "+PriceText(g_active.sl),InpSellColor,8,ANCHOR_LEFT);
+
+         if(InpShowBELevel)
+            ChartText("LBL_ACTIVE_BE",labelTime,g_active.beTrigger,
+                      "BE 40%  "+PriceText(g_active.beTrigger),
+                      InpBEColor,8,ANCHOR_LEFT);
+      }
+   }
+   else
+   {
+      DeleteObject("ENTRY_BUY_READY");
+      DeleteObject("ENTRY_SELL_READY");
+      DeleteObject("LBL_ENTRY_BUY");
+      DeleteObject("LBL_ENTRY_SELL");
+      DeleteObject("ENTRY");
+      DeleteObject("LBL_ENTRY");
+      DeleteObject("ACTIVE_ENTRY");
+      DeleteObject("ACTIVE_TP");
+      DeleteObject("ACTIVE_SL");
+      DeleteObject("ACTIVE_BE");
+      DeleteObject("LBL_ACTIVE_ENTRY");
+      DeleteObject("LBL_ACTIVE_TP");
+      DeleteObject("LBL_ACTIVE_SL");
+      DeleteObject("LBL_ACTIVE_BE");
+   }
+
 }
+
 
 void RemoveOldestHistoricalMarker()
 {
-   if(g_histMarkerCount<=0) return;
+   int n=ArraySize(g_historicalMarkerNames);
+   if(n<=0) return;
 
-   ObjectDelete(0,"V4_HIST_"+IntegerToString(0));
+   ObjectDelete(0,g_historicalMarkerNames[0]);
 
-   for(int i=1;i<g_histMarkerCount;i++)
-   {
-      string old="V4_HIST_"+IntegerToString(i);
-      string fresh="V4_HIST_"+IntegerToString(i-1);
-      if(ObjectFind(0,old)>=0)
-         ObjectSetString(0,old,OBJPROP_NAME,fresh);
+   for(int i=1;i<n;i++)
+      g_historicalMarkerNames[i-1]=g_historicalMarkerNames[i];
 
-      g_histMarkerTimes[i-1] =g_histMarkerTimes[i];
-      g_histMarkerPrices[i-1]=g_histMarkerPrices[i];
-      g_histMarkerWins[i-1]  =g_histMarkerWins[i];
-   }
+   ArrayResize(g_historicalMarkerNames,n-1);
+}
 
-   g_histMarkerCount--;
-   ArrayResize(g_histMarkerTimes,g_histMarkerCount);
-   ArrayResize(g_histMarkerPrices,g_histMarkerCount);
-   ArrayResize(g_histMarkerWins,g_histMarkerCount);
+void AddHistoricalMarker(string direction,datetime tm,double price)
+{
+   if(!InpShowHistoricalMarkers) return;
+   if(direction!="BUY" && direction!="SELL") return;
+   if(tm<=0 || price<=0) return;
+
+   g_historicalMarkerSerial++;
+   string name=PREFIX+"HIST_"+IntegerToString((int)tm)+"_"+IntegerToString(g_historicalMarkerSerial);
+
+   // Place BUY marker slightly under entry and SELL slightly above it.
+   double offset=MathMax(g_pipSize*8.0,_Point*8.0);
+   double markerPrice=(direction=="BUY")?price-offset:price+offset;
+
+   if(!ObjectCreate(0,name,OBJ_TEXT,0,tm,markerPrice))
+      return;
+
+   ObjectSetString(0,name,OBJPROP_TEXT,direction);
+   ObjectSetString(0,name,OBJPROP_FONT,"Arial Bold");
+   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,8);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,(direction=="BUY")?InpBuyColor:InpSellColor);
+   ObjectSetInteger(0,name,OBJPROP_ANCHOR,(direction=="BUY")?ANCHOR_UPPER:ANCHOR_LOWER);
+   ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+   ObjectSetInteger(0,name,OBJPROP_SELECTED,false);
+   ObjectSetInteger(0,name,OBJPROP_HIDDEN,false);
+   ObjectSetInteger(0,name,OBJPROP_BACK,false);
+   ObjectSetInteger(0,name,OBJPROP_TIMEFRAMES,OBJ_ALL_PERIODS);
+   ObjectSetInteger(0,name,OBJPROP_ZORDER,110);
+
+   int n=ArraySize(g_historicalMarkerNames);
+   ArrayResize(g_historicalMarkerNames,n+1);
+   g_historicalMarkerNames[n]=name;
+
+   int maxMarkers=MathMax(1,InpMaxHistoricalMarkers);
+   while(ArraySize(g_historicalMarkerNames)>maxMarkers)
+      RemoveOldestHistoricalMarker();
 }
 
 void ClearHistoricalMarkers()
 {
-   ObjectsDeleteAll(0,"V4_HIST_");
-   ArrayResize(g_histMarkerTimes,0);
-   ArrayResize(g_histMarkerPrices,0);
-   ArrayResize(g_histMarkerWins,0);
-   g_histMarkerCount=0;
+   int n=ArraySize(g_historicalMarkerNames);
+   for(int i=0;i<n;i++)
+      ObjectDelete(0,g_historicalMarkerNames[i]);
+
+   ArrayResize(g_historicalMarkerNames,0);
 }
 
-void AddHistoricalMarker(bool win,datetime tm,double price)
+//-------------------------- Signal engine ---------------------------
+void UpdateEventAges(bool bullChoch,bool bearChoch,bool bullReject,bool bearReject)
 {
-   if(!InpShowHistoricalMarkers) return;
-   if(tm<=0 || price<=0.0) return;
-
-   int cap=MathMax(1,InpMaxHistoricalMarkers);
-   while(g_histMarkerCount>=cap)
-      RemoveOldestHistoricalMarker();
-
-   int idx=g_histMarkerCount;
-   ArrayResize(g_histMarkerTimes,idx+1);
-   ArrayResize(g_histMarkerPrices,idx+1);
-   ArrayResize(g_histMarkerWins,idx+1);
-   g_histMarkerTimes[idx] =tm;
-   g_histMarkerPrices[idx]=price;
-   g_histMarkerWins[idx]  =win;
-   g_histMarkerCount++;
-
-   string n="V4_HIST_"+IntegerToString(idx);
-   if(ObjectFind(0,n)<0)
-      ObjectCreate(0,n,OBJ_TEXT,0,tm,price);
-   else
-      ObjectMove(0,n,0,tm,price);
-
-   ObjectSetString(0,n,OBJPROP_TEXT,win?"W":"L");
-   ObjectSetInteger(0,n,OBJPROP_COLOR,win?InpBuyColor:InpSellColor);
-   ObjectSetInteger(0,n,OBJPROP_FONTSIZE,8);
-   ObjectSetInteger(0,n,OBJPROP_ANCHOR,ANCHOR_CENTER);
-   ObjectSetString(0,n,OBJPROP_FONT,"Arial Bold");
-   ObjectSetInteger(0,n,OBJPROP_SELECTABLE,false);
-   ObjectSetInteger(0,n,OBJPROP_BACK,false);
+   g_bullChochAge=bullChoch?0:MathMin(9999,g_bullChochAge+1);
+   g_bearChochAge=bearChoch?0:MathMin(9999,g_bearChochAge+1);
+   g_bullRejectAge=bullReject?0:MathMin(9999,g_bullRejectAge+1);
+   g_bearRejectAge=bearReject?0:MathMin(9999,g_bearRejectAge+1);
 }
 
-//======================================================================
-// Scans newly-closed deals (DEAL_ENTRY_OUT) for this EA's magic number
-// and drops a small win/loss marker at the close price/time. Tracks
-// the highest deal ticket already seen so each deal is only marked
-// once; a cold start (fresh chart attach) seeds from the newest
-// existing deal rather than replaying all history as markers.
-//======================================================================
-void CheckForClosedDeals()
+void ClearReadySnapshot(ReadySnapshot &r)
 {
-   if(!InpShowHistoricalMarkers) return;
+   ZeroMemory(r);
+   r.direction="NONE";
+   r.armed=false;
+}
 
-   if(g_lastSeenDealTicket==0)
+void SyncReadyDisplay(double livePrice)
+{
+   ClearReadySnapshot(g_ready);
+
+   if(g_buyReady.armed && !g_sellReady.armed)
+      g_ready=g_buyReady;
+   else if(g_sellReady.armed && !g_buyReady.armed)
+      g_ready=g_sellReady;
+   else if(g_buyReady.armed && g_sellReady.armed)
    {
-      if(!HistorySelect(0,TimeCurrent())) return;
-      ulong newest=0;
-      int total=HistoryDealsTotal();
-      for(int i=0;i<total;i++)
+      double bd=(livePrice<g_buyReady.entryLo)?g_buyReady.entryLo-livePrice:
+                (livePrice>g_buyReady.entryHi)?livePrice-g_buyReady.entryHi:0.0;
+      double sd=(livePrice<g_sellReady.entryLo)?g_sellReady.entryLo-livePrice:
+                (livePrice>g_sellReady.entryHi)?livePrice-g_sellReady.entryHi:0.0;
+      g_ready=(bd<=sd)?g_buyReady:g_sellReady;
+   }
+
+   if(g_buyReady.armed || g_sellReady.armed)
+      g_state=ST_READY;
+   else if(g_state==ST_READY)
+      g_state=ST_MONITORING;
+}
+
+void ResetReady()
+{
+   ClearReadySnapshot(g_buyReady);
+   ClearReadySnapshot(g_sellReady);
+   ClearReadySnapshot(g_ready);
+
+   if(g_state==ST_READY)
+      g_state=ST_MONITORING;
+}
+
+void FinishTrade(EzyState result,double resultPips)
+{
+   // Preserve the completed LIVE signal as a historical BUY/SELL marker.
+   // The marker is anchored to the original LIVE start time and entry.
+   AddHistoricalMarker(g_active.direction,g_active.startClock,g_active.entry);
+
+   if(result==ST_TP) g_lastResult="✅ COLLECT PROFIT";
+   else if(result==ST_SL) g_lastResult="❌ HIT RISK";
+   else g_lastResult="⚪ HIT BE";
+   g_state=result; g_resultTime=TimeCurrent();
+   string msg=g_lastResult+"\n\n"+_Symbol+" • "+g_active.direction+" • "+g_tfLabel+"\n\nRESULT\n"+(resultPips>0?"+":"")+DoubleToString(resultPips,0)+" PIPS\n\nEZYMAP • SCALP MASTERY";
+   if(InpAlertResult) AlertUser(msg);
+}
+
+
+
+
+
+
+bool CalculateMapAndMaybeReady(double livePrice)
+{
+   MqlRates m5[],h1[],m15[];
+
+   if(!LoadRatesFlexible(PERIOD_M5,140,40,m5) ||
+      !LoadRatesFlexible(PERIOD_H1,140,55,h1) ||
+      !LoadRatesFlexible(PERIOD_M15,180,60,m15))
+      return false;
+
+   g_pipSize=IsGold()?MathMax(0.10,_Point):
+             (IsBTC()?MathMax(1.0,_Point):_Point);
+
+   g_brnStep=IsGold()?100.0:
+             (IsBTC()?1000.0:MathMax(livePrice*0.01,_Point*100.0));
+
+   g_microStep=IsGold()?50.0:
+               (IsBTC()?500.0:g_brnStep*0.5);
+
+   g_livePrice=livePrice;
+
+   // --------------------------------------------------------
+   // M5 entry reference: confirmed previous M5 candle.
+   // --------------------------------------------------------
+   double entryReference=m5[1].close;
+   double entryBiasEMA=EMAFromRates(m5,ArraySize(m5),EMA_LEN,1);
+
+   // --------------------------------------------------------
+   // H1 direction engine.
+   // --------------------------------------------------------
+   double directionATR=ATRFromRates(h1,ArraySize(h1),14,1);
+   double directionEMA=EMAFromRates(h1,ArraySize(h1),EMA_LEN,1);
+   double directionClose=h1[1].close;
+
+   if(directionATR==EMPTY_VALUE ||
+      directionEMA==EMPTY_VALUE ||
+      entryBiasEMA==EMPTY_VALUE)
+      return false;
+
+   double directionLow=DBL_MAX;
+   double directionHigh=-DBL_MAX;
+
+   int dirN=MathMin(100,ArraySize(h1)-1);
+
+   for(int i=1;i<=dirN;i++)
+   {
+      directionLow=MathMin(directionLow,h1[i].low);
+      directionHigh=MathMax(directionHigh,h1[i].high);
+   }
+
+   double minimumLevelDistance=
+      MathMax(70.0*g_pipSize,_Point*5.0);
+
+   PickDirectionLevels(h1,
+                       ArraySize(h1),
+                       entryReference,
+                       minimumLevelDistance,
+                       directionLow,
+                       directionHigh,
+                       directionATR,
+                       g_S1,g_S2,g_R1,g_R2);
+
+   bool bullishBias=(directionClose>directionEMA);
+   bool bearishBias=(directionClose<directionEMA);
+
+   g_biasText=bullishBias?"BULLISH":
+              (bearishBias?"BEARISH":"NEUTRAL");
+
+   // --------------------------------------------------------
+   // M15 supporting map.
+   // --------------------------------------------------------
+   double supportATR=ATRFromRates(m15,ArraySize(m15),14,1);
+   double supportEMA=EMAFromRates(m15,ArraySize(m15),EMA_LEN,1);
+
+   if(supportATR==EMPTY_VALUE || supportEMA==EMPTY_VALUE)
+      return false;
+
+   double swingHigh=EMPTY_VALUE;
+   double swingLow=EMPTY_VALUE;
+   double trendSupport=EMPTY_VALUE;
+   double trendResistance=EMPTY_VALUE;
+
+   SupportMetrics(m15,
+                  ArraySize(m15),
+                  InpSupportPivotBars,
+                  swingHigh,
+                  swingLow,
+                  trendSupport,
+                  trendResistance);
+
+   double entryBiasTolerance=
+      MathMax(supportATR*0.60,g_pipSize*15.0);
+
+   bool entryBullishBias=
+      (entryReference>=entryBiasEMA-entryBiasTolerance);
+
+   bool entryBearishBias=
+      (entryReference<=entryBiasEMA+entryBiasTolerance);
+
+   // Exact V1.1.0 route rules: no EMA-slope gate.
+   bool trendBuyRoute=bullishBias && entryBullishBias;
+   bool trendSellRoute=bearishBias && entryBearishBias;
+   bool counterBuyRoute=bearishBias && entryBullishBias;
+   bool counterSellRoute=bullishBias && entryBearishBias;
+
+   g_trendBuyRoute=trendBuyRoute;
+   g_trendSellRoute=trendSellRoute;
+
+   // --------------------------------------------------------
+   // Level-anchored M15 zones.
+   // S1/R1 = HIGH RISK trade zones.
+   // S2/R2 = drawing-only LOW RISK zones.
+   // --------------------------------------------------------
+   g_buyHigh=V120SignalZoneFromLevel(g_S1,g_S2,true,
+                                     m15,ArraySize(m15),supportATR);
+
+   g_buyLow=V120SignalZoneFromLevel(g_S2,g_S1,true,
+                                    m15,ArraySize(m15),supportATR);
+
+   g_sellHigh=V120SignalZoneFromLevel(g_R1,g_R2,false,
+                                      m15,ArraySize(m15),supportATR);
+
+   g_sellLow=V120SignalZoneFromLevel(g_R2,g_R1,false,
+                                     m15,ArraySize(m15),supportATR);
+
+   double supportRange=
+      (swingHigh!=EMPTY_VALUE && swingLow!=EMPTY_VALUE)
+      ? MathAbs(swingHigh-swingLow)
+      : EMPTY_VALUE;
+
+   double buyFib50=(supportRange!=EMPTY_VALUE)
+                   ? swingHigh-supportRange*0.50
+                   : EMPTY_VALUE;
+
+   double buyFib618=(supportRange!=EMPTY_VALUE)
+                    ? swingHigh-supportRange*0.618
+                    : EMPTY_VALUE;
+
+   double sellFib50=(supportRange!=EMPTY_VALUE)
+                    ? swingLow+supportRange*0.50
+                    : EMPTY_VALUE;
+
+   double sellFib618=(supportRange!=EMPTY_VALUE)
+                     ? swingLow+supportRange*0.618
+                     : EMPTY_VALUE;
+
+   double tolerance=InpConfluenceTolerancePips*g_pipSize;
+
+   int buyHighConfluences=
+      ConfluenceCount(g_buyHigh,
+                      supportEMA,
+                      trendSupport,
+                      buyFib50,
+                      buyFib618,
+                      tolerance);
+
+   int sellHighConfluences=
+      ConfluenceCount(g_sellHigh,
+                      supportEMA,
+                      trendResistance,
+                      sellFib50,
+                      sellFib618,
+                      tolerance);
+
+   g_buyHighConf=buyHighConfluences;
+   g_sellHighConf=sellHighConfluences;
+
+   // Signal state is evaluated once per confirmed M5 close.
+   if(m5[1].time==g_lastEntryClosedTime)
+      return true;
+
+   g_lastEntryClosedTime=m5[1].time;
+
+   // --------------------------------------------------------
+   // Confirmed M5 rejection / CHOCH window.
+   // --------------------------------------------------------
+   if(g_bullRejectAge<9999) g_bullRejectAge++;
+   if(g_bearRejectAge<9999) g_bearRejectAge++;
+   if(g_bullChochAge<9999) g_bullChochAge++;
+   if(g_bearChochAge<9999) g_bearChochAge++;
+
+   double candleRange=m5[1].high-m5[1].low;
+   double candleBody=MathAbs(m5[1].close-m5[1].open);
+   double safeBody=MathMax(candleBody,_Point);
+   double lowerWick=MathMin(m5[1].open,m5[1].close)-m5[1].low;
+   double upperWick=m5[1].high-MathMax(m5[1].open,m5[1].close);
+
+   bool bullishBody=(m5[1].close>m5[1].open);
+   bool bearishBody=(m5[1].close<m5[1].open);
+
+   int structureLookback=
+      MathMin(ArraySize(m5)-3,InpEntryPivotBars*2+2);
+
+   double recentHigh=-DBL_MAX;
+   double recentLow=DBL_MAX;
+
+   for(int i=2;i<=structureLookback+1 && i<ArraySize(m5);i++)
+   {
+      recentHigh=MathMax(recentHigh,m5[i].high);
+      recentLow=MathMin(recentLow,m5[i].low);
+   }
+
+   bool bullishBreak=
+      recentHigh>-DBL_MAX &&
+      m5[1].high>recentHigh &&
+      m5[1].close>m5[2].close;
+
+   bool bearishBreak=
+      recentLow<DBL_MAX &&
+      m5[1].low<recentLow &&
+      m5[1].close<m5[2].close;
+
+   bool bullishChochEvent=
+      bullishBreak &&
+      g_structureDirection<=0 &&
+      (!InpRequireDirectionalBody || bullishBody);
+
+   bool bearishChochEvent=
+      bearishBreak &&
+      g_structureDirection>=0 &&
+      (!InpRequireDirectionalBody || bearishBody);
+
+   bool bullishRejectionEvent=
+      bullishBody &&
+      candleRange>_Point &&
+      lowerWick>=safeBody*InpRejectionWickRatio &&
+      m5[1].close>=m5[1].low+candleRange*0.45;
+
+   bool bearishRejectionEvent=
+      bearishBody &&
+      candleRange>_Point &&
+      upperWick>=safeBody*InpRejectionWickRatio &&
+      m5[1].close<=m5[1].high-candleRange*0.45;
+
+   if(bullishRejectionEvent) g_bullRejectAge=0;
+   if(bearishRejectionEvent) g_bearRejectAge=0;
+   if(bullishChochEvent) g_bullChochAge=0;
+   if(bearishChochEvent) g_bearChochAge=0;
+
+   if(bullishBreak) g_structureDirection=1;
+   if(bearishBreak) g_structureDirection=-1;
+
+   bool bullishRecentRejection=
+      (g_bullRejectAge<=CONFIRM_WINDOW);
+
+   bool bearishRecentRejection=
+      (g_bearRejectAge<=CONFIRM_WINDOW);
+
+   bool bullishRecentChoch=
+      (g_bullChochAge<=CONFIRM_WINDOW);
+
+   bool bearishRecentChoch=
+      (g_bearChochAge<=CONFIRM_WINDOW);
+
+   // Source V1.1.0 is one READY/LIVE setup at a time.
+   if(HasActivePersistentSignal() ||
+      g_buyReady.armed ||
+      g_sellReady.armed)
+      return true;
+
+   // --------------------------------------------------------
+   // Candidate construction.
+   // --------------------------------------------------------
+   int buyRetests=
+      ZoneRetests(g_buyHigh,m5,ArraySize(m5),m5[1].time);
+
+   int sellRetests=
+      ZoneRetests(g_sellHigh,m5,ArraySize(m5),m5[1].time);
+
+   bool buyCounter=counterBuyRoute && !trendBuyRoute;
+   bool sellCounter=counterSellRoute && !trendSellRoute;
+
+   double directionalCloseBuy=(candleRange>_Point)
+                              ? (m5[1].close-m5[1].low)/candleRange
+                              : 0.0;
+   double directionalCloseSell=(candleRange>_Point)
+                               ? (m5[1].high-m5[1].close)/candleRange
+                               : 0.0;
+   bool bullishDirectionalFallback=InpActiveSignalMode &&
+                                    InpAllowDirectionalM5Fallback &&
+                                    bullishBody &&
+                                    directionalCloseBuy>=MathMax(0.50,InpDirectionalM5CloseStrength);
+   bool bearishDirectionalFallback=InpActiveSignalMode &&
+                                    InpAllowDirectionalM5Fallback &&
+                                    bearishBody &&
+                                    directionalCloseSell>=MathMax(0.50,InpDirectionalM5CloseStrength);
+
+   bool allowBuy=trendBuyRoute || buyCounter || bullishDirectionalFallback;
+   bool allowSell=trendSellRoute || sellCounter || bearishDirectionalFallback;
+
+   // Normal V3.081 confluence policy remains locked:
+   // Trend-following READY = exactly 2 required confluences.
+   // Counter-trend READY   = exactly 3 required confluences.
+   // V3.102 retains the V3.094 exception: zero required confluences while this
+   // EA has no open position or only one open position on the symbol.
+   const int trendRequired=TREND_MIN_CONFLUENCES;
+   const int counterRequired=COUNTER_MIN_CONFLUENCES;
+
+   int buyRequired=buyCounter?counterRequired:trendRequired;
+   int sellRequired=sellCounter?counterRequired:trendRequired;
+
+   int runningEAEntries=CountOurPositions();
+
+   bool zeroConfluenceLowExposure=
+      V3104_ZERO_CONFLUENCE_TOUCH_RULE &&
+      runningEAEntries<=V3104_ZERO_CONF_MAX_OPEN_POSITIONS;
+
+   // Pine's live `close` is the current chart price. In MT5, the current
+   // M5 bar close is the closest chart-equivalent reference.
+   double cmp=m5[0].close;
+   if(cmp<=0)
+      cmp=livePrice;
+
+   double buyEntryLo=0.0,buyEntryHi=0.0;
+   double sellEntryLo=0.0,sellEntryHi=0.0;
+   datetime buyEntryTime=0,sellEntryTime=0;
+
+   bool buyEntryFound=
+      SelectEntryCandle(g_buyHigh,
+                        cmp,
+                        true,
+                        m5,
+                        ArraySize(m5),
+                        buyEntryLo,
+                        buyEntryHi,
+                        buyEntryTime);
+
+   bool sellEntryFound=
+      SelectEntryCandle(g_sellHigh,
+                        cmp,
+                        false,
+                        m5,
+                        ArraySize(m5),
+                        sellEntryLo,
+                        sellEntryHi,
+                        sellEntryTime);
+
+   // Active fallback: when the legacy M5 entry-candle search misses, freeze
+   // the latest closed M5 candle clipped to the valid H1/M15 zone. If there is
+   // no physical clip, keep the complete mapped zone so READY can still arm.
+   if(InpActiveSignalMode && !buyEntryFound && g_buyHigh.valid)
+   {
+      buyEntryLo=RoundPrice(MathMax(m5[1].low,g_buyHigh.lo));
+      buyEntryHi=RoundPrice(MathMin(m5[1].high,g_buyHigh.hi));
+      if(buyEntryHi<=buyEntryLo)
       {
-         ulong dealTicket=HistoryDealGetTicket(i);
-         if(dealTicket>newest) newest=dealTicket;
+         buyEntryLo=g_buyHigh.lo;
+         buyEntryHi=g_buyHigh.hi;
       }
-      g_lastSeenDealTicket=newest;
-      return;
+      buyEntryTime=m5[1].time;
+      buyEntryFound=(buyEntryHi>buyEntryLo);
    }
 
-   if(!HistorySelect(0,TimeCurrent())) return;
-
-   int total=HistoryDealsTotal();
-   for(int i=0;i<total;i++)
+   if(InpActiveSignalMode && !sellEntryFound && g_sellHigh.valid)
    {
-      ulong dealTicket=HistoryDealGetTicket(i);
-      if(dealTicket<=g_lastSeenDealTicket) continue;
-      if(dealTicket>g_lastSeenDealTicket) g_lastSeenDealTicket=dealTicket;
-
-      if(HistoryDealGetString(dealTicket,DEAL_SYMBOL)!=_Symbol) continue;
-      if((ulong)HistoryDealGetInteger(dealTicket,DEAL_MAGIC)!=InpMagicNumber) continue;
-      if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket,DEAL_ENTRY)!=DEAL_ENTRY_OUT) continue;
-
-      double profit=HistoryDealGetDouble(dealTicket,DEAL_PROFIT)+
-                    HistoryDealGetDouble(dealTicket,DEAL_SWAP)+
-                    HistoryDealGetDouble(dealTicket,DEAL_COMMISSION);
-      double price =HistoryDealGetDouble(dealTicket,DEAL_PRICE);
-      datetime tm  =(datetime)HistoryDealGetInteger(dealTicket,DEAL_TIME);
-
-      AddHistoricalMarker(profit>=0.0,tm,price);
+      sellEntryLo=RoundPrice(MathMax(m5[1].low,g_sellHigh.lo));
+      sellEntryHi=RoundPrice(MathMin(m5[1].high,g_sellHigh.hi));
+      if(sellEntryHi<=sellEntryLo)
+      {
+         sellEntryLo=g_sellHigh.lo;
+         sellEntryHi=g_sellHigh.hi;
+      }
+      sellEntryTime=m5[1].time;
+      sellEntryFound=(sellEntryHi>sellEntryLo);
    }
+
+   bool buyZoneCorrectSide=
+      !InpRequireZoneCorrectSide || (g_buyHigh.valid && g_buyHigh.hi<cmp);
+
+   bool sellZoneCorrectSide=
+      !InpRequireZoneCorrectSide || (g_sellHigh.valid && g_sellHigh.lo>cmp);
+
+   bool buyConfirmation=bullishRecentRejection || bullishRecentChoch ||
+                        bullishDirectionalFallback;
+   bool sellConfirmation=bearishRecentRejection || bearishRecentChoch ||
+                         bearishDirectionalFallback;
+   int maximumRetests=InpActiveSignalMode
+                      ? MathMax(0,InpActiveMaxZoneRetests)
+                      : MAX_ZONE_RETESTS;
+
+   bool buyNormalConfluence=
+      buyHighConfluences>=buyRequired;
+
+   bool sellNormalConfluence=
+      sellHighConfluences>=sellRequired;
+
+   bool buyZeroConfluenceFallback=
+      zeroConfluenceLowExposure &&
+      !buyNormalConfluence;
+
+   bool sellZeroConfluenceFallback=
+      zeroConfluenceLowExposure &&
+      !sellNormalConfluence;
+
+   int buyEffectiveRequired=
+      buyZeroConfluenceFallback ? 0 : buyRequired;
+
+   int sellEffectiveRequired=
+      sellZeroConfluenceFallback ? 0 : sellRequired;
+
+   bool buyCandidate=
+      allowBuy &&
+      buyConfirmation &&
+      buyZoneCorrectSide &&
+      buyEntryFound &&
+      buyRetests<=maximumRetests &&
+      (buyNormalConfluence || buyZeroConfluenceFallback);
+
+   bool sellCandidate=
+      allowSell &&
+      sellConfirmation &&
+      sellZoneCorrectSide &&
+      sellEntryFound &&
+      sellRetests<=maximumRetests &&
+      (sellNormalConfluence || sellZeroConfluenceFallback);
+
+   if(!buyCandidate && !sellCandidate)
+   {
+      if(InpSignalDiagnostics)
+         Log("SIGNAL DIAGNOSTIC | M5="+TimeToString(m5[1].time,TIME_DATE|TIME_MINUTES)+
+             " | BUY route="+string(allowBuy?"Y":"N")+
+             " conf="+string(buyConfirmation?"Y":"N")+
+             " zone="+string(g_buyHigh.valid?"Y":"N")+
+             " entry="+string(buyEntryFound?"Y":"N")+
+             " retests="+IntegerToString(buyRetests)+"/"+IntegerToString(maximumRetests)+
+             " confluence="+IntegerToString(buyHighConfluences)+"/"+
+             IntegerToString(buyEffectiveRequired)+
+             " zero-fallback="+string(buyZeroConfluenceFallback?"Y":"N")+
+             " | SELL route="+string(allowSell?"Y":"N")+
+             " conf="+string(sellConfirmation?"Y":"N")+
+             " zone="+string(g_sellHigh.valid?"Y":"N")+
+             " entry="+string(sellEntryFound?"Y":"N")+
+             " retests="+IntegerToString(sellRetests)+"/"+IntegerToString(maximumRetests)+
+             " confluence="+IntegerToString(sellHighConfluences)+"/"+
+             IntegerToString(sellEffectiveRequired)+
+             " zero-fallback="+string(sellZeroConfluenceFallback?"Y":"N")+
+             " running entries="+IntegerToString(runningEAEntries));
+      return true;
+   }
+
+   // V3.095 V3.081 selection with zero-confluence low-exposure fallback.
+   // BUY and SELL candidates can be armed independently on the same completed
+   // M5 candle. When dual-ready is disabled, preserve the original winner rule:
+   // highest confluence, then the mapped zone nearest CMP.
+   bool armBuy=buyCandidate;
+   bool armSell=sellCandidate;
+
+   if(!InpArmBothDirectionsWhenValid && buyCandidate && sellCandidate)
+   {
+      double buyDistance=MathAbs((g_buyHigh.lo+g_buyHigh.hi)/2.0-cmp);
+      double sellDistance=MathAbs((g_sellHigh.lo+g_sellHigh.hi)/2.0-cmp);
+      bool sellWins=(sellHighConfluences>buyHighConfluences ||
+                    (sellHighConfluences==buyHighConfluences &&
+                     sellDistance<buyDistance));
+      armBuy=!sellWins;
+      armSell=sellWins;
+   }
+
+   double chartATR=ATRFromRates(m5,ArraySize(m5),14,1);
+   double targetMinimumDistance=InpScalpTargetMinPoints*g_pipSize;
+   double targetMaximumDistance=InpScalpTargetMaxPoints*g_pipSize;
+   double volatilityStopDistance=
+      MathMax(InpScalpStopPips*g_pipSize,
+              MathMax(chartATR,targetMinimumDistance)*0.40);
+   double volatilityTargetDistance=
+      MathMax(chartATR,targetMinimumDistance)*0.60;
+   double snrBuffer=InpSnrFrontRunPips*g_pipSize;
+   double fallbackRisk=
+      MathMax(volatilityStopDistance,
+              targetMinimumDistance/MAX_RR);
+
+   ClearReadySnapshot(g_buyReady);
+   ClearReadySnapshot(g_sellReady);
+
+   int armedCount=0;
+   datetime frequencyKey=InpOneSetupPerDirectionPerM5
+                         ? m5[1].time
+                         : TimeCurrent();
+
+   if(armBuy)
+   {
+      double previewEntry=buyEntryHi;
+      TradePlan plan=BuildTradePlan("BUY",
+                                    previewEntry,
+                                    buyEntryLo,
+                                    buyEntryHi,
+                                    volatilityStopDistance,
+                                    volatilityTargetDistance,
+                                    snrBuffer,
+                                    targetMinimumDistance,
+                                    targetMaximumDistance,
+                                    g_S1,g_S2,g_R1,g_R2,
+                                    swingLow,swingHigh,
+                                    trendSupport,trendResistance);
+
+      double frozenSL=0.0;
+      double previewTP=0.0;
+      double previewRR=InpLiveRR;
+
+      if(plan.valid)
+      {
+         frozenSL=plan.sl;
+         previewTP=plan.tp;
+         previewRR=plan.rr;
+      }
+      else
+      {
+         frozenSL=RoundPrice(previewEntry-fallbackRisk);
+         previewTP=RoundPrice(previewEntry+
+                              MathMax(targetMinimumDistance,
+                                      fallbackRisk*MIN_RR));
+         previewRR=MathAbs(previewTP-previewEntry)/
+                   MathMax(_Point,MathAbs(previewEntry-frozenSL));
+      }
+
+      g_buyReady.direction="BUY";
+      g_buyReady.armed=true;
+      g_buyReady.counterTrend=buyCounter;
+      g_buyReady.confluences=buyHighConfluences;
+      g_buyReady.requiredConfluences=buyEffectiveRequired;
+      g_buyReady.zoneRetests=buyRetests;
+      g_buyReady.supportLo=g_buyHigh.lo;
+      g_buyReady.supportHi=g_buyHigh.hi;
+      g_buyReady.entryLo=buyEntryLo;
+      g_buyReady.entryHi=buyEntryHi;
+      g_buyReady.entryTime=buyEntryTime;
+      g_buyReady.planSL=frozenSL;
+      g_buyReady.planTP=previewTP;
+      g_buyReady.planRR=previewRR;
+      g_buyReady.armedClock=frequencyKey;
+      g_buyReady.armedBarTime=m5[0].time;
+      g_buyReady.zoneExited=false;
+      armedCount++;
+
+      Log("SOURCE READY BUY | H1/M15/M5 | conf="+
+          IntegerToString(buyHighConfluences)+
+          " | required="+IntegerToString(buyEffectiveRequired)+
+          " | zero-conf fallback="+
+          string(buyZeroConfluenceFallback?"YES":"NO")+
+          " | running entries="+IntegerToString(runningEAEntries)+
+          " | counter="+string(buyCounter?"YES":"NO")+
+          " | rejection="+string(bullishRecentRejection?"YES":"NO")+
+          " | CHOCH="+string(bullishRecentChoch?"YES":"NO")+
+          " | directional fallback="+
+          string(bullishDirectionalFallback?"YES":"NO")+
+          " | retests="+IntegerToString(buyRetests)+
+          " | frequency key="+
+          TimeToString(frequencyKey,TIME_DATE|TIME_MINUTES));
+   }
+
+   if(armSell)
+   {
+      double previewEntry=sellEntryLo;
+      TradePlan plan=BuildTradePlan("SELL",
+                                    previewEntry,
+                                    sellEntryLo,
+                                    sellEntryHi,
+                                    volatilityStopDistance,
+                                    volatilityTargetDistance,
+                                    snrBuffer,
+                                    targetMinimumDistance,
+                                    targetMaximumDistance,
+                                    g_S1,g_S2,g_R1,g_R2,
+                                    swingLow,swingHigh,
+                                    trendSupport,trendResistance);
+
+      double frozenSL=0.0;
+      double previewTP=0.0;
+      double previewRR=InpLiveRR;
+
+      if(plan.valid)
+      {
+         frozenSL=plan.sl;
+         previewTP=plan.tp;
+         previewRR=plan.rr;
+      }
+      else
+      {
+         frozenSL=RoundPrice(previewEntry+fallbackRisk);
+         previewTP=RoundPrice(previewEntry-
+                              MathMax(targetMinimumDistance,
+                                      fallbackRisk*MIN_RR));
+         previewRR=MathAbs(previewTP-previewEntry)/
+                   MathMax(_Point,MathAbs(previewEntry-frozenSL));
+      }
+
+      g_sellReady.direction="SELL";
+      g_sellReady.armed=true;
+      g_sellReady.counterTrend=sellCounter;
+      g_sellReady.confluences=sellHighConfluences;
+      g_sellReady.requiredConfluences=sellEffectiveRequired;
+      g_sellReady.zoneRetests=sellRetests;
+      g_sellReady.supportLo=g_sellHigh.lo;
+      g_sellReady.supportHi=g_sellHigh.hi;
+      g_sellReady.entryLo=sellEntryLo;
+      g_sellReady.entryHi=sellEntryHi;
+      g_sellReady.entryTime=sellEntryTime;
+      g_sellReady.planSL=frozenSL;
+      g_sellReady.planTP=previewTP;
+      g_sellReady.planRR=previewRR;
+      g_sellReady.armedClock=frequencyKey;
+      g_sellReady.armedBarTime=m5[0].time;
+      g_sellReady.zoneExited=false;
+      armedCount++;
+
+      Log("SOURCE READY SELL | H1/M15/M5 | conf="+
+          IntegerToString(sellHighConfluences)+
+          " | required="+IntegerToString(sellEffectiveRequired)+
+          " | zero-conf fallback="+
+          string(sellZeroConfluenceFallback?"YES":"NO")+
+          " | running entries="+IntegerToString(runningEAEntries)+
+          " | counter="+string(sellCounter?"YES":"NO")+
+          " | rejection="+string(bearishRecentRejection?"YES":"NO")+
+          " | CHOCH="+string(bearishRecentChoch?"YES":"NO")+
+          " | directional fallback="+
+          string(bearishDirectionalFallback?"YES":"NO")+
+          " | retests="+IntegerToString(sellRetests)+
+          " | frequency key="+
+          TimeToString(frequencyKey,TIME_DATE|TIME_MINUTES));
+   }
+
+   g_readySignalCount+=armedCount;
+   SyncReadyDisplay(cmp);
+   return true;
 }
 
-//======================================================================
-// Chart drawing (10 levels: H1 S1/S2/R1/R2 + H4/D1/W1 S/R)
-//======================================================================
-void DrawLevels()
-{
-   if(!InpDrawLevels) return;
 
-   for(int i=0;i<ArraySize(g_levels);i++)
+
+
+
+
+//---------------------------- Constants -----------------------------
+#define LAYER_MARKET 0
+#define LAYER_LIMIT  1
+#define LAYER_STOP   2
+
+
+struct LayerPlan
+{
+   double rawPrice;
+   double execPrice;
+   double volume;
+   double lossPerLot;
+   int    kind;
+};
+
+
+//---------------------------- Utilities -----------------------------
+void Log(string msg)
+{
+   if(InpPrintExecutionLog)
+      Print("EzyMap P2: ",msg);
+}
+
+
+
+
+
+
+
+
+int VolumeDigits()
+{
+   double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   int d=0;
+   while(d<8 && MathAbs(step-NormalizeDouble(step,d))>1e-10)
+      d++;
+   return d;
+}
+
+int FindJournalTradeRow(JournalTradeRow &rows[],long positionId)
+{
+   for(int i=0;i<ArraySize(rows);i++)
+      if(rows[i].positionId==positionId)
+         return i;
+   return -1;
+}
+
+int EnsureJournalTradeRow(JournalTradeRow &rows[],long positionId)
+{
+   int index=FindJournalTradeRow(rows,positionId);
+   if(index>=0)
+      return index;
+
+   index=ArraySize(rows);
+   ArrayResize(rows,index+1);
+   rows[index].positionId=positionId;
+   rows[index].entryLots=0.0;
+   rows[index].netPnl=0.0;
+   rows[index].hasExit=false;
+   return index;
+}
+
+bool JournalPositionIdentifierIsOpen(long positionId)
+{
+   for(int i=0;i<PositionsTotal();i++)
    {
-      string name="V4_LVL_"+IntegerToString(i);
-      if(g_levels[i].price<=0.0)
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol)
+         continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber)
+         continue;
+      if((long)PositionGetInteger(POSITION_IDENTIFIER)==positionId)
+         return true;
+   }
+   return false;
+}
+
+bool JournalUlongExists(ulong value,ulong &values[])
+{
+   for(int i=0;i<ArraySize(values);i++)
+      if(values[i]==value)
+         return true;
+   return false;
+}
+
+double JournalDealNetPnl(ulong deal)
+{
+   return HistoryDealGetDouble(deal,DEAL_PROFIT)+
+          HistoryDealGetDouble(deal,DEAL_COMMISSION)+
+          HistoryDealGetDouble(deal,DEAL_SWAP)+
+          HistoryDealGetDouble(deal,DEAL_FEE);
+}
+
+bool BuildJournalPerformanceSnapshot(JournalPerformanceSnapshot &snapshot)
+{
+   ZeroMemory(snapshot);
+
+   int days=MathMax(0,InpStatsHistoryDays);
+   datetime now=TimeCurrent();
+   datetime from=(days==0)?0:now-days*24*60*60;
+   if(!HistorySelect(from,now+60))
+      return false;
+
+   JournalTradeRow rows[];
+   ulong entryOrders[];
+   ArrayResize(rows,0);
+   ArrayResize(entryOrders,0);
+
+   int deals=HistoryDealsTotal();
+   for(int i=0;i<deals;i++)
+   {
+      ulong deal=HistoryDealGetTicket(i);
+      if(deal==0)
+         continue;
+      if(HistoryDealGetString(deal,DEAL_SYMBOL)!=_Symbol)
+         continue;
+      if((ulong)HistoryDealGetInteger(deal,DEAL_MAGIC)!=InpMagicNumber)
+         continue;
+
+      ENUM_DEAL_TYPE type=(ENUM_DEAL_TYPE)HistoryDealGetInteger(deal,DEAL_TYPE);
+      if(type!=DEAL_TYPE_BUY && type!=DEAL_TYPE_SELL)
+         continue;
+
+      long positionId=(long)HistoryDealGetInteger(deal,DEAL_POSITION_ID);
+      if(positionId<=0)
+         continue;
+
+      int row=EnsureJournalTradeRow(rows,positionId);
+      rows[row].netPnl+=JournalDealNetPnl(deal);
+
+      ENUM_DEAL_ENTRY entry=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal,DEAL_ENTRY);
+      double volume=HistoryDealGetDouble(deal,DEAL_VOLUME);
+
+      if((entry==DEAL_ENTRY_IN || entry==DEAL_ENTRY_INOUT) && volume>0.0)
       {
-         ObjectDelete(0,name);
+         rows[row].entryLots+=volume;
+         snapshot.lotsTraded+=volume;
+
+         ulong order=(ulong)HistoryDealGetInteger(deal,DEAL_ORDER);
+         if(order>0 && !JournalUlongExists(order,entryOrders))
+         {
+            int n=ArraySize(entryOrders);
+            ArrayResize(entryOrders,n+1);
+            entryOrders[n]=order;
+         }
+      }
+
+      if(entry==DEAL_ENTRY_OUT || entry==DEAL_ENTRY_OUT_BY || entry==DEAL_ENTRY_INOUT)
+         rows[row].hasExit=true;
+   }
+
+   snapshot.actualEntryFills=ArraySize(entryOrders);
+   double pnlEpsilon=0.005;
+
+   for(int i=0;i<ArraySize(rows);i++)
+   {
+      if(rows[i].entryLots<=0.0)
+         continue;
+
+      if(JournalPositionIdentifierIsOpen(rows[i].positionId))
+      {
+         snapshot.openTrades++;
          continue;
       }
 
-      color clr=(g_levels[i].fadeDirection==1)?clrLime:clrRed;
+      if(!rows[i].hasExit)
+         continue;
 
-      if(ObjectFind(0,name)<0)
-         ObjectCreate(0,name,OBJ_HLINE,0,0,g_levels[i].price);
+      snapshot.totalTrades++;
+      snapshot.closedNetPnl+=rows[i].netPnl;
 
-      ObjectSetDouble(0,name,OBJPROP_PRICE,g_levels[i].price);
-      ObjectSetInteger(0,name,OBJPROP_COLOR,clr);
-      ObjectSetInteger(0,name,OBJPROP_STYLE,STYLE_DOT);
-      ObjectSetInteger(0,name,OBJPROP_WIDTH,1);
-      ObjectSetInteger(0,name,OBJPROP_BACK,true);
-      ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
-      ObjectSetString(0,name,OBJPROP_TEXT,
-                      g_levels[i].tfLabel+" "+
-                      (g_levels[i].fadeDirection==1?"DEMAND":"SUPPLY"));
+      if(rows[i].netPnl>pnlEpsilon)
+         snapshot.wins++;
+      else if(rows[i].netPnl<-pnlEpsilon)
+         snapshot.losses++;
+      else
+         snapshot.breakeven++;
+   }
+
+   return true;
+}
+
+void ReportJournalPerformance(bool force,string reason)
+{
+   if(!InpReportPerformanceToJournal)
+      return;
+
+   datetime now=TimeCurrent();
+   int interval=MathMax(10,InpStatsReportIntervalSeconds);
+   if(!force && g_lastStatsReportClock>0 && now-g_lastStatsReportClock<interval)
+      return;
+
+   JournalPerformanceSnapshot stats;
+   if(!BuildJournalPerformanceSnapshot(stats))
+      return;
+
+   double winRate=(stats.wins+stats.losses)>0
+                  ? 100.0*(double)stats.wins/(double)(stats.wins+stats.losses)
+                  : 0.0;
+
+   string signature=
+      DoubleToString(stats.lotsTraded,VolumeDigits())+"|"+
+      IntegerToString(stats.actualEntryFills)+"|"+
+      IntegerToString(stats.totalTrades)+"|"+
+      IntegerToString(stats.wins)+"|"+
+      IntegerToString(stats.losses)+"|"+
+      IntegerToString(stats.breakeven)+"|"+
+      IntegerToString(stats.openTrades)+"|"+
+      DoubleToString(stats.closedNetPnl,2);
+
+   g_lastStatsReportClock=now;
+   if(!force && signature==g_lastStatsSignature)
+      return;
+   g_lastStatsSignature=signature;
+
+   Print("EzyMap P2: PERFORMANCE ",reason,
+         " | lot traded=",DoubleToString(stats.lotsTraded,VolumeDigits()),
+         " | actual entry fills=",IntegerToString(stats.actualEntryFills),
+         " | total trades=",IntegerToString(stats.totalTrades),
+         " | wins=",IntegerToString(stats.wins),
+         " | losses=",IntegerToString(stats.losses),
+         " | breakeven=",IntegerToString(stats.breakeven),
+         " | open trades=",IntegerToString(stats.openTrades),
+         " | winrate=",DoubleToString(winRate,2),"%",
+         " | closed net=",DoubleToString(stats.closedNetPnl,2)," ",
+         AccountInfoString(ACCOUNT_CURRENCY));
+}
+
+double NormalizeVolumeDown(double vol)
+{
+   double minVol=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   double maxVol=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+   double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+
+   if(step<=0) step=minVol;
+   if(step<=0) return 0.0;
+   if(vol<minVol) return 0.0;
+
+   vol=MathMin(vol,maxVol);
+   double v=MathFloor((vol+1e-12)/step)*step;
+   if(v<minVol) return 0.0;
+
+   return NormalizeDouble(v,VolumeDigits());
+}
+
+
+
+double OneLotLoss(int direction,double entry,double sl)
+{
+   if(entry<=0 || sl<=0) return 0.0;
+   if(direction==1 && sl>=entry) return 0.0;
+   if(direction==-1 && sl<=entry) return 0.0;
+
+   double profit=0.0;
+   ENUM_ORDER_TYPE type=(direction==1)?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
+   if(!OrderCalcProfit(type,_Symbol,1.0,entry,sl,profit))
+   {
+      Log("OrderCalcProfit failed. Error "+IntegerToString(GetLastError()));
+      return 0.0;
+   }
+
+   return MathAbs(profit);
+}
+
+double CapSetupVolumeForCentSafety(int direction,
+                                    double entry,
+                                    double sl,
+                                    double requested)
+{
+   if(requested<=0.0)
+      return 0.0;
+
+   if(g_accountUnitDivisor<=1.0 || !InpEnableCentSafetyCaps)
+      return NormalizeVolumeDown(requested);
+
+   double minVol=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   double maxVol=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+   double probe=MathMax(minVol,MathMin(1.0,maxVol));
+
+   if(minVol<=0.0 || probe<=0.0)
+      return 0.0;
+
+   double safe=requested;
+
+   if(InpCentAbsoluteMaxLots>0.0)
+      safe=MathMin(safe,InpCentAbsoluteMaxLots);
+
+   ENUM_ORDER_TYPE orderType=(direction==1)?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
+
+   // LIVE-CENT PARITY: validate the requested cent-symbol lot against the
+   // exact 50-strategy-pip protection distance and broker-calculated margin.
+   if(IsLiveCentAccount() &&
+      InpLiveCentParityMode &&
+      InpLiveCentMarginOnlyMinimumApproval &&
+      InpLiveCentBrokerMinimumExecution)
+   {
+      double candidate=MathMax(minVol,MathMin(safe,maxVol));
+      candidate=NormalizeVolumeDown(candidate);
+
+      if(candidate<minVol-1e-12)
+         return 0.0;
+
+      if(InpCentAbsoluteMaxLots>0.0 &&
+         candidate>InpCentAbsoluteMaxLots+1e-12)
+      {
+         Log("LIVE CENT PARITY BLOCK | candidate exceeds absolute lot cap");
+         return 0.0;
+      }
+
+      double protectionDistance=MathMax(0.1,InpTrailingDistancePips)*StrategyPipSize();
+      double protectionSL=RoundPrice(direction==1
+                                     ? entry-protectionDistance
+                                     : entry+protectionDistance);
+      double candidatePnL=0.0;
+      if(!OrderCalcProfit(orderType,_Symbol,candidate,entry,protectionSL,candidatePnL))
+      {
+         Log("LIVE CENT PARITY BLOCK | OrderCalcProfit failed | error="+
+             IntegerToString(GetLastError()));
+         return 0.0;
+      }
+
+      double rawEquity=MathMax(0.0,AccountInfoDouble(ACCOUNT_EQUITY));
+      double candidateRisk=MathAbs(candidatePnL);
+      double riskPct=(rawEquity>0.0)?candidateRisk/rawEquity*100.0:DBL_MAX;
+
+      if(InpCentMaxRiskPerSetupPct>0.0 &&
+         riskPct>InpCentMaxRiskPerSetupPct+1e-9)
+      {
+         double permitted=candidate*(InpCentMaxRiskPerSetupPct/riskPct);
+         candidate=NormalizeVolumeDown(permitted);
+         if(candidate<minVol-1e-12)
+         {
+            Log("LIVE CENT PARITY BLOCK | 50-pip risk="+
+                DoubleToString(riskPct,2)+"% exceeds max "+
+                DoubleToString(InpCentMaxRiskPerSetupPct,2)+"% and normalized lot is below minimum");
+            return 0.0;
+         }
+
+         if(!OrderCalcProfit(orderType,_Symbol,candidate,entry,protectionSL,candidatePnL))
+            return 0.0;
+         candidateRisk=MathAbs(candidatePnL);
+         riskPct=(rawEquity>0.0)?candidateRisk/rawEquity*100.0:DBL_MAX;
+      }
+
+      double candidateMargin=0.0;
+      if(!OrderCalcMargin(orderType,_Symbol,candidate,entry,candidateMargin))
+      {
+         Log("LIVE CENT PARITY BLOCK | OrderCalcMargin failed | error="+
+             IntegerToString(GetLastError()));
+         return 0.0;
+      }
+
+      double freeMargin=MathMax(0.0,AccountInfoDouble(ACCOUNT_MARGIN_FREE));
+      double marginUsePct=(freeMargin>0.0)
+                          ? candidateMargin/freeMargin*100.0
+                          : DBL_MAX;
+
+      if(InpLiveCentMaximumMarginUsePct>0.0 &&
+         marginUsePct>InpLiveCentMaximumMarginUsePct+1e-9)
+      {
+         Log("LIVE CENT PARITY BLOCK | candidate="+
+             DoubleToString(candidate,VolumeDigits())+
+             " | margin="+DoubleToString(candidateMargin,2)+
+             " | free margin="+DoubleToString(freeMargin,2)+
+             " | use="+DoubleToString(marginUsePct,2)+
+             "% / max "+DoubleToString(InpLiveCentMaximumMarginUsePct,2)+"%");
+         return 0.0;
+      }
+
+      Log("LIVE CENT PARITY APPROVED | candidate="+
+          DoubleToString(candidate,VolumeDigits())+
+          " | 50-pip risk="+DoubleToString(candidateRisk,2)+" "+
+          AccountInfoString(ACCOUNT_CURRENCY)+
+          " ("+DoubleToString(riskPct,2)+"%)"+
+          " | margin="+DoubleToString(candidateMargin,2)+
+          " | margin use="+DoubleToString(marginUsePct,2)+"%");
+      return candidate;
+   }
+
+   double probeProfit=0.0;
+   double lossPerLot=0.0;
+   if(OrderCalcProfit(orderType,_Symbol,probe,entry,sl,probeProfit))
+      lossPerLot=MathAbs(probeProfit)/probe;
+
+   if(InpCentMaxRiskPerSetupPct>0.0 && lossPerLot>0.0)
+   {
+      double riskBudget=AccountInfoDouble(ACCOUNT_EQUITY)*
+                        InpCentMaxRiskPerSetupPct/100.0;
+      safe=MathMin(safe,riskBudget/lossPerLot);
+   }
+
+   double probeMargin=0.0;
+   double marginPerLot=0.0;
+   if(OrderCalcMargin(orderType,_Symbol,probe,entry,probeMargin))
+      marginPerLot=probeMargin/probe;
+
+   if(InpCentMaxMarginUsePct>0.0 && marginPerLot>0.0)
+   {
+      double marginBudget=AccountInfoDouble(ACCOUNT_MARGIN_FREE)*
+                          InpCentMaxMarginUsePct/100.0;
+      safe=MathMin(safe,marginBudget/marginPerLot);
+   }
+
+   double normalized=NormalizeVolumeDown(safe);
+
+   if(normalized<minVol-1e-12 && InpAllowCentMinimumLotFallback)
+   {
+      double rawEquity=MathMax(0.0,AccountInfoDouble(ACCOUNT_EQUITY));
+      double freeMargin=MathMax(0.0,AccountInfoDouble(ACCOUNT_MARGIN_FREE));
+      double minLotLoss=(lossPerLot>0.0)?lossPerLot*minVol:DBL_MAX;
+      double minLotMargin=(marginPerLot>0.0)?marginPerLot*minVol:DBL_MAX;
+      double minLotRiskPct=(rawEquity>0.0)?minLotLoss/rawEquity*100.0:DBL_MAX;
+      double minLotMarginPct=(freeMargin>0.0)?minLotMargin/freeMargin*100.0:DBL_MAX;
+
+      bool riskOK=(InpCentMinimumLotMaxRiskPct<=0.0 ||
+                   minLotRiskPct<=InpCentMinimumLotMaxRiskPct+1e-9);
+      bool marginOK=(InpCentMinimumLotMaxMarginPct<=0.0 ||
+                     minLotMarginPct<=InpCentMinimumLotMaxMarginPct+1e-9);
+      bool absoluteOK=(InpCentAbsoluteMaxLots<=0.0 ||
+                       minVol<=InpCentAbsoluteMaxLots+1e-12);
+
+      if(riskOK && marginOK && absoluteOK)
+      {
+         Log("CENT MINIMUM LOT FALLBACK | allowed="+
+             DoubleToString(minVol,VolumeDigits())+
+             " | calculated risk="+DoubleToString(minLotRiskPct,2)+"%"+
+             " | calculated margin="+DoubleToString(minLotMarginPct,2)+"%");
+         return NormalizeDouble(minVol,VolumeDigits());
+      }
+
+      Log("CENT MINIMUM LOT REJECTED | broker minimum="+
+          DoubleToString(minVol,VolumeDigits())+
+          " | risk="+DoubleToString(minLotRiskPct,2)+"% / max "+
+          DoubleToString(InpCentMinimumLotMaxRiskPct,2)+"%"+
+          " | margin="+DoubleToString(minLotMarginPct,2)+"% / max "+
+          DoubleToString(InpCentMinimumLotMaxMarginPct,2)+"%");
+   }
+
+   if(normalized<minVol-1e-12)
+   {
+      Log("CENT SAFETY BLOCK | requested="+
+          DoubleToString(requested,VolumeDigits())+
+          " | computed safe="+DoubleToString(safe,VolumeDigits())+
+          " | broker minimum="+DoubleToString(minVol,VolumeDigits())+
+          " | effective equity="+DoubleToString(EffectiveAccountEquity(),2)+
+          " | raw equity="+DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2));
+      return 0.0;
+   }
+
+   if(normalized<requested-1e-12)
+   {
+      Log("CENT SAFETY CAP | requested="+
+          DoubleToString(requested,VolumeDigits())+
+          " -> allowed="+DoubleToString(normalized,VolumeDigits())+
+          " | effective equity="+DoubleToString(EffectiveAccountEquity(),2)+
+          " | raw equity="+DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2));
+   }
+
+   return normalized;
+}
+
+bool TradingEnvironmentReady(string &reason)
+{
+   reason="";
+
+   if((bool)MQLInfoInteger(MQL_TESTER))
+      return true;
+
+   if(!(bool)TerminalInfoInteger(TERMINAL_CONNECTED))
+   {
+      reason="terminal disconnected";
+      return false;
+   }
+
+   if(!(bool)TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+   {
+      reason="terminal Algo Trading disabled";
+      return false;
+   }
+
+   if(!(bool)MQLInfoInteger(MQL_TRADE_ALLOWED))
+   {
+      reason="EA live trading permission disabled";
+      return false;
+   }
+
+   if(!(bool)AccountInfoInteger(ACCOUNT_TRADE_ALLOWED))
+   {
+      reason="account trading disabled";
+      return false;
+   }
+
+   if(!(bool)AccountInfoInteger(ACCOUNT_TRADE_EXPERT))
+   {
+      reason="account expert trading disabled";
+      return false;
+   }
+
+   ENUM_SYMBOL_TRADE_MODE mode=
+      (ENUM_SYMBOL_TRADE_MODE)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_MODE);
+
+   if(mode==SYMBOL_TRADE_MODE_DISABLED ||
+      mode==SYMBOL_TRADE_MODE_CLOSEONLY)
+   {
+      reason="symbol trade mode does not permit new entries";
+      return false;
+   }
+
+   return true;
+}
+
+bool SpreadAllowed()
+{
+   if(InpMaxSpreadPoints<=0) return true;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol,tick))
+      return false;
+
+   double spread=(tick.ask-tick.bid)/_Point;
+   return (spread<=InpMaxSpreadPoints);
+}
+
+//---------------------- Existing trade detection --------------------
+int CountOurPendingOrders()
+{
+   int count=0;
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0) continue;
+      if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+      if((ulong)OrderGetInteger(ORDER_MAGIC)!=InpMagicNumber) continue;
+      count++;
+   }
+   return count;
+}
+
+bool PendingOrderDirection(ENUM_ORDER_TYPE type,int &direction)
+{
+   direction=0;
+
+   if(type==ORDER_TYPE_BUY_LIMIT ||
+      type==ORDER_TYPE_BUY_STOP ||
+      type==ORDER_TYPE_BUY_STOP_LIMIT)
+   {
+      direction=1;
+      return true;
+   }
+
+   if(type==ORDER_TYPE_SELL_LIMIT ||
+      type==ORDER_TYPE_SELL_STOP ||
+      type==ORDER_TYPE_SELL_STOP_LIMIT)
+   {
+      direction=-1;
+      return true;
+   }
+
+   return false;
+}
+
+int CountOurPositionsByDirection(int direction)
+{
+   if(direction!=1 && direction!=-1)
+      return 0;
+
+   int count=0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+
+      ENUM_POSITION_TYPE type=
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      if((direction==1 && type==POSITION_TYPE_BUY) ||
+         (direction==-1 && type==POSITION_TYPE_SELL))
+         count++;
+   }
+   return count;
+}
+
+int CountOurPendingOrdersByDirection(int direction)
+{
+   if(direction!=1 && direction!=-1)
+      return 0;
+
+   int count=0;
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0) continue;
+      if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+      if((ulong)OrderGetInteger(ORDER_MAGIC)!=InpMagicNumber) continue;
+
+      int orderDirection=0;
+      ENUM_ORDER_TYPE type=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      if(!PendingOrderDirection(type,orderDirection)) continue;
+      if(orderDirection==direction) count++;
+   }
+   return count;
+}
+
+int DirectionalLayerUsage(int direction)
+{
+   int used=CountOurPositionsByDirection(direction);
+   if(InpCountPendingAsReservedLayer)
+      used+=CountOurPendingOrdersByDirection(direction);
+   return used;
+}
+
+int DirectionalLayerCapacityRemaining(int direction)
+{
+   if(!InpEnforceDirectionalLayerCap || InpMaxActiveLayersPerDirection<=0)
+      return 1000000;
+
+   return MathMax(0,InpMaxActiveLayersPerDirection-DirectionalLayerUsage(direction));
+}
+
+bool DirectionalLayerSlotAvailable(int direction,string context)
+{
+   if(!InpEnforceDirectionalLayerCap || InpMaxActiveLayersPerDirection<=0)
+      return true;
+
+   int positions=CountOurPositionsByDirection(direction);
+   int pending=CountOurPendingOrdersByDirection(direction);
+   int used=positions+(InpCountPendingAsReservedLayer?pending:0);
+
+   if(used<InpMaxActiveLayersPerDirection)
+      return true;
+
+   Log("DIRECTION LAYER CAP BLOCK | "+
+       string(direction==1?"BUY":"SELL")+
+       " | open="+IntegerToString(positions)+
+       " | pending reserved="+IntegerToString(pending)+
+       " | used="+IntegerToString(used)+
+       "/"+IntegerToString(InpMaxActiveLayersPerDirection)+
+       " | context="+context);
+   return false;
+}
+
+void TrimExcessPendingForDirection(int direction)
+{
+   if(!InpEnforceDirectionalLayerCap ||
+      !InpTrimExcessPendingToLayerCap ||
+      InpMaxActiveLayersPerDirection<=0)
+      return;
+
+   int openPositions=CountOurPositionsByDirection(direction);
+   int pending=CountOurPendingOrdersByDirection(direction);
+   int allowedPending=MathMax(0,InpMaxActiveLayersPerDirection-openPositions);
+   int excess=pending-allowedPending;
+
+   if(excess<=0)
+      return;
+
+   for(int i=OrdersTotal()-1;i>=0 && excess>0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0) continue;
+      if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+      if((ulong)OrderGetInteger(ORDER_MAGIC)!=InpMagicNumber) continue;
+
+      int orderDirection=0;
+      ENUM_ORDER_TYPE type=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      if(!PendingOrderDirection(type,orderDirection)) continue;
+      if(orderDirection!=direction) continue;
+
+      double price=OrderGetDouble(ORDER_PRICE_OPEN);
+      if(trade.OrderDelete(ticket))
+      {
+         excess--;
+         Log("DIRECTION CAP TRIM | cancelled "+
+             string(direction==1?"BUY":"SELL")+
+             " pending ticket="+(string)ticket+
+             " @ "+DoubleToString(price,_Digits)+
+             " | open positions="+IntegerToString(openPositions)+
+             " | max layers="+IntegerToString(InpMaxActiveLayersPerDirection));
+      }
+      else
+      {
+         Log("DIRECTION CAP TRIM FAILED | ticket="+(string)ticket+
+             " | "+trade.ResultRetcodeDescription());
+      }
+   }
+
+   if(openPositions>InpMaxActiveLayersPerDirection)
+   {
+      Log("DIRECTION CAP WARNING | existing "+
+          string(direction==1?"BUY":"SELL")+
+          " positions="+IntegerToString(openPositions)+
+          " already exceed cap="+
+          IntegerToString(InpMaxActiveLayersPerDirection)+
+          ". Existing positions are not force-closed.");
    }
 }
 
-int CountActiveLevels()
+void EnforceDirectionalLayerCaps()
 {
-   int n=0;
-   for(int i=0;i<ArraySize(g_levels);i++)
-      if(g_levels[i].price>0.0) n++;
+   TrimExcessPendingForDirection(1);
+   TrimExcessPendingForDirection(-1);
+}
+
+bool ExistingEALimitInReadyZone(int direction,
+                                  double zoneLo,
+                                  double zoneHi,
+                                  ulong &existingTicket,
+                                  double &existingPrice)
+{
+   existingTicket=0;
+   existingPrice=0.0;
+
+   double lo=MathMin(zoneLo,zoneHi);
+   double hi=MathMax(zoneLo,zoneHi);
+
+   double tolerance=
+      MathMax(_Point,
+              MathMax(0.0,InpLimitZoneDuplicateTolerancePips)*StrategyPipSize());
+
+   // Live LIMIT geometry may be moved just beyond the drawn READY edge to
+   // satisfy the broker's stop/freeze distance. Treat that order as belonging
+   // to the same READY zone so it cannot be duplicated on the next heartbeat.
+   double liveExtension=0.0;
+   if(!(bool)MQLInfoInteger(MQL_TESTER))
+      liveExtension=
+         MathMax(0.0,InpLiveLimitGeometryExtensionPips)*StrategyPipSize();
+
+   double acceptedLo=lo-liveExtension-tolerance;
+   double acceptedHi=hi+liveExtension+tolerance;
+
+   ENUM_ORDER_TYPE requiredType=
+      direction==1 ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0) continue;
+      if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+      if((ulong)OrderGetInteger(ORDER_MAGIC)!=InpMagicNumber) continue;
+
+      ENUM_ORDER_TYPE type=(ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      if(type!=requiredType) continue;
+
+      double price=OrderGetDouble(ORDER_PRICE_OPEN);
+      if(price<acceptedLo || price>acceptedHi) continue;
+
+      existingTicket=ticket;
+      existingPrice=price;
+      return true;
+   }
+
+   return false;
+}
+
+int CountOurPositions()
+{
+   int count=0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+      count++;
+   }
+   return count;
+}
+
+
+
+
+//------------------------ Layer construction ------------------------
+
+
+
+
+
+//-------------------- Persistent READY execution --------------------
+
+
+double ConfidenceTakeProfitPips(int conf)
+{
+   // V3.081: take profit is disabled for every confidence class.
+   return InpUseTakeProfit ? MathMax(0.1,InpFixedTakeProfitPips) : 0.0;
+}
+
+double FixedPipTPForSetup(int direction,
+                          double entry,
+                          int conf)
+{
+   if(!InpUseTakeProfit || entry<=0 || g_pipSize<=0)
+      return 0.0;
+
+   double distance=
+      ConfidenceTakeProfitPips(conf)*g_pipSize;
+
+   return RoundPrice(
+      direction==1
+      ? entry+distance
+      : entry-distance);
+}
+
+
+double LayerRRForSetup(int layerIndex,int totalLayers,double runnerRR)
+{
+   runnerRR=MathMax(0.10,runnerRR);
+
+   if(!InpUseStagedProfitTaking || totalLayers<=1)
+      return runnerRR;
+
+   if(layerIndex==1)
+      return MathMax(0.10,InpLayer1TakeProfitR);
+
+   if(totalLayers>=3 && layerIndex==2)
+      return MathMax(0.10,InpLayer2TakeProfitR);
+
+   return runnerRR;
+}
+
+bool ParsePersistentComment(string comment,long &setupId,int &layerIndex,int &totalLayers)
+{
+   setupId=0;
+   layerIndex=0;
+   totalLayers=0;
+
+   if(StringFind(comment,"EZR")!=0)
+      return false;
+
+   int spacePos=StringFind(comment," ");
+   if(spacePos<4)
+      return false;
+
+   setupId=(long)StringToInteger(StringSubstr(comment,3,spacePos-3));
+
+   int lPos=StringFind(comment,"L",spacePos);
+   int slashPos=(lPos>=0)?StringFind(comment,"/",lPos):-1;
+
+   if(lPos>=0 && slashPos>lPos)
+   {
+      layerIndex=(int)StringToInteger(
+         StringSubstr(comment,lPos+1,slashPos-lPos-1));
+
+      totalLayers=(int)StringToInteger(
+         StringSubstr(comment,slashPos+1));
+   }
+
+   return (setupId>0);
+}
+
+datetime CurrentM5OpenTime()
+{
+   return iTime(_Symbol,PERIOD_M5,0);
+}
+
+int AnalyticsIndex(long id)
+{
+   for(int i=0;i<ArraySize(g_setupAnalytics);i++)
+      if(g_setupAnalytics[i].used && g_setupAnalytics[i].id==id)
+         return i;
+
+   return -1;
+}
+
+int EnsureAnalytics(long id)
+{
+   int idx=AnalyticsIndex(id);
+
+   if(idx>=0)
+      return idx;
+
+   int n=ArraySize(g_setupAnalytics);
+   ArrayResize(g_setupAnalytics,n+1);
+   ZeroMemory(g_setupAnalytics[n]);
+
+   g_setupAnalytics[n].used=true;
+   g_setupAnalytics[n].id=id;
+
    return n;
 }
 
-void DrawStatusLabel()
+void RegisterSetupAnalytics(PersistentReadySetup &setup)
 {
-   string name="V4_StatusLabel";
-   string text=StringFormat("EzyEA V4 | Levels active=%d/%d | Open=%d/%d | %s",
-                CountActiveLevels(),ArraySize(g_levels),
-                CountOpenPositions(),InpMaxConcurrentPositions,
-                g_tradingHalted?"HALTED":"ACTIVE");
+   int idx=EnsureAnalytics(setup.id);
 
-   if(ObjectFind(0,name)<0)
-   {
-      ObjectCreate(0,name,OBJ_LABEL,0,0,0);
-      ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
-      ObjectSetInteger(0,name,OBJPROP_XDISTANCE,10);
-      ObjectSetInteger(0,name,OBJPROP_YDISTANCE,20);
-      ObjectSetInteger(0,name,OBJPROP_FONTSIZE,9);
-      ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
-   }
-
-   ObjectSetString(0,name,OBJPROP_TEXT,text);
-   ObjectSetInteger(0,name,OBJPROP_COLOR,clrWhite);
+   g_setupAnalytics[idx].direction=setup.direction;
+   g_setupAnalytics[idx].confidence=setup.confluences;
+   g_setupAnalytics[idx].riskPct=setup.riskPct;
+   g_setupAnalytics[idx].targetRR=setup.targetRR;
+   g_setupAnalytics[idx].plannedLayers=setup.layersPlaced;
+   g_setupAnalytics[idx].armedTime=setup.armedClock;
+   g_setupAnalytics[idx].deployedTime=setup.deployedClock;
 }
 
-void RemoveAllDrawings()
+long ResolveSetupIdFromSelectedHistory(long positionId,
+                                       int &layerIndex,
+                                       int &totalLayers)
 {
-   for(int i=ObjectsTotal(0,0,-1)-1;i>=0;i--)
-   {
-      string name=ObjectName(0,i,0,-1);
-      if(StringFind(name,"V4_")==0)
-         ObjectDelete(0,name);
-   }
-}
-
-//======================================================================
-// Reporting
-//======================================================================
-void PeriodicStatusLog()
-{
-   if(InpStatusLogIntervalSeconds<=0) return;
-
-   datetime now=TimeCurrent();
-   if(g_lastStatusLogTime>0 && now-g_lastStatusLogTime<InpStatusLogIntervalSeconds) return;
-   g_lastStatusLogTime=now;
-
-   if(InpDrawStatusLabel) DrawStatusLabel();
-
-   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
-   double ddPct =(g_peakEquity>0.0)?(g_peakEquity-equity)/g_peakEquity*100.0:0.0;
-
-   Log("V4 LIVE PARITY STATUS"+
-       " | levels active="+IntegerToString(CountActiveLevels())+"/"+IntegerToString(ArraySize(g_levels))+
-       " | open="+IntegerToString(CountOpenPositions())+"/"+IntegerToString(InpMaxConcurrentPositions)+
-       " | drawdown="+DoubleToString(ddPct,2)+"%"+(g_tradingHalted?" (HALTED)":"")+
-       " | live parity="+(IsLiveXAUUSDscProtectionChart()?"ACTIVE":"inert")+
-       " | equity="+DoubleToString(EffectiveAccountEquity(),2)+" "+AccountInfoString(ACCOUNT_CURRENCY));
-
-   Log("V4 DEPLOYMENT GATE BREAKDOWN"+
-       " | attempts="+IntegerToString(g_gateAttempts)+
-       " | accepted="+IntegerToString(g_gateAccepted)+
-       " | rejected="+IntegerToString(g_gateRejected)+
-       " | spreadRejects="+IntegerToString(g_gateSpreadRejects)+
-       " | concurrencyRejects="+IntegerToString(g_gateConcurrencyRejects)+
-       " | distanceRejects="+IntegerToString(g_gateDistanceRejects)+
-       " | sizingRejects="+IntegerToString(g_gateSizingRejects)+
-       " | drawdownRejects="+IntegerToString(g_gateDrawdownRejects));
-}
-
-
-// Summarizes this EA's own deal history (by symbol+magic) at shutdown -
-// covers both a Strategy Tester run ending and the EA being removed live.
-void WriteFinalReport()
-{
-   if(!HistorySelect(0,TimeCurrent())) return;
+   layerIndex=0;
+   totalLayers=0;
 
    int total=HistoryDealsTotal();
-   int trades=0;
-   double lotsTraded=0.0;
-   double netPnl=0.0;
 
    for(int i=0;i<total;i++)
    {
-      ulong dealTicket=HistoryDealGetTicket(i);
-      if(dealTicket==0) continue;
-      if(HistoryDealGetString(dealTicket,DEAL_SYMBOL)!=_Symbol) continue;
-      if((ulong)HistoryDealGetInteger(dealTicket,DEAL_MAGIC)!=InpMagicNumber) continue;
+      ulong ticket=HistoryDealGetTicket(i);
+      if(ticket==0) continue;
 
-      if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket,DEAL_ENTRY)==DEAL_ENTRY_IN)
+      if((long)HistoryDealGetInteger(ticket,DEAL_POSITION_ID)!=positionId)
+         continue;
+
+      long setupId=0;
+      int li=0,tl=0;
+
+      if(ParsePersistentComment(
+            HistoryDealGetString(ticket,DEAL_COMMENT),
+            setupId,li,tl))
       {
-         trades++;
-         lotsTraded+=HistoryDealGetDouble(dealTicket,DEAL_VOLUME);
+         layerIndex=li;
+         totalLayers=tl;
+         return setupId;
       }
-
-      netPnl+=HistoryDealGetDouble(dealTicket,DEAL_PROFIT)+
-              HistoryDealGetDouble(dealTicket,DEAL_SWAP)+
-              HistoryDealGetDouble(dealTicket,DEAL_COMMISSION);
    }
 
-   Log("V4 FINAL REPORT"+
-       " | trades="+IntegerToString(trades)+
-       " | total lots traded="+DoubleToString(lotsTraded,2)+
-       " | net P/L="+DoubleToString(netPnl,2)+" "+AccountInfoString(ACCOUNT_CURRENCY));
+   return 0;
 }
+
+void RegisterDealAnalytics(ulong dealTicket)
+{
+   if(dealTicket==0 || dealTicket==g_lastAnalyticsDeal)
+      return;
+
+   g_lastAnalyticsDeal=dealTicket;
+
+   if(!HistoryDealSelect(dealTicket))
+      return;
+
+   string symbol=HistoryDealGetString(dealTicket,DEAL_SYMBOL);
+   ulong magic=(ulong)HistoryDealGetInteger(dealTicket,DEAL_MAGIC);
+
+   if(symbol!=_Symbol || magic!=InpMagicNumber)
+      return;
+
+   string comment=HistoryDealGetString(dealTicket,DEAL_COMMENT);
+   long positionId=(long)HistoryDealGetInteger(dealTicket,DEAL_POSITION_ID);
+
+   long setupId=0;
+   int layerIndex=0,totalLayers=0;
+
+   ParsePersistentComment(comment,setupId,layerIndex,totalLayers);
+
+   double dealProfit=HistoryDealGetDouble(dealTicket,DEAL_PROFIT);
+   double dealCommission=HistoryDealGetDouble(dealTicket,DEAL_COMMISSION);
+   double dealSwap=HistoryDealGetDouble(dealTicket,DEAL_SWAP);
+   double dealFee=HistoryDealGetDouble(dealTicket,DEAL_FEE);
+   double dealVolume=HistoryDealGetDouble(dealTicket,DEAL_VOLUME);
+
+   ENUM_DEAL_ENTRY entry=
+      (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket,DEAL_ENTRY);
+
+   if(setupId<=0)
+   {
+      HistorySelect(g_reportFromTime>0?g_reportFromTime:0,TimeCurrent());
+      setupId=ResolveSetupIdFromSelectedHistory(positionId,layerIndex,totalLayers);
+   }
+
+   if(setupId<=0)
+      return;
+
+   int idx=EnsureAnalytics(setupId);
+
+   g_setupAnalytics[idx].realisedProfit+=
+      dealProfit+dealCommission+dealSwap+dealFee;
+
+   if(entry==DEAL_ENTRY_IN || entry==DEAL_ENTRY_INOUT)
+      g_setupAnalytics[idx].actualEntryLots+=dealVolume;
+}
+
+void UpdateSetupPeakAnalytics(long setupId)
+{
+   int idx=AnalyticsIndex(setupId);
+   if(idx<0)
+      return;
+
+   double floating=0.0;
+
+   for(int p=PositionsTotal()-1;p>=0;p--)
+   {
+      ulong ticket=PositionGetTicket(p);
+      if(ticket==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+
+      long id=0;
+      int layerIndex=0,totalLayers=0;
+
+      if(!ParsePersistentComment(
+            PositionGetString(POSITION_COMMENT),
+            id,layerIndex,totalLayers))
+         continue;
+
+      if(id!=setupId)
+         continue;
+
+      floating+=PositionGetDouble(POSITION_PROFIT)
+               +PositionGetDouble(POSITION_SWAP);
+   }
+
+   double campaignProfit=
+      g_setupAnalytics[idx].realisedProfit+floating;
+
+   if(campaignProfit>g_setupAnalytics[idx].peakCampaignProfit)
+      g_setupAnalytics[idx].peakCampaignProfit=campaignProfit;
+}
+
+int FindReportPositionMap(ReportPositionMap &maps[],long positionId)
+{
+   for(int i=0;i<ArraySize(maps);i++)
+      if(maps[i].positionId==positionId)
+         return i;
+
+   return -1;
+}
+
+int FindReportSetupRow(ReportSetupRow &rows[],long id)
+{
+   for(int i=0;i<ArraySize(rows);i++)
+      if(rows[i].id==id)
+         return i;
+
+   return -1;
+}
+
+int EnsureReportSetupRow(ReportSetupRow &rows[],long id)
+{
+   int idx=FindReportSetupRow(rows,id);
+
+   if(idx>=0)
+      return idx;
+
+   int n=ArraySize(rows);
+   ArrayResize(rows,n+1);
+   ZeroMemory(rows[n]);
+   rows[n].id=id;
+
+   int a=AnalyticsIndex(id);
+
+   if(a>=0)
+   {
+      rows[n].direction=g_setupAnalytics[a].direction;
+      rows[n].confidence=g_setupAnalytics[a].confidence;
+      rows[n].riskPct=g_setupAnalytics[a].riskPct;
+      rows[n].targetRR=g_setupAnalytics[a].targetRR;
+      rows[n].plannedLayers=g_setupAnalytics[a].plannedLayers;
+      rows[n].peakCampaignProfit=g_setupAnalytics[a].peakCampaignProfit;
+      rows[n].peakRunnerProfit=g_setupAnalytics[a].peakRunnerProfit;
+      rows[n].peakLockCloses=g_setupAnalytics[a].peakLockCloses;
+   }
+
+   return n;
+}
+
+string DirectionText(int direction)
+{
+   if(direction==1) return "BUY";
+   if(direction==-1) return "SELL";
+   return "UNKNOWN";
+}
+
+void WriteEzyMapBacktestReport()
+{
+   if(g_reportWritten)
+      return;
+
+   g_reportWritten=true;
+
+   datetime from=(g_reportFromTime>0)?g_reportFromTime:0;
+   datetime to=TimeCurrent();
+
+   if(!HistorySelect(from,to))
+   {
+      Log("REPORT: HistorySelect failed.");
+      return;
+   }
+
+   ReportPositionMap maps[];
+   ReportSetupRow rows[];
+
+   int deals=HistoryDealsTotal();
+
+   // Pass 1: exact entry volumes and map each position to setup/layer.
+   for(int i=0;i<deals;i++)
+   {
+      ulong ticket=HistoryDealGetTicket(i);
+      if(ticket==0) continue;
+
+      if(HistoryDealGetString(ticket,DEAL_SYMBOL)!=_Symbol) continue;
+      if((ulong)HistoryDealGetInteger(ticket,DEAL_MAGIC)!=InpMagicNumber) continue;
+
+      ENUM_DEAL_ENTRY entry=
+         (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket,DEAL_ENTRY);
+
+      if(entry!=DEAL_ENTRY_IN && entry!=DEAL_ENTRY_INOUT)
+         continue;
+
+      long setupId=0;
+      int layerIndex=0,totalLayers=0;
+
+      if(!ParsePersistentComment(
+            HistoryDealGetString(ticket,DEAL_COMMENT),
+            setupId,layerIndex,totalLayers))
+         continue;
+
+      long positionId=(long)HistoryDealGetInteger(ticket,DEAL_POSITION_ID);
+
+      if(FindReportPositionMap(maps,positionId)<0)
+      {
+         int n=ArraySize(maps);
+         ArrayResize(maps,n+1);
+         maps[n].positionId=positionId;
+         maps[n].setupId=setupId;
+         maps[n].layerIndex=layerIndex;
+         maps[n].totalLayers=totalLayers;
+      }
+
+      int r=EnsureReportSetupRow(rows,setupId);
+      double vol=HistoryDealGetDouble(ticket,DEAL_VOLUME);
+
+      rows[r].entryLots+=vol;
+      rows[r].maxEntryDealLot=MathMax(rows[r].maxEntryDealLot,vol);
+      rows[r].plannedLayers=MathMax(rows[r].plannedLayers,totalLayers);
+
+      ENUM_DEAL_TYPE type=
+         (ENUM_DEAL_TYPE)HistoryDealGetInteger(ticket,DEAL_TYPE);
+
+      if(type==DEAL_TYPE_BUY) rows[r].direction=1;
+      if(type==DEAL_TYPE_SELL) rows[r].direction=-1;
+   }
+
+   // Pass 2: full net P/L and TP statistics.
+   for(int i=0;i<deals;i++)
+   {
+      ulong ticket=HistoryDealGetTicket(i);
+      if(ticket==0) continue;
+
+      if(HistoryDealGetString(ticket,DEAL_SYMBOL)!=_Symbol) continue;
+      if((ulong)HistoryDealGetInteger(ticket,DEAL_MAGIC)!=InpMagicNumber) continue;
+
+      long positionId=(long)HistoryDealGetInteger(ticket,DEAL_POSITION_ID);
+      int m=FindReportPositionMap(maps,positionId);
+
+      if(m<0)
+         continue;
+
+      int r=EnsureReportSetupRow(rows,maps[m].setupId);
+
+      rows[r].netProfit+=
+         HistoryDealGetDouble(ticket,DEAL_PROFIT)
+        +HistoryDealGetDouble(ticket,DEAL_COMMISSION)
+        +HistoryDealGetDouble(ticket,DEAL_SWAP)
+        +HistoryDealGetDouble(ticket,DEAL_FEE);
+
+      ENUM_DEAL_ENTRY entry=
+         (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket,DEAL_ENTRY);
+
+      ENUM_DEAL_REASON reason=
+         (ENUM_DEAL_REASON)HistoryDealGetInteger(ticket,DEAL_REASON);
+
+      bool closing=
+         (entry==DEAL_ENTRY_OUT ||
+          entry==DEAL_ENTRY_OUT_BY ||
+          entry==DEAL_ENTRY_INOUT);
+
+      if(closing && reason==DEAL_REASON_TP)
+      {
+         if(maps[m].layerIndex==1 && maps[m].totalLayers>1)
+            rows[r].layer1TPHits++;
+         else if(maps[m].layerIndex==2 && maps[m].totalLayers>=3)
+            rows[r].layer2TPHits++;
+         else
+            rows[r].runnerTPHits++;
+      }
+   }
+
+   double totalEntryLots=0.0;
+   double maxSetupLots=0.0;
+   double maxEntryDealLot=0.0;
+   double totalNet=0.0;
+   double captureSum=0.0;
+
+   int captureCount=0;
+   int wins=0,losses=0,flat=0;
+   int l1Hits=0,l2Hits=0,runnerHits=0,peakLockCloses=0;
+
+   for(int i=0;i<ArraySize(rows);i++)
+   {
+      int a=AnalyticsIndex(rows[i].id);
+
+      if(a>=0)
+      {
+         rows[i].confidence=g_setupAnalytics[a].confidence;
+         rows[i].riskPct=g_setupAnalytics[a].riskPct;
+         rows[i].targetRR=g_setupAnalytics[a].targetRR;
+         rows[i].peakCampaignProfit=g_setupAnalytics[a].peakCampaignProfit;
+         rows[i].peakRunnerProfit=g_setupAnalytics[a].peakRunnerProfit;
+         rows[i].peakLockCloses=g_setupAnalytics[a].peakLockCloses;
+      }
+
+      totalEntryLots+=rows[i].entryLots;
+      maxSetupLots=MathMax(maxSetupLots,rows[i].entryLots);
+      maxEntryDealLot=MathMax(maxEntryDealLot,rows[i].maxEntryDealLot);
+      totalNet+=rows[i].netProfit;
+
+      if(rows[i].netProfit>0.01) wins++;
+      else if(rows[i].netProfit<-0.01) losses++;
+      else flat++;
+
+      if(rows[i].peakCampaignProfit>0.01)
+      {
+         captureSum+=
+            (rows[i].netProfit/rows[i].peakCampaignProfit)*100.0;
+         captureCount++;
+      }
+
+      l1Hits+=rows[i].layer1TPHits;
+      l2Hits+=rows[i].layer2TPHits;
+      runnerHits+=rows[i].runnerTPHits;
+      peakLockCloses+=rows[i].peakLockCloses;
+   }
+
+   double avgLots=
+      (ArraySize(rows)>0)?totalEntryLots/ArraySize(rows):0.0;
+
+   double avgCapture=
+      (captureCount>0)?captureSum/captureCount:0.0;
+
+   Log("================ EZYMAP SCALP MASTERY V2.009 SUMMARY ================");
+   Log("TOTAL SETUPS: "+IntegerToString(ArraySize(rows))+
+       " | wins="+IntegerToString(wins)+
+       " | losses="+IntegerToString(losses)+
+       " | flat="+IntegerToString(flat));
+
+   Log("TOTAL ENTRY LOTS: "+DoubleToString(totalEntryLots,VolumeDigits())+
+       " | AVG LOT/SETUP: "+DoubleToString(avgLots,VolumeDigits()));
+
+   Log("MAX SETUP LOTS: "+DoubleToString(maxSetupLots,VolumeDigits())+
+       " | MAX ENTRY DEAL LOT: "+DoubleToString(maxEntryDealLot,VolumeDigits()));
+
+   Log("NET PROFIT FROM REPORTED SETUPS: "+DoubleToString(totalNet,2)+
+       " | AVG PROFIT CAPTURE: "+DoubleToString(avgCapture,1)+"%");
+
+   Log("L1 TP HITS: "+IntegerToString(l1Hits)+
+       " | L2 TP HITS: "+IntegerToString(l2Hits)+
+       " | RUNNER TP HITS: "+IntegerToString(runnerHits)+
+       " | PEAK-LOCK CLOSES: "+IntegerToString(peakLockCloses));
+
+   Log("============================================================");
+
+   if(!InpWriteCSVReport)
+      return;
+
+   MqlDateTime dt;
+   TimeToStruct(to,dt);
+
+   string filename=
+      StringFormat("%s_%s_%04d%02d%02d_%02d%02d.csv",
+                   InpCSVReportPrefix,
+                   _Symbol,
+                   dt.year,dt.mon,dt.day,dt.hour,dt.min);
+
+   int handle=
+      FileOpen(filename,
+               FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON,
+               ',');
+
+   if(handle==INVALID_HANDLE)
+   {
+      Log("REPORT: could not create CSV. Error="+
+          IntegerToString(GetLastError()));
+      return;
+   }
+
+   FileWrite(handle,
+             "SetupID",
+             "Direction",
+             "Confidence",
+             "RiskPct",
+             "TargetRR",
+             "Layers",
+             "EntryLots",
+             "MaxEntryDealLot",
+             "NetProfit",
+             "PeakCampaignProfit",
+             "ProfitCapturePct",
+             "PeakRunnerProfit",
+             "Layer1TPHits",
+             "Layer2TPHits",
+             "RunnerTPHits",
+             "PeakLockCloses");
+
+   for(int i=0;i<ArraySize(rows);i++)
+   {
+      double capture=
+         (rows[i].peakCampaignProfit>0.01)
+         ? rows[i].netProfit/rows[i].peakCampaignProfit*100.0
+         : 0.0;
+
+      FileWrite(handle,
+                (string)rows[i].id,
+                DirectionText(rows[i].direction),
+                rows[i].confidence,
+                DoubleToString(rows[i].riskPct,2),
+                DoubleToString(rows[i].targetRR,2),
+                rows[i].plannedLayers,
+                DoubleToString(rows[i].entryLots,VolumeDigits()),
+                DoubleToString(rows[i].maxEntryDealLot,VolumeDigits()),
+                DoubleToString(rows[i].netProfit,2),
+                DoubleToString(rows[i].peakCampaignProfit,2),
+                DoubleToString(capture,1),
+                DoubleToString(rows[i].peakRunnerProfit,2),
+                rows[i].layer1TPHits,
+                rows[i].layer2TPHits,
+                rows[i].runnerTPHits,
+                rows[i].peakLockCloses);
+   }
+
+   FileWrite(handle,"");
+   FileWrite(handle,"SUMMARY","Value");
+   FileWrite(handle,"TotalSetups",ArraySize(rows));
+   FileWrite(handle,"WinningSetups",wins);
+   FileWrite(handle,"LosingSetups",losses);
+   FileWrite(handle,"TotalEntryLots",DoubleToString(totalEntryLots,VolumeDigits()));
+   FileWrite(handle,"AverageLotsPerSetup",DoubleToString(avgLots,VolumeDigits()));
+   FileWrite(handle,"MaxSetupLots",DoubleToString(maxSetupLots,VolumeDigits()));
+   FileWrite(handle,"MaxEntryDealLot",DoubleToString(maxEntryDealLot,VolumeDigits()));
+   FileWrite(handle,"NetProfit",DoubleToString(totalNet,2));
+   FileWrite(handle,"AverageProfitCapturePct",DoubleToString(avgCapture,1));
+   FileWrite(handle,"Layer1TPHits",l1Hits);
+   FileWrite(handle,"Layer2TPHits",l2Hits);
+   FileWrite(handle,"RunnerTPHits",runnerHits);
+   FileWrite(handle,"PeakLockCloses",peakLockCloses);
+
+   FileFlush(handle);
+   FileClose(handle);
+
+   string reportPath=
+      TerminalInfoString(TERMINAL_COMMONDATA_PATH)+
+      "\\Files\\"+filename;
+
+   Log("CSV REPORT SAVED: "+reportPath);
+}
+
+string PersistentTag(long id)
+{
+   return "EZR"+(string)id;
+}
+
+int FindPersistentSetup(long id)
+{
+   for(int i=0;i<ArraySize(g_persistentSetups);i++)
+      if(g_persistentSetups[i].active && g_persistentSetups[i].id==id)
+         return i;
+   return -1;
+}
+
+bool HasUntriggeredPersistentReady(int direction)
+{
+   return (CountWaitingReadyDirection(direction)>0);
+}
+
+int CountWaitingReadyDirection(int direction)
+{
+   int count=0;
+
+   for(int i=0;i<ArraySize(g_persistentSetups);i++)
+   {
+      if(!g_persistentSetups[i].active)
+         continue;
+
+      if(g_persistentSetups[i].direction!=direction)
+         continue;
+
+      if(g_persistentSetups[i].deployed ||
+         g_persistentSetups[i].triggered)
+         continue;
+
+      count++;
+   }
+
+   return count;
+}
+
+int CountTotalWaitingReady()
+{
+   int count=0;
+
+   for(int i=0;i<ArraySize(g_persistentSetups);i++)
+   {
+      if(!g_persistentSetups[i].active)
+         continue;
+
+      if(g_persistentSetups[i].deployed ||
+         g_persistentSetups[i].triggered)
+         continue;
+
+      count++;
+   }
+
+   return count;
+}
+
+bool PersistentCommentMatches(string comment,long id)
+{
+   string tag=PersistentTag(id);
+   return (StringFind(comment,tag)==0);
+}
+
+int CountPersistentOrders(long id)
+{
+   int count=0;
+
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0) continue;
+      if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+      if((ulong)OrderGetInteger(ORDER_MAGIC)!=InpMagicNumber) continue;
+
+      string comment=OrderGetString(ORDER_COMMENT);
+      if(PersistentCommentMatches(comment,id))
+         count++;
+   }
+
+   return count;
+}
+
+int CountPersistentPositions(long id)
+{
+   int count=0;
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+
+      string comment=PositionGetString(POSITION_COMMENT);
+      if(PersistentCommentMatches(comment,id))
+         count++;
+   }
+
+   return count;
+}
+
+void CancelPersistentOrders(long id)
+{
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0) continue;
+      if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+      if((ulong)OrderGetInteger(ORDER_MAGIC)!=InpMagicNumber) continue;
+
+      string comment=OrderGetString(ORDER_COMMENT);
+      if(!PersistentCommentMatches(comment,id))
+         continue;
+
+      if(!trade.OrderDelete(ticket))
+         Log("Could not cancel persistent order "+(string)ticket+
+             " : "+trade.ResultRetcodeDescription());
+   }
+}
+
+int PersistentClosedBars(datetime armedBarTime)
+{
+   if(armedBarTime<=0)
+      return 0;
+
+   int shift=iBarShift(_Symbol,g_entryTF,armedBarTime,false);
+   if(shift<0)
+      return 0;
+
+   return shift;
+}
+
+double PersistentFallbackSL(ReadySnapshot &r,int direction)
+{
+   double stopPips=(g_mode=="SCALP")
+                   ? InpScalpStopPips
+                   : ((g_mode=="INTRADAY")?InpIntradayStopPips:InpSwingStopPips);
+
+   double fallback=MathMax(stopPips*g_pipSize,g_pipSize*10.0);
+
+   if(direction==1)
+      return RoundPrice(r.entryLo-fallback);
+
+   return RoundPrice(r.entryHi+fallback);
+}
+
+double LayerTPForSetup(int direction,double entry,double sl,double rr)
+{
+   rr=MathMax(0.10,rr);
+   if(direction==1)
+   {
+      double risk=entry-sl;
+      if(risk<=0) return 0.0;
+      return RoundPrice(entry+risk*rr);
+   }
+
+   double risk=sl-entry;
+   if(risk<=0) return 0.0;
+   return RoundPrice(entry-risk*rr);
+}
+
+bool SubmitPersistentLayerOrder(PersistentReadySetup &setup,
+                                LayerPlan &p,
+                                string comment,
+                                double brokerSL,
+                                double tp)
+{
+   if(setup.direction==1)
+   {
+      if(p.kind==LAYER_MARKET)
+         return trade.Buy(p.volume,_Symbol,0.0,brokerSL,tp,comment);
+      if(p.kind==LAYER_LIMIT)
+         return trade.BuyLimit(p.volume,p.execPrice,_Symbol,brokerSL,tp,ORDER_TIME_GTC,0,comment);
+      if(p.kind==LAYER_STOP)
+         return trade.BuyStop(p.volume,p.execPrice,_Symbol,brokerSL,tp,ORDER_TIME_GTC,0,comment);
+   }
+   else
+   {
+      if(p.kind==LAYER_MARKET)
+         return trade.Sell(p.volume,_Symbol,0.0,brokerSL,tp,comment);
+      if(p.kind==LAYER_LIMIT)
+         return trade.SellLimit(p.volume,p.execPrice,_Symbol,brokerSL,tp,ORDER_TIME_GTC,0,comment);
+      if(p.kind==LAYER_STOP)
+         return trade.SellStop(p.volume,p.execPrice,_Symbol,brokerSL,tp,ORDER_TIME_GTC,0,comment);
+   }
+   return false;
+}
+
+bool PlacePersistentLayer(PersistentReadySetup &setup,
+                          LayerPlan &p,
+                          int layerIndex,
+                          int totalLayers)
+{
+   // Recheck immediately before submission. Another READY setup or timer pass
+   // may have staged a LIMIT after this layer plan was built.
+   if(p.kind==LAYER_LIMIT && InpOneLimitPerReadyZone)
+   {
+      ulong existingTicket=0;
+      double existingPrice=0.0;
+      if(ExistingEALimitInReadyZone(setup.direction,
+                                    setup.entryLo,
+                                    setup.entryHi,
+                                    existingTicket,
+                                    existingPrice))
+      {
+         Log("LIMIT SUBMISSION SKIPPED | signal="+(string)setup.id+
+             " | READY zone already covered by ticket="+
+             (string)existingTicket+
+             " @ "+DoubleToString(existingPrice,_Digits));
+         return false;
+      }
+   }
+
+   string plannedKindText=(p.kind==LAYER_MARKET)?"MARKET":(p.kind==LAYER_LIMIT?"LIMIT":"STOP");
+   if(!DirectionalLayerSlotAvailable(
+         setup.direction,
+         plannedKindText+" signal="+(string)setup.id))
+   {
+      SetDeploymentFailure(
+         "directional position/pending layer cap reached",
+         0,
+         "",
+         "",
+         false);
+      return false;
+   }
+
+   string comment=PersistentTag(setup.id)+
+                  " L"+IntegerToString(layerIndex+1)+
+                  "/"+IntegerToString(totalLayers);
+
+   if(setup.zeroConfluenceFallback)
+      comment+=" ZC";
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol,tick))
+   {
+      SetDeploymentFailure(
+         "current symbol tick unavailable",
+         0,
+         "",
+         "",
+         true);
+      return false;
+   }
+
+   double estimatedEntry=p.execPrice;
+   if(p.kind==LAYER_MARKET || estimatedEntry<=0.0)
+      estimatedEntry=(setup.direction==1)?tick.ask:tick.bid;
+
+   double requestedTP=InpUseTakeProfit
+                      ? FixedPipTPForSetup(setup.direction,estimatedEntry,setup.confluences)
+                      : 0.0;
+   double tp=InpUseTakeProfit
+             ? BrokerSafeExecutionTP(setup.direction,estimatedEntry,requestedTP)
+             : 0.0;
+   double exactDistance=MathMax(0.1,InpPresetStopLossPips)*StrategyPipSize();
+   double exactSL=RoundPrice(setup.direction==1 ? estimatedEntry-exactDistance
+                                                : estimatedEntry+exactDistance);
+   double brokerSL=BrokerSafeExecutionSL(setup.direction,estimatedEntry,exactSL);
+
+   bool ok=SubmitPersistentLayerOrder(setup,p,comment,brokerSL,tp);
+   uint retcode=trade.ResultRetcode();
+   bool accepted=(ok && TradeRetcodeAccepted(retcode));
+   bool openedWithoutSL=false;
+
+   if(!accepted &&
+      InpRetryEntryWithoutSLOnReject &&
+      RetryWithoutSLRetcode(retcode))
+   {
+      Log("PRESET SL OPEN RETRY | signal="+(string)setup.id+
+          " | requestedSL="+DoubleToString(brokerSL,_Digits)+
+          " | first retcode="+IntegerToString((int)retcode)+
+          " | description="+trade.ResultRetcodeDescription()+
+          " | broker comment="+trade.ResultComment());
+
+      ok=SubmitPersistentLayerOrder(setup,p,comment,0.0,tp);
+      retcode=trade.ResultRetcode();
+      accepted=(ok && TradeRetcodeAccepted(retcode));
+      openedWithoutSL=accepted;
+   }
+
+   string kindText=plannedKindText;
+   if(accepted)
+   {
+      Log("PERSISTENT "+kindText+
+          " | signal="+(string)setup.id+
+          " | layer "+IntegerToString(layerIndex+1)+"/"+IntegerToString(totalLayers)+
+          " | requested price="+DoubleToString(estimatedEntry,_Digits)+
+          " | brokerPrice="+DoubleToString(trade.ResultPrice(),_Digits)+
+          " | exact virtual SL="+DoubleToString(exactSL,_Digits)+
+          " | broker SL="+string(openedWithoutSL?"POST-FILL INSTALL":DoubleToString(brokerSL,_Digits))+
+          " | TP="+string(InpUseTakeProfit?DoubleToString(tp,_Digits):"NONE")+
+          " | confidence="+ConfidenceClassText(setup.confluences)+
+          " | volume="+DoubleToString(p.volume,VolumeDigits())+
+          " | retcode="+IntegerToString((int)retcode));
+   }
+   else
+   {
+      string rejectDescription=trade.ResultRetcodeDescription();
+      string rejectComment=trade.ResultComment();
+      bool temporary=TemporaryTradeRetcode(retcode);
+
+      SetDeploymentFailure(
+         kindText+" order rejected by broker/tester",
+         retcode,
+         rejectDescription,
+         rejectComment,
+         temporary);
+
+      Log("Persistent "+kindText+" layer rejected | signal="+
+          (string)setup.id+
+          " | temporary="+string(temporary?"YES":"NO")+
+          " | retcode="+IntegerToString((int)retcode)+
+          " | description="+rejectDescription+
+          " | bid="+DoubleToString(trade.ResultBid(),_Digits)+
+          " | ask="+DoubleToString(trade.ResultAsk(),_Digits)+
+          " | broker comment="+rejectComment);
+   }
+
+   return accepted;
+}
+
+void SupersedeWaitingZones(int direction,long incomingId)
+{
+   if(!InpLatestZoneOnly) return;
+
+   for(int i=0;i<ArraySize(g_persistentSetups);i++)
+   {
+      if(!g_persistentSetups[i].active) continue;
+      if(g_persistentSetups[i].id==incomingId) continue;
+      if(g_persistentSetups[i].direction!=direction) continue;
+
+      if(CountPersistentPositions(g_persistentSetups[i].id)>0)
+         continue;
+
+      CancelPersistentOrders(g_persistentSetups[i].id);
+      DeletePersistentObjects(g_persistentSetups[i].id);
+      g_persistentSetups[i].active=false;
+   }
+}
+
+void CloseAllEzyExposure()
+{
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(ticket==0) continue;
+      if(OrderGetString(ORDER_SYMBOL)!=_Symbol) continue;
+      if((ulong)OrderGetInteger(ORDER_MAGIC)!=InpMagicNumber) continue;
+      trade.OrderDelete(ticket);
+   }
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+      trade.PositionClose(ticket,InpDeviationPoints);
+   }
+
+   for(int i=0;i<ArraySize(g_persistentSetups);i++)
+   {
+      if(g_persistentSetups[i].active)
+      {
+         DeletePersistentObjects(g_persistentSetups[i].id);
+         g_persistentSetups[i].active=false;
+      }
+   }
+}
+
+void ResetCampaignDay(bool forceReset)
+{
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(),dt);
+   int key=dt.year*10000+dt.mon*100+dt.day;
+
+   if(!forceReset && key==g_dailyDateKey) return;
+
+   g_dailyDateKey=key;
+   g_dailyLayerOrders=0;
+   g_dayStartEquity=AccountInfoDouble(ACCOUNT_EQUITY);
+   g_dayTargetEquity=g_dayStartEquity*(1.0+MathMax(0.0,InpDailyEquityTargetPct)/100.0);
+   double lossPct=MathMax(0.0,MathMin(95.0,InpDailyLossStopPct));
+   g_dayLossFloor=g_dayStartEquity*(1.0-lossPct/100.0);
+   g_dayTradingLocked=false;
+   g_dayLockReason="";
+   g_campaignDirection=0;
+   g_campaignSetups=0;
+
+   Log("CAMPAIGN DAY RESET | start="+DoubleToString(g_dayStartEquity,2)+
+       " | target="+DoubleToString(g_dayTargetEquity,2)+
+       " | loss floor="+DoubleToString(g_dayLossFloor,2));
+}
+
+void CheckCampaignDay()
+{
+   ResetCampaignDay(false);
+   if(g_dayTradingLocked) return;
+
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   if(InpDailyEquityTargetPct>0 && equity>=g_dayTargetEquity)
+   {
+      g_dayTradingLocked=true;
+      g_dayLockReason="DAILY TARGET REACHED";
+      if(InpCloseAllAtDailyTarget) CloseAllEzyExposure();
+      Log("CAMPAIGN REST: DAILY TARGET REACHED | equity="+DoubleToString(equity,2));
+      return;
+   }
+
+   if(InpDailyLossStopPct>0 && equity<=g_dayLossFloor)
+   {
+      g_dayTradingLocked=true;
+      g_dayLockReason="DAILY LOSS STOP";
+      CloseAllEzyExposure();
+      Log("CAMPAIGN REST: DAILY LOSS STOP | equity="+DoubleToString(equity,2));
+   }
+}
+
+string ConfidenceClassText(int conf)
+{
+   if(conf>=InpQualityConfidenceMin)
+      return "QUALITY";
+
+   if(conf>=InpGoodConfidenceMin)
+      return "GOOD";
+
+   return "STANDARD";
+}
+
+double ConfidenceSetupLot(int conf)
+{
+   double effectiveEquity=EffectiveAccountEquity();
+   double sizingCapital=LotSizingCapitalUnits();
+
+   if(effectiveEquity<MinimumTradingEquity())
+      return 0.0;
+
+   double lotPer100=InpStandardSetupLotPer100;
+
+   if(conf>=InpQualityConfidenceMin)
+      lotPer100=InpQualitySetupLotPer100;
+   else if(conf>=InpGoodConfidenceMin)
+      lotPer100=InpGoodSetupLotPer100;
+
+   // REAL-CENT BROKER-NATIVE RULE:
+   // Calculate the proportional target first. On a live cent account only,
+   // a target below the symbol minimum may nominate the broker minimum as a
+   // candidate; the cent risk/margin validator still has final authority.
+   double baseEquity=MathMax(1.0,InpBaseEquity);
+   double scale=sizingCapital/baseEquity;
+   double targetLot=lotPer100*scale;
+   double normalized=NormalizeVolumeDown(targetLot);
+   double minVol=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+
+   if(normalized<minVol-1e-12)
+   {
+      bool liveCentCandidate=
+         IsLiveCentAccount() &&
+         InpLiveCentBrokerMinimumExecution &&
+         InpAllowCentMinimumLotFallback &&
+         AccountInfoDouble(ACCOUNT_BALANCE)>=
+            MathMax(0.0,InpLiveCentRawBalanceFloor);
+
+      if(liveCentCandidate)
+      {
+         Log("LIVE CENT MINIMUM-LOT CANDIDATE | raw balance="+
+             DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2)+" "+
+             AccountInfoString(ACCOUNT_CURRENCY)+
+             " | economic USD-equivalent="+DoubleToString(effectiveEquity,2)+
+             " | broker-native sizing capital="+DoubleToString(sizingCapital,2)+
+             " | proportional target="+DoubleToString(targetLot,4)+
+             " | broker candidate="+DoubleToString(minVol,VolumeDigits())+
+             " | awaiting broker-native risk/margin validation");
+
+         // Return the broker minimum as a CANDIDATE only.
+         // CapSetupVolumeForCentSafety() still decides whether it is safe.
+         return NormalizeDouble(minVol,VolumeDigits());
+      }
+
+      Log("REAL CENT SIZE BLOCK | raw equity="+
+          DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2)+" "+
+          AccountInfoString(ACCOUNT_CURRENCY)+
+          " | economic USD-equivalent="+DoubleToString(effectiveEquity,2)+
+          " | broker-native sizing capital="+DoubleToString(sizingCapital,2)+
+          " | proportional target="+DoubleToString(targetLot,4)+
+          " | broker minimum="+DoubleToString(minVol,VolumeDigits())+
+          " | live minimum-lot profile="+
+          string(InpLiveCentBrokerMinimumExecution?"ON":"OFF"));
+      return 0.0;
+   }
+
+   return normalized;
+}
+
+//======================================================================
+// ADDITIVE: manual risk-percent-of-equity override (EzyEA family
+// convention - see InpUseRiskPercentSizing's declaration comment).
+// Default OFF: every call site below keeps requesting the reference's
+// own confidence-tier sizing via ConfidenceSetupLot(conf) unchanged.
+// When switched on, this replaces ONLY the requested lot with a
+// risk-%-of-equity calculation using the same OneLotLoss()/
+// NormalizeVolumeDown() helpers already used throughout this file; the
+// result is still passed through CapSetupVolumeForCentSafety() by every
+// caller exactly as before, so the reference's own safety cap is never
+// bypassed - only the requested-lot formula changes.
+//======================================================================
+double RequestedSetupLot(int conf,int direction,double entryPrice,double structuralSL)
+{
+   if(!InpUseRiskPercentSizing)
+      return ConfidenceSetupLot(conf);
+
+   double effectiveEquity=EffectiveAccountEquity();
+   if(effectiveEquity<MinimumTradingEquity())
+      return 0.0;
+
+   double riskBudget=EffectiveAccountEquity()*(InpRiskPercentPerTrade/100.0);
+   if(riskBudget<=0.0)
+      return 0.0;
+
+   double perLotLoss=OneLotLoss(direction,entryPrice,structuralSL);
+   if(perLotLoss<=0.0)
+      return 0.0;
+
+   return NormalizeVolumeDown(riskBudget/perLotLoss);
+}
+
+double RiskPctForSetup(int conf,double entryLo,double entryHi,double sl)
+{
+   double pct=(conf>=5)?InpRiskPct_5Plus:((conf==4)?InpRiskPct_4Conf:InpRiskPct_3Conf);
+   double mid=(entryLo+entryHi)/2.0;
+   double slPips=(g_pipSize>0)?MathAbs(mid-sl)/g_pipSize:0.0;
+   double ratio=slPips/MathMax(1.0,InpScalpStopPips);
+
+   if(ratio<=InpTightSLRatio) pct+=InpRiskTightSLBonusPct;
+   else if(ratio>=InpWideSLRatio) pct-=InpRiskWideSLPenaltyPct;
+
+   return Clamp(pct,25.0,InpMaxRiskPct);
+}
+
+int DesiredLayersForSetup(int conf,double entryLo,double entryHi,double sl)
+{
+   // Predictable confidence ladder:
+   // STANDARD -> 1 layer
+   // GOOD     -> 2 layers
+   // QUALITY  -> 3 layers
+   //
+   // The total setup lot is split across these layers.
+   if(conf>=InpQualityConfidenceMin)
+      return MathMin(3,InpMaxLayers);
+
+   if(conf>=InpGoodConfidenceMin)
+      return MathMin(2,InpMaxLayers);
+
+   return 1;
+}
+
+double TargetRRForSetup(double riskPct)
+{
+   // V2.009G quick-win final target.
+   // Sub-1R continuation targets are deliberately permitted.
+   return Clamp(InpLiveRR,
+                MathMax(0.20,InpContinuationMinRR),
+                MathMax(InpContinuationMinRR,
+                        InpContinuationMaxRR));
+}
+
+bool QueuePersistentSetup(ReadySnapshot &r,int direction)
+{
+   if(!r.armed)
+      return false;
+
+   if(InpAllowParallelWaitingReady)
+   {
+      int dirWaiting=CountWaitingReadyDirection(direction);
+      int allWaiting=CountTotalWaitingReady();
+
+      if(dirWaiting>=MathMax(1,InpMaxWaitingReadyPerDirection))
+      {
+         Log("PARALLEL READY CAP | "+
+             string(direction==1?"BUY":"SELL")+
+             " waiting="+IntegerToString(dirWaiting));
+         return false;
+      }
+
+      if(allWaiting>=MathMax(1,InpMaxTotalWaitingReady))
+      {
+         Log("TOTAL WAITING READY CAP | waiting="+
+             IntegerToString(allWaiting));
+         return false;
+      }
+   }
+
+   if(ArraySize(g_persistentSetups)>=MathMax(1,InpMaxPersistentSetups))
+   {
+      bool reusable=false;
+
+      for(int k=0;k<ArraySize(g_persistentSetups);k++)
+      {
+         if(!g_persistentSetups[k].active)
+         {
+            reusable=true;
+            break;
+         }
+      }
+
+      if(!reusable)
+      {
+         Log("Persistent setup queue full. READY not stored.");
+         return false;
+      }
+   }
+
+   long id=(long)r.armedClock*10+(direction==1?1:2);
+
+   if(FindPersistentSetup(id)>=0)
+      return false;
+
+   SupersedeWaitingZones(direction,id);
+
+   int slot=-1;
+
+   for(int i=0;i<ArraySize(g_persistentSetups);i++)
+   {
+      if(!g_persistentSetups[i].active)
+      {
+         slot=i;
+         break;
+      }
+   }
+
+   if(slot<0)
+   {
+      slot=ArraySize(g_persistentSetups);
+      ArrayResize(g_persistentSetups,slot+1);
+   }
+
+   ZeroMemory(g_persistentSetups[slot]);
+
+   g_persistentSetups[slot].active=true;
+   g_persistentSetups[slot].deployed=false;
+   g_persistentSetups[slot].triggered=false;
+   g_persistentSetups[slot].expiryHandled=false;
+
+   g_persistentSetups[slot].id=id;
+   g_persistentSetups[slot].direction=direction;
+   g_persistentSetups[slot].counterTrend=r.counterTrend;
+   g_persistentSetups[slot].confluences=r.confluences;
+   g_persistentSetups[slot].requiredConfluences=r.requiredConfluences;
+   g_persistentSetups[slot].zeroConfluenceFallback=
+      (r.requiredConfluences==0);
+
+   g_persistentSetups[slot].zeroConfluenceLevelPrice=
+      direction==1 ? g_S1 : g_R1;
+
+   g_persistentSetups[slot].zeroConfluenceOuterLevelPrice=
+      direction==1 ? g_S2 : g_R2;
+
+   g_persistentSetups[slot].zoneRetests=r.zoneRetests;
+
+   g_persistentSetups[slot].supportLo=r.supportLo;
+   g_persistentSetups[slot].supportHi=r.supportHi;
+   g_persistentSetups[slot].entryLo=r.entryLo;
+   g_persistentSetups[slot].entryHi=r.entryHi;
+
+   g_persistentSetups[slot].entryTime=r.entryTime;
+   g_persistentSetups[slot].armedClock=r.armedClock;
+   g_persistentSetups[slot].armedBarTime=r.armedBarTime;
+   g_persistentSetups[slot].deployedClock=0;
+   g_persistentSetups[slot].zoneExited=false;
+   g_persistentSetups[slot].riskPct=0.0;
+   g_persistentSetups[slot].targetRR=InpLiveRR;
+   g_persistentSetups[slot].touchLatched=false;
+   g_persistentSetups[slot].highRiskTouchLatched=false;
+   g_persistentSetups[slot].s1r1TouchLatched=false;
+   g_persistentSetups[slot].s2r2TouchLatched=false;
+   g_persistentSetups[slot].hasPreviousTouchCMP=false;
+   g_persistentSetups[slot].previousTouchCMP=0.0;
+   g_persistentSetups[slot].touchClock=0;
+   g_persistentSetups[slot].touchPrice=0.0;
+   g_persistentSetups[slot].deployAttempts=0;
+   g_persistentSetups[slot].lastDeployAttemptClock=0;
+   g_persistentSetups[slot].lastDeployAttemptTickMs=0;
+   g_persistentSetups[slot].deploymentBlockedM5=0;
+
+   double sl=r.planSL;
+
+   if(direction==1 && (sl<=0 || sl>=r.entryLo))
+      sl=PersistentFallbackSL(r,direction);
+
+   if(direction==-1 && (sl<=r.entryHi))
+      sl=PersistentFallbackSL(r,direction);
+
+   g_persistentSetups[slot].structuralSL=NormalizeDouble(sl,_Digits);
+
+   g_persistentQueuedCount++;
+
+   Log("SOURCE READY STORED | signal="+(string)id+
+       " | "+string(direction==1?"BUY":"SELL")+
+       " | conf="+IntegerToString(r.confluences)+
+       " | required="+IntegerToString(r.requiredConfluences)+
+       " | zero-conf fallback="+
+       string(g_persistentSetups[slot].zeroConfluenceFallback?"YES":"NO")+
+       " | frozen "+string(direction==1?"S1":"R1")+"="+
+       DoubleToString(
+          g_persistentSetups[slot].zeroConfluenceLevelPrice,
+          _Digits)+
+       " | frozen "+string(direction==1?"S2":"R2")+"="+
+       DoubleToString(
+          g_persistentSetups[slot].zeroConfluenceOuterLevelPrice,
+          _Digits)+
+       " | open EA positions="+IntegerToString(CountOurPositions())+
+       " | counter="+string(r.counterTrend?"YES":"NO")+
+       " | lifetime="+IntegerToString(InpReadyExpiryBars)+
+       " closed "+g_tfLabel+" bars");
+
+   // Normal confluence-qualified V3.081 setups keep immediate-on-arm routing.
+   // Zero-confluence fallback setups are touch-only by explicit V3.102 rule.
+   if(InpAggressiveArmExecution &&
+      !g_persistentSetups[slot].zeroConfluenceFallback)
+   {
+      Log("READY ARMED -> INSTANT MARKET + CONFIDENCE LIMITS | signal="+
+          (string)id);
+
+      bool deployedNow=
+         DeployAggressiveArmSetup(slot);
+
+      if(!deployedNow)
+      {
+         // Keep a short retry latch for a transient market/server rejection.
+         g_persistentSetups[slot].touchLatched=true;
+         g_persistentSetups[slot].touchClock=TimeCurrent();
+         g_persistentSetups[slot].touchPrice=
+            (direction==1)
+            ? SymbolInfoDouble(_Symbol,SYMBOL_ASK)
+            : SymbolInfoDouble(_Symbol,SYMBOL_BID);
+         g_persistentSetups[slot].deployAttempts=0;
+
+         Log("AGGRESSIVE ARM RETRY LATCHED | signal="+
+             (string)id);
+      }
+   }
+   else if(g_persistentSetups[slot].zeroConfluenceFallback)
+   {
+      Log("ZERO-CONFLUENCE SETUP WAITING FOR CMP TOUCH | signal="+
+          (string)id+
+          " | triggers=READY, matching HIGH-RISK, frozen "+
+          string(direction==1?"S1/S2":"R1/R2")+" levels"+
+          " | high-risk trigger="+
+          string(V3104_ZERO_CONF_HIGH_RISK_TOUCH_RULE?"ON":"OFF")+
+          " | S1/R1 trigger="+
+          string(V3104_ZERO_CONF_S1_R1_TOUCH_RULE?"ON":"OFF")+
+          " | S2/R2 trigger="+
+          string(V3104_ZERO_CONF_S2_R2_TOUCH_RULE?"ON":"OFF")+
+          " | open EA positions="+
+          IntegerToString(CountOurPositions())+
+          " | trigger allowed only while positions <= "+
+          IntegerToString(V3104_ZERO_CONF_MAX_OPEN_POSITIONS));
+   }
+
+   return true;
+}
+
+
+void ResetDailyFrequencyCounter()
+{
+   ResetCampaignDay(false);
+}
+
+
+
+
+bool PersistentQualityPass(PersistentReadySetup &setup,string &reason)
+{
+   reason="";
+
+   if(V3104_FORCE_ZERO_CONF_MARKET_EXECUTION &&
+      setup.zeroConfluenceFallback &&
+      setup.requiredConfluences==0)
+   {
+      Log("ZERO-CONFLUENCE FORCE PASS | signal="+(string)setup.id+
+          " | touch quality recheck=BYPASSED"+
+          " | current position-count recheck=BYPASSED"+
+          " | retry until MARKET accepted=YES");
+      return true;
+   }
+
+   CheckCampaignDay();
+   if(g_dayTradingLocked)
+   {
+      reason=g_dayLockReason;
+      return false;
+   }
+
+   int normalRequired=setup.counterTrend
+                      ? COUNTER_MIN_CONFLUENCES
+                      : TREND_MIN_CONFLUENCES;
+   if(setup.confluences>=normalRequired)
+      return true;
+
+   reason="stored setup does not meet normal confluence requirement";
+   return false;
+}
+
+
+
+
+
+
+
+
+bool AddAggressiveLimitCandidate(PersistentReadySetup &setup,
+                                 MqlTick &tick,
+                                 double minDist,
+                                 double depthPct,
+                                 LayerPlan &plans[])
+{
+   int direction=setup.direction;
+   double zoneLo=MathMin(setup.entryLo,setup.entryHi);
+   double zoneHi=MathMax(setup.entryLo,setup.entryHi);
+   double width=MathMax(0.0,zoneHi-zoneLo);
+
+   if(width<=_Point)
+      return false;
+
+   if(InpOneLimitPerReadyZone)
+   {
+      // A LIMIT already planned in this build means this READY zone is
+      // already covered, even before the order reaches the trade server.
+      for(int i=0;i<ArraySize(plans);i++)
+      {
+         if(plans[i].kind==LAYER_LIMIT)
+         {
+            Log("LIMIT DUPLICATE SKIP | signal="+(string)setup.id+
+                " | READY zone already has a planned LIMIT route");
+            return false;
+         }
+      }
+
+      ulong existingTicket=0;
+      double existingPrice=0.0;
+      if(ExistingEALimitInReadyZone(direction,
+                                    zoneLo,
+                                    zoneHi,
+                                    existingTicket,
+                                    existingPrice))
+      {
+         Log("LIMIT DUPLICATE SKIP | signal="+(string)setup.id+
+             " | existing ticket="+(string)existingTicket+
+             " | price="+DoubleToString(existingPrice,_Digits)+
+             " | READY="+DoubleToString(zoneLo,_Digits)+
+             ".."+DoubleToString(zoneHi,_Digits));
+         return false;
+      }
+   }
+
+   double depth=
+      MathMax(0.0,MathMin(100.0,depthPct))/100.0;
+
+   double limitPrice=0.0;
+
+   if(direction==1)
+   {
+      // BUY LIMIT: deeper toward the lower READY edge.
+      limitPrice=zoneLo+width*depth;
+      limitPrice=MathMin(limitPrice,tick.ask-minDist);
+      limitPrice=MathMax(limitPrice,setup.structuralSL+minDist);
+   }
+   else
+   {
+      // SELL LIMIT: deeper toward the upper READY edge.
+      limitPrice=zoneHi-width*depth;
+      limitPrice=MathMax(limitPrice,tick.bid+minDist);
+      limitPrice=MathMin(limitPrice,setup.structuralSL-minDist);
+   }
+
+   limitPrice=RoundPrice(limitPrice);
+
+   double liveExtension=0.0;
+   if(!(bool)MQLInfoInteger(MQL_TESTER))
+      liveExtension=MathMax(minDist,
+                            MathMax(0.0,InpLiveLimitGeometryExtensionPips)*StrategyPipSize());
+
+   bool insideZone=
+      (limitPrice>=zoneLo-liveExtension-_Point &&
+       limitPrice<=zoneHi+liveExtension+_Point);
+
+   bool correctSide=
+      direction==1
+      ? (limitPrice<=tick.ask-minDist &&
+         limitPrice>setup.structuralSL)
+      : (limitPrice>=tick.bid+minDist &&
+         limitPrice<setup.structuralSL);
+
+   if(!insideZone || !correctSide)
+   {
+      Log("LIMIT GEOMETRY REJECT | signal="+(string)setup.id+
+          " | side="+string(direction==1?"BUY":"SELL")+
+          " | candidate="+DoubleToString(limitPrice,_Digits)+
+          " | zone="+DoubleToString(zoneLo,_Digits)+".."+DoubleToString(zoneHi,_Digits)+
+          " | live extension="+DoubleToString(liveExtension/_Point,0)+" points"+
+          " | broker minimum distance="+DoubleToString(minDist/_Point,0)+" points");
+      return false;
+   }
+
+   // Avoid duplicate LIMIT prices when the broker-valid zone is narrow.
+   for(int i=0;i<ArraySize(plans);i++)
+      if(MathAbs(plans[i].execPrice-limitPrice)<=_Point)
+         return false;
+
+   double lossPerLot=
+      OneLotLoss(direction,limitPrice,setup.structuralSL);
+
+   if(lossPerLot<=0)
+      return false;
+
+   int n=ArraySize(plans);
+   ArrayResize(plans,n+1);
+
+   plans[n].rawPrice=limitPrice;
+   plans[n].execPrice=limitPrice;
+   plans[n].volume=0.0; // assigned after valid route count is known
+   plans[n].kind=LAYER_LIMIT;
+   plans[n].lossPerLot=lossPerLot;
+
+   return true;
+}
+
+bool BuildAggressiveArmPlans(PersistentReadySetup &setup,
+                             LayerPlan &plans[])
+{
+   ArrayResize(plans,0);
+
+   MqlTick tick;
+
+   if(!SymbolInfoTick(_Symbol,tick))
+   {
+      SetDeploymentFailure(
+         "aggressive plan cannot read current symbol tick",
+         0,"","",true);
+      return false;
+   }
+
+   int direction=setup.direction;
+   double marketPrice=(direction==1)?tick.ask:tick.bid;
+
+   double targetSetupLot=
+      RequestedSetupLot(setup.confluences,direction,marketPrice,setup.structuralSL);
+
+   double minVol=
+      SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+
+   if(targetSetupLot<=0 ||
+      minVol<=0 ||
+      targetSetupLot<minVol-1e-12)
+   {
+      string reason=
+         "confidence setup lot below broker minimum: calculated="+
+         DoubleToString(targetSetupLot,VolumeDigits())+
+         " minimum="+DoubleToString(minVol,VolumeDigits())+
+         " confidence="+IntegerToString(setup.confluences);
+
+      Log("AGGRESSIVE ARM LOT BLOCK | effective USD-equivalent="+
+          DoubleToString(EffectiveAccountEquity(),2)+
+          " | "+reason);
+
+      SetDeploymentFailure(reason,0,"","",false);
+      return false;
+   }
+
+   int desiredLayers=
+      DesiredLayersForSetup(setup.confluences,
+                            setup.entryLo,
+                            setup.entryHi,
+                            setup.structuralSL);
+
+   desiredLayers=
+      MathMax(1,MathMin(3,desiredLayers));
+
+   long stopsLevel=
+      SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL);
+
+   long freezeLevel=
+      SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL);
+
+   double minDist=
+      MathMax(_Point,
+              ((double)MathMax(stopsLevel,freezeLevel)+
+               MathMax(0,InpExecutionStopCushionPoints))*_Point);
+
+   setup.structuralSL=
+      BrokerSafeExecutionSL(direction,
+                            marketPrice,
+                            setup.structuralSL);
+
+   if(direction==1 && setup.structuralSL>=marketPrice)
+   {
+      SetDeploymentFailure(
+         "BUY structural SL is not below MARKET entry price",
+         0,"","",false);
+      return false;
+   }
+
+   if(direction==-1 && setup.structuralSL<=marketPrice)
+   {
+      SetDeploymentFailure(
+         "SELL structural SL is not above MARKET entry price",
+         0,"","",false);
+      return false;
+   }
+
+   targetSetupLot=
+      CapSetupVolumeForCentSafety(direction,
+                                  marketPrice,
+                                  setup.structuralSL,
+                                  targetSetupLot);
+
+   if(targetSetupLot<minVol-1e-12)
+   {
+      SetDeploymentFailure(
+         "cent-safety normalization reduced setup lot below broker minimum",
+         0,"","",false);
+      return false;
+   }
+
+   // Route 1 is always immediate MARKET.
+   ArrayResize(plans,1);
+   plans[0].rawPrice=marketPrice;
+   plans[0].execPrice=marketPrice;
+   plans[0].volume=0.0;
+   plans[0].kind=LAYER_MARKET;
+   plans[0].lossPerLot=
+      OneLotLoss(direction,marketPrice,setup.structuralSL);
+
+   if(plans[0].lossPerLot<=0)
+   {
+      SetDeploymentFailure(
+         "MARKET layer loss-per-lot calculation is invalid",
+         0,"","",false);
+      return false;
+   }
+
+   // Good may add one LIMIT. Quality may add two distinct LIMIT levels.
+   if(InpAggressivePlaceLimitRoute && desiredLayers>=2)
+   {
+      double firstDepth=
+         MathMax(5.0,
+                 MathMin(45.0,InpAggressiveLimitDepthPct));
+
+      AddAggressiveLimitCandidate(
+         setup,tick,minDist,firstDepth,plans);
+   }
+
+   if(InpAggressivePlaceLimitRoute && desiredLayers>=3)
+   {
+      double secondDepth=
+         MathMax(55.0,
+                 MathMin(95.0,
+                         100.0-InpAggressiveLimitDepthPct));
+
+      AddAggressiveLimitCandidate(
+         setup,tick,minDist,secondDepth,plans);
+   }
+
+   // Use only valid routes, but preserve the full original confidence lot.
+   int available=ArraySize(plans);
+
+   while(available>1)
+   {
+      double share=
+         NormalizeVolumeDown(
+            targetSetupLot/(double)available);
+
+      if(share>=minVol-1e-12)
+         break;
+
+      ArrayResize(plans,available-1);
+      available=ArraySize(plans);
+   }
+
+   if(available<=0)
+      return false;
+
+   double remaining=targetSetupLot;
+
+   // LIMIT routes receive equal broker-valid shares.
+   // MARKET receives the final rounding remainder, preserving total volume.
+   for(int i=available-1;i>=0;i--)
+   {
+      int routesLeft=i+1;
+
+      double volume=
+         (i==0)
+         ? NormalizeVolumeDown(remaining)
+         : NormalizeVolumeDown(
+              remaining/(double)routesLeft);
+
+      if(volume<minVol-1e-12)
+      {
+         SetDeploymentFailure(
+            "confidence volume split produced a layer below broker minimum",
+            0,"","",false);
+         return false;
+      }
+
+      plans[i].volume=volume;
+      remaining=MathMax(0.0,remaining-volume);
+   }
+
+   double assigned=0.0;
+
+   for(int i=0;i<available;i++)
+      assigned+=plans[i].volume;
+
+   Log("CONFIDENCE ARM PLAN | signal="+
+       (string)setup.id+
+       " | "+ConfidenceClassText(setup.confluences)+
+       " | target lots="+
+       DoubleToString(targetSetupLot,VolumeDigits())+
+       " | valid routes="+
+       IntegerToString(available)+
+       " | assigned="+
+       DoubleToString(assigned,VolumeDigits()));
+
+   return true;
+}
+
+bool BuildForcedZeroConfluenceMarketPlan(PersistentReadySetup &setup,LayerPlan &plan)
+{
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol,tick))
+   {
+      SetDeploymentFailure("forced zero-confluence MARKET cannot read current tick",
+                           0,"","",true);
+      return false;
+   }
+
+   int direction=setup.direction;
+   double marketPrice=(direction==1)?tick.ask:tick.bid;
+   double exactDistance=MathMax(0.1,InpPresetStopLossPips)*StrategyPipSize();
+
+   setup.structuralSL=RoundPrice(direction==1
+                                ? marketPrice-exactDistance
+                                : marketPrice+exactDistance);
+   setup.structuralSL=BrokerSafeExecutionSL(direction,marketPrice,setup.structuralSL);
+
+   double requested=RequestedSetupLot(0,direction,marketPrice,setup.structuralSL);
+   double volume=CapSetupVolumeForCentSafety(direction,marketPrice,
+                                             setup.structuralSL,requested);
+   double minVolume=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+
+   if(volume<minVolume-1e-12)
+   {
+      SetDeploymentFailure("forced zero-confluence STANDARD lot below broker/safety minimum",
+                           0,"","",false);
+      return false;
+   }
+
+   plan.rawPrice=marketPrice;
+   plan.execPrice=marketPrice;
+   plan.volume=volume;
+   plan.kind=LAYER_MARKET;
+   plan.lossPerLot=OneLotLoss(direction,marketPrice,setup.structuralSL);
+
+   if(plan.lossPerLot<=0.0)
+   {
+      SetDeploymentFailure("forced zero-confluence MARKET loss-per-lot calculation failed",
+                           0,"","",false);
+      return false;
+   }
+   return true;
+}
+
+
+
+
+
+
+bool DeployAggressiveArmSetup(int index)
+{
+   if(index<0 || index>=ArraySize(g_persistentSetups))
+   {
+      SetDeploymentFailure(
+         "persistent setup index is invalid",
+         0,"","",false);
+      return false;
+   }
+
+   if(!g_persistentSetups[index].active ||
+      g_persistentSetups[index].deployed)
+   {
+      SetDeploymentFailure(
+         "persistent setup is inactive or already deployed",
+         0,"","",false);
+      return false;
+   }
+
+   bool zeroConf=g_persistentSetups[index].zeroConfluenceFallback;
+   bool forceZeroConf=zeroConf && V3104_FORCE_ZERO_CONF_MARKET_EXECUTION;
+
+   CheckCampaignDay();
+
+   if(!forceZeroConf && g_dayTradingLocked)
+   {
+      SetDeploymentFailure("campaign/day trading lock: "+g_dayLockReason,
+                           0,"","",false);
+      return false;
+   }
+
+   if(!forceZeroConf && g_campaignSetups>=InpMaxCampaignSetupsPerDay)
+   {
+      SetDeploymentFailure("maximum campaign setups per day reached",
+                           0,"","",false);
+      return false;
+   }
+
+   if(!forceZeroConf &&
+      IsLiveCentAccount() &&
+      InpLiveCentParityMode &&
+      InpLiveCentMaximumOpenPositions>0 &&
+      CountOurPositions()>=InpLiveCentMaximumOpenPositions)
+   {
+      string reason=
+         "live-cent open-position cap reached: "+
+         IntegerToString(InpLiveCentMaximumOpenPositions);
+
+      Log("LIVE CENT PARITY WAIT | open position cap="+
+          IntegerToString(InpLiveCentMaximumOpenPositions)+
+          " | signal="+
+          (string)g_persistentSetups[index].id);
+
+      SetDeploymentFailure(reason,0,"","",false);
+      return false;
+   }
+
+   string tradeEnvironmentReason="";
+   if(!TradingEnvironmentReady(tradeEnvironmentReason))
+   {
+      bool temporary=
+         (StringFind(tradeEnvironmentReason,
+                     "disconnected")>=0);
+
+      Log("LIVE ENTRY BLOCKED | "+tradeEnvironmentReason+
+          " | signal="+
+          (string)g_persistentSetups[index].id);
+
+      SetDeploymentFailure(
+         "trading environment unavailable: "+
+         tradeEnvironmentReason,
+         0,
+         "",
+         "",
+         temporary);
+      return false;
+   }
+
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   double effectiveEquity=EffectiveAccountEquity();
+
+   if(effectiveEquity<MinimumTradingEquity())
+   {
+      string reason=
+         "effective equity below minimum: effective="+
+         DoubleToString(effectiveEquity,2)+
+         " raw="+DoubleToString(equity,2)+
+         " minimum="+
+         DoubleToString(MinimumTradingEquity(),2);
+
+      Log("AGGRESSIVE ARM BLOCKED | "+reason);
+      SetDeploymentFailure(reason,0,"","",false);
+      return false;
+   }
+
+   LayerPlan plans[];
+   bool planBuilt=BuildAggressiveArmPlans(g_persistentSetups[index],plans);
+
+   if(!planBuilt && forceZeroConf)
+   {
+      Log("ZERO-CONF PLAN FALLBACK | signal="+
+          (string)g_persistentSetups[index].id+
+          " | forcing one direct STANDARD MARKET plan");
+      ResetDeploymentFailure();
+
+      LayerPlan forcedMarket;
+      if(BuildForcedZeroConfluenceMarketPlan(g_persistentSetups[index],forcedMarket))
+      {
+         ArrayResize(plans,1);
+         plans[0]=forcedMarket;
+         planBuilt=true;
+      }
+   }
+
+   if(!planBuilt)
+   {
+      if(!g_deployFailureSet)
+         SetDeploymentFailure(
+            "aggressive layer plan unavailable: check lot size, broker minimum, SL geometry and margin limits",
+            0,"","",false);
+
+      Log("AGGRESSIVE ARM plan unavailable | signal="+
+          (string)g_persistentSetups[index].id+
+          " | "+DeploymentFailureSummary());
+      return false;
+   }
+
+   int available=ArraySize(plans);
+   int totalLayers=available;
+
+   if(available<1 || plans[0].kind!=LAYER_MARKET)
+   {
+      SetDeploymentFailure(
+         "layer plan did not provide MARKET as route 1",
+         0,"","",false);
+      return false;
+   }
+
+   double plannedRiskMoney=0.0;
+
+   for(int i=0;i<available;i++)
+      plannedRiskMoney+=plans[i].volume*
+                        plans[i].lossPerLot;
+
+   g_persistentSetups[index].riskPct=
+      (equity>0)
+      ? plannedRiskMoney/equity*100.0
+      : 0.0;
+
+   g_persistentSetups[index].targetRR=
+      TargetRRForSetup(
+         g_persistentSetups[index].riskPct);
+
+   bool marketFilled=
+      PlacePersistentLayer(
+         g_persistentSetups[index],
+         plans[0],
+         0,
+         totalLayers);
+
+   if(!marketFilled)
+   {
+      if(!g_deployFailureSet)
+      {
+         SetDeploymentFailure(
+            "first MARKET layer was not accepted",
+            trade.ResultRetcode(),
+            trade.ResultRetcodeDescription(),
+            trade.ResultComment(),
+            TemporaryTradeRetcode(
+               trade.ResultRetcode()));
+      }
+
+      Log("AGGRESSIVE ARM MARKET FAILED | signal="+
+          (string)g_persistentSetups[index].id+
+          " | zero-conf="+string(zeroConf?"YES":"NO")+
+          " | "+DeploymentFailureSummary()+
+          " | no pending exposure staged="+
+          string((zeroConf ||
+                  InpAggressiveRequireMarketFill)
+                 ?"YES":"NO"));
+
+      if(zeroConf ||
+         InpAggressiveRequireMarketFill)
+         return false;
+   }
+
+   int placed=marketFilled?1:0;
+   int pendingPlaced=0;
+   double acceptedLots=
+      marketFilled ? plans[0].volume : 0.0;
+
+   if(marketFilled)
+      g_dailyLayerOrders++;
+
+   if(zeroConf)
+   {
+      Log("ZERO-CONF MARKET-FIRST CONTINUE | signal="+
+          (string)g_persistentSetups[index].id+
+          " | no per-M5 fill cap"+
+          " | optional confidence layers may follow MARKET"+
+          " | directional ceiling="+
+          IntegerToString(InpMaxActiveLayersPerDirection));
+   }
+
+   if(marketFilled ||
+      (!zeroConf &&
+       !InpAggressiveRequireMarketFill))
+   {
+      for(int i=1;i<available;i++)
+      {
+         if(PlacePersistentLayer(
+               g_persistentSetups[index],
+               plans[i],
+               i,
+               totalLayers))
+         {
+            placed++;
+            pendingPlaced++;
+            acceptedLots+=plans[i].volume;
+            g_dailyLayerOrders++;
+         }
+      }
+   }
+
+   if(placed<=0)
+   {
+      if(!g_deployFailureSet)
+      {
+         SetDeploymentFailure(
+            "no MARKET or pending layer was accepted",
+            0,"","",false);
+      }
+      return false;
+   }
+
+   g_persistentSetups[index].deployed=true;
+   g_persistentSetups[index].deployedClock=
+      TimeCurrent();
+   g_persistentSetups[index].layersPlanned=
+      totalLayers;
+   g_persistentSetups[index].layersPlaced=
+      placed;
+
+   g_qualityDeployCount++;
+   g_campaignSetups++;
+
+   RegisterSetupAnalytics(
+      g_persistentSetups[index]);
+
+   int analyticsIndex=
+      EnsureAnalytics(
+         g_persistentSetups[index].id);
+
+   g_setupAnalytics[analyticsIndex].plannedLots=
+      acceptedLots;
+
+   Log("AGGRESSIVE ARM DEPLOYED | signal="+
+       (string)g_persistentSetups[index].id+
+       " | "+
+       string(g_persistentSetups[index].direction==1
+              ?"BUY":"SELL")+
+       " | MARKET="+
+       string(marketFilled?"FILLED":"FAILED")+
+       " | LIMIT placed="+
+       IntegerToString(pendingPlaced)+
+       " | total routes="+
+       IntegerToString(placed)+
+       "/"+IntegerToString(totalLayers)+
+       " | zero-conf MARKET-first="+
+       string(zeroConf?"YES":"NO")+
+       " | confidence="+
+       ConfidenceClassText(
+          g_persistentSetups[index].confluences)+
+       " | lots="+
+       DoubleToString(
+          acceptedLots,
+          VolumeDigits())+
+       " | SL="+
+       DoubleToString(
+          g_persistentSetups[index].structuralSL,
+          _Digits));
+
+   return true;
+}
+
+
+bool DeployPersistentSetup(int index)
+{
+   if(InpAggressiveArmExecution)
+      return DeployAggressiveArmSetup(index);
+
+   // InpAggressiveArmExecution=true by default routes every call through
+   // the delegation above. The reference's own non-aggressive body past
+   // this point (legacy CreateConfidenceLayerSet/CreateBestLayerSetDynamic/
+   // CreateMarketFallbackLayerSet staging) is confirmed dead code under
+   // default settings (call-graph verified) and is intentionally not
+   // ported - see header changelog. This fallback keeps the function
+   // total should the input ever be turned off.
+   return false;
+}
+void CapturePersistentReadySignals()
+{
+   if(!InpPersistentReadyMode)
+      return;
+
+   if(g_buyReady.armed)
+   {
+      long id=(long)g_buyReady.armedClock*10+1;
+
+      if(id!=g_lastCapturedBuyId)
+      {
+         if(QueuePersistentSetup(g_buyReady,1))
+            g_lastCapturedBuyId=id;
+      }
+
+      // The READY state is now owned by the persistent queue.
+      ClearReadySnapshot(g_buyReady);
+   }
+
+   if(g_sellReady.armed)
+   {
+      long id=(long)g_sellReady.armedClock*10+2;
+
+      if(id!=g_lastCapturedSellId)
+      {
+         if(QueuePersistentSetup(g_sellReady,-1))
+            g_lastCapturedSellId=id;
+      }
+
+      ClearReadySnapshot(g_sellReady);
+   }
+
+   ClearReadySnapshot(g_ready);
+
+   // Do NOT freeze scanning just because another real trade is LIVE.
+   g_state=ST_MONITORING;
+}
+
+void DeletePersistentObjects(long id)
+{
+   string key=(string)id;
+
+   DeleteObject("PZ_"+key);
+   DeleteObject("PZLBL_"+key);
+   DeleteObject("PSL_"+key);
+   DeleteObject("PSLLBL_"+key);
+}
+
+void DrawPersistentReadyZones()
+{
+   if(!InpPersistentReadyMode)
+      return;
+
+   datetime labelTime=TimeCurrent()+TfSeconds(g_entryTF)*3;
+
+   for(int i=0;i<ArraySize(g_persistentSetups);i++)
+   {
+      if(!g_persistentSetups[i].active)
+         continue;
+
+      PersistentReadySetup s=g_persistentSetups[i];
+      datetime future=s.armedBarTime+TfSeconds(g_entryTF)*InpReadyExpiryBars;
+      if(future<=TimeCurrent()) future=TimeCurrent()+TfSeconds(g_entryTF);
+
+      int positions=CountPersistentPositions(s.id);
+      bool live=(positions>0);
+
+      color c=(s.direction==1)?InpBuyColor:InpSellColor;
+      string key=(string)s.id;
+
+      Rect("PZ_"+key,
+           s.entryTime,
+           s.entryLo,
+           future,
+           s.entryHi,
+           c,
+           true,
+           live?2:1,
+           STYLE_SOLID);
+
+      string state=live
+                   ?"LIVE"
+                   :(s.deployed?"READY ORDERS SET":"READY WATCHING");
+      string label=state+" "+string(s.direction==1?"BUY":"SELL")+
+                   " • "+IntegerToString(s.confluences)+" CONF";
+
+      ChartText("PZLBL_"+key,
+                labelTime,
+                (s.entryLo+s.entryHi)/2.0,
+                label,
+                c,
+                8,
+                ANCHOR_LEFT);
+
+      if(live && InpKeepZoneVisibleWhileLive)
+      {
+         HLine("PSL_"+key,s.structuralSL,InpSellColor,STYLE_DASH,1);
+
+         ChartText("PSLLBL_"+key,
+                   labelTime,
+                   s.structuralSL,
+                   "SL  "+PriceText(s.structuralSL),
+                   InpSellColor,
+                   8,
+                   ANCHOR_LEFT);
+      }
+      else
+      {
+         DeleteObject("PSL_"+key);
+         DeleteObject("PSLLBL_"+key);
+      }
+   }
+}
+
+
+
+void RefreshPersistentPositionProtection()
+{
+   if(!InpPersistentReadyMode)
+      return;
+
+   for(int i=0;i<ArraySize(g_persistentSetups);i++)
+      if(g_persistentSetups[i].active)
+         UpdateSetupPeakAnalytics(g_persistentSetups[i].id);
+
+   ManageHybridTrailingPositions("PERSISTENT");
+}
+
+void ProcessPersistentSetups()
+{
+   if(!InpPersistentReadyMode)
+      return;
+
+   CheckCampaignDay();
+
+   // Normal setups still observe the day lock in quality/deployment checks.
+   // Touched zero-confluence setups continue forced MARKET retry.
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol,tick))
+      return;
+
+   MqlRates m5[];
+   if(!LoadRatesFlexible(PERIOD_M5,20,6,m5))
+      return;
+
+   double invalidationBuffer=
+      MathMax(g_pipSize*5.0,_Point*2.0);
+
+   for(int i=0;i<ArraySize(g_persistentSetups);i++)
+   {
+      if(!g_persistentSetups[i].active)
+         continue;
+
+      long id=g_persistentSetups[i].id;
+
+      int closedBars=
+         PersistentClosedBars(
+            g_persistentSetups[i].armedBarTime);
+
+      bool expired=
+         (closedBars>=InpReadyExpiryBars);
+
+      // -----------------------------------------------------
+      // FROZEN V1.1.0 READY.
+      // -----------------------------------------------------
+      if(!g_persistentSetups[i].deployed &&
+         !g_persistentSetups[i].triggered)
+      {
+         int direction=
+            g_persistentSetups[i].direction;
+
+         // Signal touch follows the chart's own price mode (Bid or Last).
+         // Actual order execution remains Ask for BUY / Bid for SELL.
+         double cmp=ReadyTouchCMP(tick);
+
+         double normalTouchTol=
+            MathMax(0.0,InpEntryTouchTolerancePips)*
+            g_pipSize;
+
+         double zeroConfTouchTol=
+            MathMax(
+               MathMax(0.0,InpEntryTouchTolerancePips),
+               MathMax(0.0,InpZeroConfTouchTolerancePips))*
+            g_pipSize;
+
+         bool zeroConf=
+            g_persistentSetups[i].zeroConfluenceFallback;
+
+         double observedLo=cmp;
+         double observedHi=cmp;
+
+         if(zeroConf)
+         {
+            BuildZeroConfluenceTouchEnvelope(
+               tick,
+               cmp,
+               g_persistentSetups[i].hasPreviousTouchCMP,
+               g_persistentSetups[i].previousTouchCMP,
+               observedLo,
+               observedHi);
+         }
+
+         // Save this observation only after the previous value has been used
+         // to construct the tick path.
+         g_persistentSetups[i].previousTouchCMP=cmp;
+         g_persistentSetups[i].hasPreviousTouchCMP=true;
+
+         bool entryTouched=
+            zeroConf
+            ? SensitiveEnvelopeTouchesZone(
+                 observedLo,
+                 observedHi,
+                 g_persistentSetups[i].entryLo,
+                 g_persistentSetups[i].entryHi,
+                 zeroConfTouchTol)
+            : (cmp>=g_persistentSetups[i].entryLo-normalTouchTol &&
+               cmp<=g_persistentSetups[i].entryHi+normalTouchTol);
+
+         bool highRiskZoneValid=
+            g_persistentSetups[i].supportLo>0.0 &&
+            g_persistentSetups[i].supportHi>
+            g_persistentSetups[i].supportLo;
+
+         bool highRiskTouched=
+            zeroConf &&
+            V3104_ZERO_CONF_HIGH_RISK_TOUCH_RULE &&
+            highRiskZoneValid &&
+            SensitiveEnvelopeTouchesZone(
+               observedLo,
+               observedHi,
+               g_persistentSetups[i].supportLo,
+               g_persistentSetups[i].supportHi,
+               zeroConfTouchTol);
+
+         double frozenS1R1=
+            g_persistentSetups[i].zeroConfluenceLevelPrice;
+
+         double frozenS2R2=
+            g_persistentSetups[i].zeroConfluenceOuterLevelPrice;
+
+         bool s1r1LevelValid=
+            frozenS1R1>0.0;
+
+         bool s2r2LevelValid=
+            frozenS2R2>0.0;
+
+         bool s1r1Touched=
+            zeroConf &&
+            V3104_ZERO_CONF_S1_R1_TOUCH_RULE &&
+            s1r1LevelValid &&
+            SensitiveEnvelopeTouchesLevel(
+               observedLo,
+               observedHi,
+               frozenS1R1,
+               zeroConfTouchTol);
+
+         bool s2r2Touched=
+            zeroConf &&
+            V3104_ZERO_CONF_S2_R2_TOUCH_RULE &&
+            s2r2LevelValid &&
+            SensitiveEnvelopeTouchesLevel(
+               observedLo,
+               observedHi,
+               frozenS2R2,
+               zeroConfTouchTol);
+
+         // Trigger priority when areas overlap:
+         // READY first, then S1/R1, then S2/R2, then HIGH-RISK.
+         bool s1r1OnlyTouched=
+            s1r1Touched &&
+            !entryTouched;
+
+         bool s2r2OnlyTouched=
+            s2r2Touched &&
+            !entryTouched &&
+            !s1r1Touched;
+
+         bool highRiskOnlyTouched=
+            highRiskTouched &&
+            !entryTouched &&
+            !s1r1Touched &&
+            !s2r2Touched;
+
+         // The arming M5 candle is candle zero.
+         // A completely later M5 candle is normally required for LIVE.
+         bool laterM5=
+            InpAggressiveArmExecution
+            ? true
+            : (closedBars>=1);
+
+         // The new zero-confluence HIGH-RISK trigger is immediate and does
+         // not wait for another completed M5 candle after the setup is stored.
+         bool touchEligible=
+            (laterM5 && entryTouched) ||
+            s1r1Touched ||
+            s2r2Touched ||
+            highRiskTouched;
+
+         // Precise touch latch:
+         // once chart CMP touches READY or the matching zero-confluence
+         // HIGH-RISK zone, remember it so transient movement cannot lose it.
+         if(touchEligible &&
+            !g_persistentSetups[i].touchLatched)
+         {
+            g_persistentSetups[i].touchLatched=true;
+            g_persistentSetups[i].highRiskTouchLatched=
+               highRiskOnlyTouched;
+            g_persistentSetups[i].s1r1TouchLatched=
+               s1r1OnlyTouched;
+            g_persistentSetups[i].s2r2TouchLatched=
+               s2r2OnlyTouched;
+            g_persistentSetups[i].touchClock=TimeCurrent();
+            g_persistentSetups[i].touchPrice=cmp;
+            g_persistentSetups[i].deployAttempts=0;
+
+            double triggerLo=
+               s1r1OnlyTouched
+               ? frozenS1R1
+               : (s2r2OnlyTouched
+                  ? frozenS2R2
+                  : (highRiskOnlyTouched
+                     ? g_persistentSetups[i].supportLo
+                     : g_persistentSetups[i].entryLo));
+
+            double triggerHi=
+               s1r1OnlyTouched
+               ? frozenS1R1
+               : (s2r2OnlyTouched
+                  ? frozenS2R2
+                  : (highRiskOnlyTouched
+                     ? g_persistentSetups[i].supportHi
+                     : g_persistentSetups[i].entryHi));
+
+            string triggerText=
+               s1r1OnlyTouched
+               ? (direction==1
+                  ? "ZERO-CONF S1"
+                  : "ZERO-CONF R1")
+               : (s2r2OnlyTouched
+                  ? (direction==1
+                     ? "ZERO-CONF S2"
+                     : "ZERO-CONF R2")
+                  : (highRiskOnlyTouched
+                     ? "ZERO-CONF HIGH RISK"
+                     : "READY"));
+
+            Log("CMP TOUCH LATCHED | signal="+
+                (string)id+
+                " | trigger="+triggerText+
+                " | direction="+
+                string(direction==1?"BUY":"SELL")+
+                " | chartCMP="+DoubleToString(cmp,_Digits)+
+                " | observed path="+
+                DoubleToString(observedLo,_Digits)+".."+
+                DoubleToString(observedHi,_Digits)+
+                " | tolerance="+
+                DoubleToString(
+                   zeroConf
+                   ? InpZeroConfTouchTolerancePips
+                   : InpEntryTouchTolerancePips,
+                   1)+" pips"+
+                " | bid="+DoubleToString(tick.bid,_Digits)+
+                " | ask="+DoubleToString(tick.ask,_Digits)+
+                " | zone="+
+                DoubleToString(triggerLo,_Digits)+
+                "-"+
+                DoubleToString(triggerHi,_Digits)+
+                " | frozen "+string(direction==1?"S1":"R1")+"="+
+                DoubleToString(frozenS1R1,_Digits)+
+                " | frozen "+string(direction==1?"S2":"R2")+"="+
+                DoubleToString(frozenS2R2,_Digits));
+         }
+
+         int activeRetrySeconds=
+            zeroConf
+            ? MathMax(InpTouchRetrySeconds,
+                      InpZeroConfTouchRetrySeconds)
+            : InpTouchRetrySeconds;
+
+         int activeMaxAttempts=
+            zeroConf
+            ? MathMax(InpMaxTouchDeployAttempts,
+                      InpZeroConfMaxDeployAttempts)
+            : InpMaxTouchDeployAttempts;
+
+         bool forceZeroConfExecution=
+            zeroConf &&
+            V3104_FORCE_ZERO_CONF_MARKET_EXECUTION &&
+            V3104_ZERO_CONF_RETRY_UNTIL_FILLED;
+
+         bool latchFresh=
+            g_persistentSetups[i].touchLatched &&
+            (forceZeroConfExecution ||
+             ((TimeCurrent()-g_persistentSetups[i].touchClock <=
+               MathMax(0,activeRetrySeconds)) &&
+              g_persistentSetups[i].deployAttempts<
+               MathMax(1,activeMaxAttempts)));
+
+         if(latchFresh)
+         {
+            datetime currentM5=
+               CurrentM5OpenTime();
+
+            if(!forceZeroConfExecution &&
+               currentM5>0 &&
+               g_persistentSetups[i].deploymentBlockedM5==currentM5)
+               continue;
+
+            string reason="";
+
+            if(PersistentQualityPass(
+                  g_persistentSetups[i],reason))
+            {
+               if(!DeploymentRetryIntervalElapsed(
+                     g_persistentSetups[i]))
+               {
+                  continue;
+               }
+
+               MarkDeploymentAttempt(
+                  g_persistentSetups[i]);
+
+               g_persistentSetups[i].deployAttempts++;
+
+               ResetDeploymentFailure();
+
+               bool deployed=
+                  DeployPersistentSetup(i);
+
+               if(deployed)
+               {
+                  Log("CMP TOUCH EXECUTED | signal="+
+                      (string)id+
+                      " | trigger="+
+                      PersistentTouchTriggerText(
+                         g_persistentSetups[i])+
+                      " | zero-conf fallback="+
+                      string(g_persistentSetups[i].zeroConfluenceFallback
+                             ?"YES":"NO")+
+                      " | direction="+
+                      string(direction==1?"BUY":"SELL")+
+                      " | attempts="+
+                      IntegerToString(
+                         g_persistentSetups[i].deployAttempts));
+                  continue;
+               }
+
+               if(!g_deployFailureSet)
+               {
+                  SetDeploymentFailure(
+                     "deployment returned false without a detailed broker result",
+                     0,"","",false);
+               }
+
+               string failure=
+                  DeploymentFailureSummary();
+
+               if(forceZeroConfExecution)
+               {
+                  Log("ZERO-CONF FORCED MARKET RETRY | signal="+(string)id+
+                      " | trigger="+PersistentTouchTriggerText(g_persistentSetups[i])+
+                      " | direction="+string(direction==1?"BUY":"SELL")+
+                      " | attempt="+IntegerToString(g_persistentSetups[i].deployAttempts)+
+                      " | broker classification="+
+                      string(g_deployFailureTemporary?"TEMPORARY":"PERMANENT/LOCAL")+
+                      " | "+failure+
+                      " | latch remains active=YES"+
+                      " | retry interval="+
+                      IntegerToString((int)MathMax(0,InpDeploymentRetryIntervalMs))+"ms");
+               }
+               else if(g_deployFailureTemporary)
+               {
+                  Log("CMP TOUCH EXECUTION RETRY | signal="+
+                      (string)id+
+                      " | trigger="+PersistentTouchTriggerText(g_persistentSetups[i])+
+                      " | attempt="+IntegerToString(g_persistentSetups[i].deployAttempts)+
+                      " | temporary=YES | "+failure+
+                      " | minimum retry interval="+
+                      IntegerToString((int)MathMax(0,InpDeploymentRetryIntervalMs))+"ms");
+               }
+               else
+               {
+                  string triggerBeforeBlock=PersistentTouchTriggerText(g_persistentSetups[i]);
+                  g_persistentSetups[i].deploymentBlockedM5=currentM5;
+                  ClearPersistentTouchLatch(g_persistentSetups[i]);
+
+                  Log("CMP TOUCH EXECUTION STOPPED THIS M5 | signal="+(string)id+
+                      " | trigger="+triggerBeforeBlock+
+                      " | attempt="+IntegerToString(g_persistentSetups[i].deployAttempts)+
+                      " | temporary=NO | "+failure+
+                      " | next eligible M5="+
+                      TimeToString(currentM5+PeriodSeconds(PERIOD_M5),
+                                   TIME_DATE|TIME_MINUTES));
+               }
+            }
+            else
+            {
+               Log("CMP TOUCH QUALITY WAIT | signal="+
+                   (string)id+
+                   " | trigger="+
+                   PersistentTouchTriggerText(
+                      g_persistentSetups[i])+
+                   " | "+reason);
+            }
+         }
+
+         if(g_persistentSetups[i].touchLatched &&
+            !latchFresh)
+         {
+            ClearPersistentTouchLatch(
+               g_persistentSetups[i]);
+         }
+
+         bool routeInvalid=
+            !g_persistentSetups[i].counterTrend &&
+            ((direction==1 && !g_trendBuyRoute) ||
+             (direction==-1 && !g_trendSellRoute));
+
+         bool zoneInvalid=
+            (direction==1)
+            ? (tick.bid<
+               g_persistentSetups[i].supportLo-
+               invalidationBuffer)
+            : (tick.ask>
+               g_persistentSetups[i].supportHi+
+               invalidationBuffer);
+
+         bool supportTouched=
+            Overlap(m5[0].low,
+                    m5[0].high,
+                    g_persistentSetups[i].supportLo,
+                    g_persistentSetups[i].supportHi);
+
+         if(!supportTouched)
+            g_persistentSetups[i].zoneExited=true;
+
+         bool retestInvalid=
+            g_persistentSetups[i].zoneExited &&
+            supportTouched &&
+            g_persistentSetups[i].zoneRetests>=MAX_ZONE_RETESTS;
+
+         bool entrySideInvalid=
+            InpAggressiveArmExecution
+            ? false
+            : (!entryTouched &&
+               !s1r1Touched &&
+               !s2r2Touched &&
+               !highRiskTouched &&
+               ((direction==1 &&
+                 g_persistentSetups[i].entryHi>=cmp-_Point) ||
+                (direction==-1 &&
+                 g_persistentSetups[i].entryLo<=cmp+_Point)));
+
+         bool activeTouchRetry=
+            g_persistentSetups[i].touchLatched &&
+            (forceZeroConfExecution ||
+             (TimeCurrent()-g_persistentSetups[i].touchClock <=
+              MathMax(0,activeRetrySeconds)));
+
+         if(!activeTouchRetry &&
+            (expired ||
+             routeInvalid ||
+             zoneInvalid ||
+             retestInvalid ||
+             entrySideInvalid))
+         {
+            DeletePersistentObjects(id);
+            g_persistentSetups[i].expiryHandled=true;
+            g_persistentSetups[i].active=false;
+
+            Log("SOURCE READY INVALIDATED | signal="+
+                (string)id+
+                " | expired="+string(expired?"YES":"NO")+
+                " | route="+string(routeInvalid?"YES":"NO")+
+                " | zone="+string(zoneInvalid?"YES":"NO")+
+                " | retest="+string(retestInvalid?"YES":"NO")+
+                " | side="+string(entrySideInvalid?"YES":"NO"));
+         }
+
+         continue;
+      }
+
+      // -----------------------------------------------------
+      // DEPLOYED / LIVE: signal snapshot is immutable.
+      // Profit Harvest owns exits.
+      // -----------------------------------------------------
+      int positions=CountPersistentPositions(id);
+      int orders=CountPersistentOrders(id);
+
+      if(positions>0 &&
+         !g_persistentSetups[i].triggered)
+      {
+         g_persistentSetups[i].triggered=true;
+         g_persistentTriggeredCount++;
+         g_liveSignalCount++;
+
+         Log("SOURCE LIVE | signal="+
+             (string)id+
+             " | "+
+             string(g_persistentSetups[i].direction==1
+                    ?"BUY":"SELL")+
+             " | risk="+
+             DoubleToString(
+                g_persistentSetups[i].riskPct,2)+"%"+
+             " | runnerRR="+
+             DoubleToString(
+                g_persistentSetups[i].targetRR,2));
+      }
+
+      // 333 bars governs READY/pending validity only.
+      // Existing LIVE positions continue to staged TP / trail / SL.
+      if(expired &&
+         !g_persistentSetups[i].expiryHandled)
+      {
+         if(orders>0)
+            CancelPersistentOrders(id);
+
+         g_persistentSetups[i].expiryHandled=true;
+      }
+
+      positions=CountPersistentPositions(id);
+      orders=CountPersistentOrders(id);
+
+      if(!g_persistentSetups[i].triggered &&
+         g_persistentSetups[i].expiryHandled &&
+         positions==0 &&
+         orders==0)
+      {
+         DeletePersistentObjects(id);
+         g_persistentSetups[i].active=false;
+         continue;
+      }
+
+      if(g_persistentSetups[i].triggered &&
+         positions==0 &&
+         orders==0)
+      {
+         DeletePersistentObjects(id);
+         g_persistentSetups[i].active=false;
+         g_persistentCompletedCount++;
+         g_executedBasketCount++;
+
+         Log("SOURCE SETUP COMPLETED | signal="+
+             (string)id);
+      }
+   }
+
+   RefreshPersistentPositionProtection();
+   CheckCampaignDay();
+}
+
+//--------------------------- Order placement ------------------------
+
+
+
+
+
+//-------------------------- Basket management -----------------------
+
+
+
+
+
+//--------------------------- MT5 EA events ---------------------------
+int OnInit()
+{
+   g_accountUnitDivisor=ResolveAccountUnitDivisor();
+   g_pipSize=StrategyPipSize();
+
+   g_reportFromTime=TimeCurrent();
+   g_reportWritten=false;
+   g_lastAnalyticsDeal=0;
+   ArrayResize(g_setupAnalytics,0);
+   if(!ConfigureRouting())
+   {
+      Alert(PRODUCT_NAME+" "+PRODUCT_VERSION+": routing initialization failed.");
+      return INIT_FAILED;
+   }
+
+   ClearReadySnapshot(g_ready);
+   ClearReadySnapshot(g_buyReady);
+   ClearReadySnapshot(g_sellReady);
+   ZeroMemory(g_active);
+   g_active.direction="NONE";
+
+   g_directZeroConf.active=false;
+   g_directZeroConf.buyTouchConsumed=false;
+   g_directZeroConf.sellTouchConsumed=false;
+   g_directZeroConf.direction=0;
+   g_directZeroConf.triggerText="";
+   g_directZeroConf.triggerLo=0.0;
+   g_directZeroConf.triggerHi=0.0;
+   g_directZeroConf.latchedClock=0;
+   g_directZeroConf.lastAttemptClock=0;
+   g_directZeroConf.lastAttemptTickMs=0;
+   g_directZeroConf.attempts=0;
+   g_directZeroConfHasPreviousCMP=false;
+   g_directZeroConfPreviousCMP=0.0;
+
+   ApplyPremiumChartTheme();
+
+   trade.SetExpertMagicNumber(InpMagicNumber);
+   trade.SetDeviationInPoints(InpDeviationPoints);
+   trade.SetTypeFillingBySymbol(_Symbol);
+   trade.SetMarginMode();
+   trade.SetAsyncMode(InpEnforceDirectionalLayerCap ? false : InpUseAsyncMode);
+
+   EnforceDirectionalLayerCaps();
+
+   if(!(bool)MQLInfoInteger(MQL_TESTER) &&
+      IsLiveCentAccount() &&
+      InpLiveCentParityMode)
+   {
+      Log("LIVE CENT PARITY ATTACH | MARKET and confidence LIMIT routes are enabled; existing valid EA pending routes are preserved");
+   }
+
+   if(!(bool)MQLInfoInteger(MQL_TESTER) &&
+      InpResetExecutionStateOnAttach &&
+      CountOurPositions()==0 &&
+      CountOurPendingOrders()==0)
+   {
+      g_lastEntryClosedTime=0;
+      ResetCampaignDay(true);
+      Log("LIVE ATTACH RESET | stale execution/day state cleared; latest closed M5 is forced through a fresh READY scan");
+   }
+
+
+   g_biasText="NEUTRAL";
+   DrawDashboard();
+   DrawTradeCard();
+   ChartRedraw(0);
+
+   EventSetTimer(1);
+
+   Log("EzyMap Scalp Mastery V3.104 V3.103 BASE + DIRECTIONAL 13-LAYER CAP + NO TP / 30P SL + 10P TRAIL initialized.");
+   Log("Engine is integrated: no bridge, resource or iCustom dependency.");
+   Log("ACCOUNT SCALE="+
+       string(g_accountUnitDivisor>1.0?"CENT":"STANDARD")+
+       " | divisor="+DoubleToString(g_accountUnitDivisor,0)+
+       " | raw equity="+
+       DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2)+
+       " | effective equity="+
+       DoubleToString(EffectiveAccountEquity(),2)+
+       " | minimum effective equity="+DoubleToString(MinimumTradingEquity(),2)+
+       " | tester="+string((bool)MQLInfoInteger(MQL_TESTER)?"YES":"NO")+
+       " | symbol="+_Symbol+".");
+
+   double rawBalance=AccountInfoDouble(ACCOUNT_BALANCE);
+   double effectiveBalance=rawBalance/MathMax(1.0,g_accountUnitDivisor);
+   double sizingCapital=LotSizingCapitalUnits();
+   double standardRawTarget=InpStandardSetupLotPer100*
+                            (sizingCapital/MathMax(1.0,InpBaseEquity));
+   Log("BROKER-NATIVE LOT SIZING | balance="+DoubleToString(rawBalance,2)+" "+
+       AccountInfoString(ACCOUNT_CURRENCY)+
+       " | economic USD-equivalent="+DoubleToString(effectiveBalance,2)+
+       " | lot-sizing capital="+DoubleToString(sizingCapital,2)+
+       " | source="+string(InpUseBalanceForLotSizing?"BALANCE":"EQUITY")+
+       " | mode="+string(InpUseBrokerNativeDepositUnitsForLots?"RAW DEPOSIT UNITS":"EFFECTIVE USD")+
+       " | base rule="+DoubleToString(InpStandardSetupLotPer100,2)+
+       " lot per "+DoubleToString(InpBaseEquity,0)+" sizing units"+
+       " | current STANDARD target="+DoubleToString(standardRawTarget,4)+
+       " | broker minimum="+
+       DoubleToString(SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN),VolumeDigits())+".");
+
+   if(IsLiveCentAccount())
+      Log("CENT CONTRACT NOTE | V3.081 uses broker-native deposit-unit blocks for lot requests and broker-native OrderCalcProfit/OrderCalcMargin for validation. Example: 603.94 USC requests 0.06 STANDARD cent-symbol lots before safety caps.");
+   if(IsLiveCentAccount())
+   {
+      Log("LIVE CENT EXECUTION PROFILE="+
+          string(InpLiveCentBrokerMinimumExecution?"ON":"OFF")+
+          " | minimum-lot fallback="+
+          string(InpAllowCentMinimumLotFallback?"ON":"OFF")+
+          " | raw balance floor="+
+          DoubleToString(InpLiveCentRawBalanceFloor,2)+" "+
+          AccountInfoString(ACCOUNT_CURRENCY)+
+          " | broker candidate lot="+
+          DoubleToString(SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN),VolumeDigits())+
+          ". Candidate execution still requires broker-native risk and margin approval.");
+
+      Log("LIVE CENT PARITY="+
+          string(InpLiveCentParityMode?"ON":"OFF")+
+          " | approval="+
+          string(InpLiveCentMarginOnlyMinimumApproval?"30-PIP RISK+MARGIN":"LEGACY RISK+MARGIN")+
+          " | max margin use="+DoubleToString(InpLiveCentMaximumMarginUsePct,1)+"%"+
+          " | max open positions="+IntegerToString(InpLiveCentMaximumOpenPositions)+
+          " | market-only compatibility input="+string(InpLiveCentMarketOnly?"YES (ignored by V3.024)":"NO")+
+          " | TP=NONE"+
+          " | preset SL="+DoubleToString(InpPresetStopLossPips,0)+" pips"+
+          " | trailing="+string(InpEnableTrailingAfterEntry?"ON":"OFF"));
+
+      string environmentReason="";
+      Log("LIVE TRADE ENVIRONMENT="+
+          string(TradingEnvironmentReady(environmentReason)?"READY":"BLOCKED")+
+          (environmentReason==""?"":" | "+environmentReason));
+   }
+
+   if(g_accountUnitDivisor>1.0)
+      Log("CENT SAFETY: total setup volume is capped by "+
+          DoubleToString(InpCentMaxRiskPerSetupPct,2)+
+          "% risk, "+DoubleToString(InpCentMaxMarginUsePct,1)+
+          "% free-margin use and "+
+          DoubleToString(InpCentAbsoluteMaxLots,VolumeDigits())+
+          " absolute lots.");
+   Log("Host/tester period="+EnumToString((ENUM_TIMEFRAMES)_Period)+
+       "; internal signal period="+EnumToString(g_entryTF)+".");
+   Log("LIVE signal source: V1.1.0 parity = H1 direction -> M15 support -> M5 READY/LIVE.");
+   Log("Confidence setup lots per $100: STANDARD="+
+       DoubleToString(InpStandardSetupLotPer100,2)+
+       " | GOOD="+DoubleToString(InpGoodSetupLotPer100,2)+
+       " | QUALITY="+DoubleToString(InpQualitySetupLotPer100,2)+".");
+   Log("M5 parallel frequency: "+
+       string(InpAllowParallelWaitingReady?"ON":"OFF")+
+       " | waiting/direction="+
+       IntegerToString(InpMaxWaitingReadyPerDirection)+
+       " | total waiting="+
+       IntegerToString(InpMaxTotalWaitingReady)+
+       " | active slots="+
+       IntegerToString(InpMaxPersistentSetups)+".");
+   Log("Execution: MARKET/LIMIT/STOP="+
+       string(InpUseLimitStopLayers?"ON":"OFF")+
+       " | immediate layers="+
+       IntegerToString(InpMaxImmediateLayers)+
+       " | touch tolerance="+
+       DoubleToString(InpEntryTouchTolerancePips,1)+" pips.");
+   Log("Precise CMP: chart-price touch="+
+       string(InpUseChartPriceForReadyTouch?"ON":"OFF")+
+       " | retry="+IntegerToString(InpTouchRetrySeconds)+
+       " sec / "+IntegerToString(InpMaxTouchDeployAttempts)+
+       " attempts | market fallback="+
+       string(InpMarketFallbackOnTouch?"ON":"OFF")+".");
+   Log("Confidence lot at touch="+
+       string(InpHonorConfidenceLotAtTouch?"EXACT":"RISK-CAPPED")+
+       " | $100 base lot continuity enabled down to minimum equity "+
+       DoubleToString(MinimumTradingEquity(),0)+".");
+   Log("Soft daily volume objective="+
+       DoubleToString(InpDailyVolumeTargetMinLots,2)+"-"+
+       DoubleToString(InpDailyVolumeTargetMaxLots,2)+
+       " lots; signals are never fabricated to hit the target.");
+   Log("EXIT PROFILE: TP=NONE | preset SL="+
+       DoubleToString(InpPresetStopLossPips,0)+
+       " pips | trailing distance="+
+       DoubleToString(InpTrailingDistancePips,0)+" pips.");
+   Log("PRESET PROTECTION: every route requests "+
+       DoubleToString(InpPresetStopLossPips,0)+
+       " strategy-pip SL; virtual fallback remains active.");
+   Log("ENTRY LOGIC: original V2.009M H4 SNR > M15 overlap > M3 reversal > M5 READY retained; active fallback="+
+       string(InpActiveSignalMode?"ON":"OFF")+".");
+   Log("Smart execution: MARKET/LIMIT/STOP selection="+
+       string(InpUseLimitStopLayers?"ON":"OFF")+".");
+   Log("Persistent READY="+string(InpPersistentReadyMode?"ON":"OFF")+
+       " | READY lifetime="+IntegerToString(InpReadyExpiryBars)+
+       " closed "+g_tfLabel+" candles.");
+   Log("Source rules: active signal recovery="+string(InpActiveSignalMode?"ON":"OFF")+
+       " | directional M5 fallback="+string(InpAllowDirectionalM5Fallback?"ON":"OFF")+
+       " | zone-side gate="+string(InpRequireZoneCorrectSide?"ON":"OFF")+
+       " | max retests="+IntegerToString(InpActiveMaxZoneRetests)+
+       " | LOCKED confluences: trend="+IntegerToString(TREND_MIN_CONFLUENCES)+
+       ", counter="+IntegerToString(COUNTER_MIN_CONFLUENCES)+".");
+   Log("V3.081 FREQUENCY PROFILE | dual BUY/SELL READY="+
+       string(InpArmBothDirectionsWhenValid?"ON":"OFF")+
+       " | one setup/direction/completed M5="+
+       string(InpOneSetupPerDirectionPerM5?"ON":"OFF")+
+       " | waiting caps BUY/SELL="+
+       IntegerToString(InpMaxWaitingReadyPerDirection)+
+       " | total="+IntegerToString(InpMaxTotalWaitingReady)+
+       " | touch tolerance="+
+       DoubleToString(InpEntryTouchTolerancePips,1)+" pips.");
+   Log("READY lifetime override="+IntegerToString(InpReadyExpiryBars)+
+       " CLOSED M5 candles.");
+   Log("Maximum setup risk ceiling: "+DoubleToString(InpMaxRiskPct,2)+"% of equity.");
+   if(InpAutoScaleLayerLot)
+   {
+      Log("AUTO layer sizing ON: "+
+          DoubleToString(InpBaseLayerLot,2)+" lot per "+
+          DoubleToString(InpBaseEquity,0)+
+          " equity, minimum account "+
+          DoubleToString(MinimumTradingEquity(),0)+".");
+      // AutoBaseLayerLot() itself is confirmed dead code (call-graph
+      // verified: only reached when InpUseConfidenceLotSizing=false, which
+      // is not the default) and was intentionally not ported; this
+      // diagnostic line reproduces its formula inline so the startup log
+      // still reports the equivalent figure without resurrecting the
+      // dead function.
+      double diagBaseLot=NormalizeVolumeDown(InpBaseLayerLot*(LotSizingCapitalUnits()/MathMax(1.0,InpBaseEquity)));
+      Log("Current calculated base layer = "+
+          DoubleToString(diagBaseLot,VolumeDigits())+" lot.");
+   }
+
+   if(InpQualityMode)
+   {
+      Log("Execution quality gate (locked source policy): M5 trend minimum="+
+          IntegerToString(TREND_MIN_CONFLUENCES)+
+          " conf, counter minimum="+
+          IntegerToString(COUNTER_MIN_CONFLUENCES)+
+          " conf, max retests="+
+          IntegerToString(InpMaxExecutionZoneRetests)+
+          ", READY expiry="+IntegerToString(InpReadyExpiryBars)+" M5 bars.");
+      Log("V1.2 signal parity="+
+          string(InpV120SignalParityMode?"ON":"OFF")+
+          ", optional M1 filter="+
+          string(InpUseM1ExecutionConfirmation?"ON":"OFF")+
+          ", layer range="+
+          IntegerToString(InpMinLayers)+"-"+IntegerToString(InpMaxLayers)+".");
+   }
+
+   Log("V3.104 STRUCTURE CHECK"+
+       " | PersistentReadySetup.requiredConfluences=ACTIVE"+
+       " | PersistentReadySetup.zeroConfluenceFallback=ACTIVE"+
+       " | ActiveSnapshot restored to V3.081 layout");
+   Log("V3.104 ZERO-CONF M5 CAP REMOVED"+
+       " | no zero-confluence fill quantity limit per M5"+
+       " | pending orders are not cancelled by an M5 fill counter"+
+       " | directional and broker safeguards remain active");
+   Log("V3.104 EXECUTION RETRY FIX"+
+       " | exact broker reason in Journal"+
+       " | temporary retcodes only are retried"+
+       " | permanent failures stop the affected setup for current M5"+
+       " | same-moment throttle="+
+       IntegerToString(InpDeploymentRetryIntervalMs)+"ms"+
+       " | zero-conf route 1 MARKET required"+
+       " | optional pending has no per-M5 fill cap");
+   Log("V3.104 FORCE ZERO-CONF EXECUTION"+
+       " | stored touch retries until MARKET accepted"+
+       " | quality/position recheck bypassed after valid storage"+
+       " | retry expiry/attempt limit/current-M5 permanent pause bypassed"+
+       " | direct current-map fallback="+
+       string(V3104_ZERO_CONF_DIRECT_MAP_FALLBACK?"ON":"OFF")+
+       " | hard controls=broker permission/valid volume/margin/market"+
+       " + directional 13-layer ceiling");
+   Log("V3.104 SENSITIVE ZERO-CONF TOUCH"+
+       " | tolerance="+
+       DoubleToString(InpZeroConfTouchTolerancePips,1)+" pips"+
+       " | normal tolerance="+
+       DoubleToString(InpEntryTouchTolerancePips,1)+" pips"+
+       " | Bid/Ask/Last envelope="+
+       string(InpZeroConfUseBidAskEnvelope?"ON":"OFF")+
+       " | tick-path crossing="+
+       string(InpZeroConfUseTickPathCrossing?"ON":"OFF")+
+       " | retry="+
+       IntegerToString(InpZeroConfTouchRetrySeconds)+" sec / "+
+       IntegerToString(InpZeroConfMaxDeployAttempts)+" attempts"+
+       " | applies only to zero-confluence READY/HIGH-RISK/S1/S2/R1/R2");
+   Log("V3.104 ZERO-CONF LEVEL TRIGGERS"+
+       " | S1/R1="+
+       string(V3104_ZERO_CONF_S1_R1_TOUCH_RULE?"ON":"OFF")+
+       " | S2/R2="+
+       string(V3104_ZERO_CONF_S2_R2_TOUCH_RULE?"ON":"OFF")+
+       " | BUY stores S1/S2; either touch -> instant BUY routing"+
+       " | SELL stores R1/R2; either touch -> instant SELL routing"+
+       " | levels frozen when READY is stored"+
+       " | zero-conf touch tolerance="+
+       DoubleToString(InpZeroConfTouchTolerancePips,1)+" pips"+
+       " | zero-conf per-M5 fill cap=REMOVED");
+   Log("V3.104 ZERO-CONF HIGH-RISK TRIGGER"+
+       " | enabled="+
+       string(V3104_ZERO_CONF_HIGH_RISK_TOUCH_RULE?"ON":"OFF")+
+       " | BUY high-risk CMP touch -> instant BUY routing"+
+       " | SELL high-risk CMP touch -> instant SELL routing"+
+       " | first route=MARKET"+
+       " | zero-conf per-M5 fill cap=REMOVED");
+   Log("V3.104 ZERO-CONFLUENCE TOUCH RULE"+
+       " | enabled="+
+       string(V3104_ZERO_CONFLUENCE_TOUCH_RULE?"ON":"OFF")+
+       " | zero required confluences only when open EA positions <= "+
+       IntegerToString(V3104_ZERO_CONF_MAX_OPEN_POSITIONS)+
+       " | pending orders excluded from running-entry count"+
+       " | fallback triggers=READY, matching HIGH-RISK, or frozen S1/S2/R1/R2 CMP touch"+
+       " | normal rules remain trend="+
+       IntegerToString(TREND_MIN_CONFLUENCES)+
+       " / counter="+
+       IntegerToString(COUNTER_MIN_CONFLUENCES));
+   Log("AGGRESSIVE ARM="+
+       string(InpAggressiveArmExecution?"ON":"OFF")+
+       " | original confidence totals per $100: STANDARD="+
+       DoubleToString(InpStandardSetupLotPer100,2)+
+       " | GOOD="+DoubleToString(InpGoodSetupLotPer100,2)+
+       " | QUALITY="+DoubleToString(InpQualitySetupLotPer100,2)+".");
+   Log("Entry routes: STANDARD=Market | GOOD=Market+1 LIMIT | QUALITY=Market+up to 2 LIMITs.");
+   Log("LIVE ROUTE PARITY: confidence LIMIT orders are enabled on real cent charts; MARKET failure does not automatically suppress broker-valid LIMIT staging.");
+   Log("V3.081 LIMIT GUARD: maximum one EA LIMIT per direction per READY zone; duplicate staging is skipped at planning and submission.");
+   Log("DIRECTIONAL LAYER GOVERNOR="+
+       string(InpEnforceDirectionalLayerCap?"ON":"OFF")+
+       " | max BUY="+IntegerToString(InpMaxActiveLayersPerDirection)+
+       " | max SELL="+IntegerToString(InpMaxActiveLayersPerDirection)+
+       " | pending reserves slot="+string(InpCountPendingAsReservedLayer?"YES":"NO")+
+       " | current BUY open/pending="+
+       IntegerToString(CountOurPositionsByDirection(1))+"/"+
+       IntegerToString(CountOurPendingOrdersByDirection(1))+
+       " | SELL open/pending="+
+       IntegerToString(CountOurPositionsByDirection(-1))+"/"+
+       IntegerToString(CountOurPendingOrdersByDirection(-1))+".");
+   Log("LIVE LIMIT GEOMETRY: broker stop/freeze distance may extend a pending route up to "+
+       DoubleToString(InpLiveLimitGeometryExtensionPips,1)+
+       " strategy pips beyond the READY edge instead of silently dropping the LIMIT.");
+   Log("All MARKET/LIMIT/STOP routes request no TP and a preset 30-pip SL; exact virtual protection remains active when broker geometry differs.");
+   Log("10-PIP TRAIL: enabled="+string(InpEnableTrailingAfterEntry?"YES":"NO")+" | activation="+
+       "first favourable broker point"+
+       " | trail distance="+
+       DoubleToString(MathMax(0.1,InpTrailingDistancePips),1)+
+       " pips | step="+
+       DoubleToString(MathMax(0.1,InpTrailingStepPips),1)+" pip(s)"+
+       " | XAU pip size="+DoubleToString(StrategyPipSize(),_Digits)+".");
+   Log("FIXED 30-PIP SL: broker SL + virtual exact stop | virtual fallback="+
+       string(InpUseVirtualTrailFallback?"ON":"OFF")+
+       " | reconstruct M1="+
+       string(InpReconstructTrailFromM1?"ON":"OFF")+
+       " | broker stops="+
+       IntegerToString((int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_STOPS_LEVEL))+
+       " points | freeze="+
+       IntegerToString((int)SymbolInfoInteger(_Symbol,SYMBOL_TRADE_FREEZE_LEVEL))+
+       " points.");
+
+   ReportJournalPerformance(true,"INIT");
+   return INIT_SUCCEEDED;
+}
+
+void OnDeinit(const int reason)
+{
+   ReportJournalPerformance(true,"FINAL");
+   WriteEzyMapBacktestReport();
+
+   Log("EZYMAP SCALP MASTERY V3.081 SUMMARY: READY="+IntegerToString(g_readySignalCount)+
+       ", stored="+IntegerToString(g_persistentQueuedCount)+
+       ", deployed="+IntegerToString(g_qualityDeployCount)+
+       ", LIVE="+IntegerToString(g_persistentTriggeredCount)+
+       ", completed="+IntegerToString(g_persistentCompletedCount)+
+       ", campaign setups="+IntegerToString(g_campaignSetups)+
+       ", day lock="+g_dayLockReason+".");
+   EventKillTimer();
+   ClearHistoricalMarkers();
+   ObjectsDeleteAll(0,PREFIX);
+   ChartRedraw(0);
+}
+
+void OnTimer()
+{
+   // Protection must continue even when signal scanning is locked or quiet.
+   ManageHybridTrailingPositions("TIMER");
+   EnforceDirectionalLayerCaps();
+   ReportJournalPerformance(false,"UPDATE");
+
+   // LIVE PARITY HEARTBEAT: do not rely exclusively on the chart's OnTick
+   // event to capture READY and stage confidence LIMIT routes. This is
+   // especially important on suffixed cent symbols and around sparse ticks.
+   if(InpPersistentReadyMode)
+   {
+      CheckCampaignDay();
+      if(!g_dayTradingLocked)
+      {
+         MqlTick liveTick;
+         if(SymbolInfoTick(_Symbol,liveTick))
+         {
+            double heartbeatPrice=(liveTick.bid>0.0)?liveTick.bid:liveTick.last;
+            if(heartbeatPrice>0.0)
+            {
+               g_state=ST_MONITORING;
+               CalculateMapAndMaybeReady(heartbeatPrice);
+               CapturePersistentReadySignals();
+               ProcessDirectZeroConfluenceTriggers();
+               ProcessPersistentSetups();
+            }
+         }
+      }
+      else
+      {
+         ProcessPersistentSetups();
+         ProcessDirectZeroConfluenceTriggers();
+      }
+
+      // Periodic live diagnostics make a missing entry explain itself instead
+      // of failing silently. This does not change tester or signal behavior.
+      static datetime lastParityStatus=0;
+      if(!(bool)MQLInfoInteger(MQL_TESTER) &&
+         (lastParityStatus==0 || TimeCurrent()-lastParityStatus>=30))
+      {
+         lastParityStatus=TimeCurrent();
+         int activeReady=0;
+         int deployedReady=0;
+         for(int i=0;i<ArraySize(g_persistentSetups);i++)
+         {
+            if(!g_persistentSetups[i].active) continue;
+            activeReady++;
+            if(g_persistentSetups[i].deployed) deployedReady++;
+         }
+
+         string envReason="";
+         bool envOK=TradingEnvironmentReady(envReason);
+         double capital=LotSizingCapitalUnits();
+         double blocks=capital/MathMax(1.0,InpBaseEquity);
+         Log("LIVE PARITY STATUS | environment="+string(envOK?"READY":"BLOCKED")+
+             (envReason==""?"":" ("+envReason+")")+
+             " | READY active="+IntegerToString(activeReady)+
+             " deployed="+IntegerToString(deployedReady)+
+             " | positions="+IntegerToString(CountOurPositions())+
+             " pending="+IntegerToString(CountOurPendingOrders())+
+             " | BUY open/pending="+
+             IntegerToString(CountOurPositionsByDirection(1))+"/"+
+             IntegerToString(CountOurPendingOrdersByDirection(1))+
+             " | SELL open/pending="+
+             IntegerToString(CountOurPositionsByDirection(-1))+"/"+
+             IntegerToString(CountOurPendingOrdersByDirection(-1))+
+             " | direction cap="+IntegerToString(InpMaxActiveLayersPerDirection)+
+             " | day lock="+string(g_dayTradingLocked?"YES":"NO")+
+             (g_dayLockReason==""?"":" ("+g_dayLockReason+")")+
+             " | lot targets S/G/Q="+
+             DoubleToString(InpStandardSetupLotPer100*blocks,4)+"/"+
+             DoubleToString(InpGoodSetupLotPer100*blocks,4)+"/"+
+             DoubleToString(InpQualitySetupLotPer100*blocks,4)+
+             " | min/step="+
+             DoubleToString(SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN),VolumeDigits())+"/"+
+             DoubleToString(SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP),VolumeDigits()));
+      }
+   }
+
+   // Keep visual layer alive while markets are quiet or history is synchronizing.
+   DrawMap(TimeCurrent());
+   DrawPersistentReadyZones();
+   DrawDashboard();
+   DrawTradeCard();
+   DrawActualTradeLevelsGold();
+   ChartRedraw(0);
+}
+
+void OnTick()
+{
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol,tick))
+      return;
+
+   double livePrice=tick.bid;
+   if(livePrice<=0)
+      return;
+
+   // Never let a signal/day lock suspend protection of an existing position.
+   ManageHybridTrailingPositions("TICK");
+
+   if(InpPersistentReadyMode)
+   {
+      CheckCampaignDay();
+
+      if(g_dayTradingLocked)
+      {
+         ProcessPersistentSetups();
+         ProcessDirectZeroConfluenceTriggers();
+
+         DrawMap(TimeCurrent());
+         DrawPersistentReadyZones();
+         DrawDashboard();
+         DrawTradeCard();
+         DrawActualTradeLevelsGold();
+         ChartRedraw(0);
+         return;
+      }
+
+      // Keep H1/M15/M5 map current; a new READY may form after the prior READY has deployed.
+      g_state=ST_MONITORING;
+      CalculateMapAndMaybeReady(livePrice);
+
+      // 2) Transfer each newly frozen source READY into execution storage.
+      // execution slot. Clearing the engine slot does NOT delete the zone;
+      // the persistent queue now owns it.
+      CapturePersistentReadySignals();
+
+      // Direct fallback runs after READY capture so it yields to a stored
+      // zero-confluence setup and cannot create a duplicate entry.
+      ProcessDirectZeroConfluenceTriggers();
+
+      // 3) V2.009A deploys MARKET immediately at arm and stages STOP/LIMIT routes.
+      // remains alive for 333 CLOSED M5 candles.
+      ProcessPersistentSetups();
+
+      DrawMap(TimeCurrent());
+      DrawPersistentReadyZones();
+      DrawDashboard();
+      DrawTradeCard();
+      DrawActualTradeLevelsGold();
+      ChartRedraw(0);
+      return;
+   }
+}
+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   string performanceReason="";
+   if(trans.type==TRADE_TRANSACTION_DEAL_ADD && trans.deal>0 &&
+      HistoryDealSelect(trans.deal) &&
+      HistoryDealGetString(trans.deal,DEAL_SYMBOL)==_Symbol &&
+      (ulong)HistoryDealGetInteger(trans.deal,DEAL_MAGIC)==InpMagicNumber)
+   {
+      ENUM_DEAL_ENTRY entry=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(trans.deal,DEAL_ENTRY);
+
+      if(entry==DEAL_ENTRY_OUT || entry==DEAL_ENTRY_OUT_BY)
+      {
+         performanceReason="CLOSE";
+      }
+      else if(entry==DEAL_ENTRY_IN || entry==DEAL_ENTRY_INOUT)
+      {
+         performanceReason="ENTRY";
+      }
+   }
+
+   if(InpPersistentReadyMode)
+   {
+      if(trans.deal>0)
+         RegisterDealAnalytics(trans.deal);
+
+      ManageHybridTrailingPositions("TRADE");
+      EnforceDirectionalLayerCaps();
+      ProcessPersistentSetups();
+      DrawActualTradeLevelsGold();
+      ChartRedraw(0);
+
+      if(performanceReason!="")
+         ReportJournalPerformance(true,performanceReason);
+      return;
+   }
+}
+
 //+------------------------------------------------------------------+
