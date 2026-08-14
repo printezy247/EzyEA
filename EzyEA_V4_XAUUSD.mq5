@@ -117,9 +117,22 @@
 //|         visit - it retries every InpEntryRetryThrottleSeconds (1) while           |
 //|         still touching and unconsumed, echoing the reference's own ~100ms          |
 //|         retry cadence at this codebase's TimeCurrent()-second granularity.          |
+//| 4.002 - Explicit follow-up: entries still ~10x fewer than the reference             |
+//|         after 4.001. Root cause found via direct code reading of                    |
+//|         CollectEveryZeroConfCandidates: the reference's High-Risk/Low-                |
+//|         Risk candidates (priorities 5-6) widen the H1 current-map S1/S2                |
+//|         touch surface using an M15-average-range/ATR-derived width (up                 |
+//|         to InpMaximumZoneRangeATR=1.80x), not a flat pip tolerance - price               |
+//|         sitting anywhere inside a wide zone counts as touching, not only                 |
+//|         a brief pass through a narrow band. Approximated (not the                         |
+//|         reference's full asymmetric-skew/neighbour-capping/candle-snapping                 |
+//|         formula) by blending an M15 ATR(14)-based width (InpZoneAtrMultiplier,               |
+//|         1.8) into EVERY level's tolerance uniformly via ZoneAtrWidth() -                      |
+//|         still zero-confluence, no new gating condition, just a wider touch                     |
+//|         surface on the same marked levels, per explicit instruction.                            |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "4.001"
+#property version   "4.002"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -165,6 +178,21 @@ input double InpW1MinSeparationPips         = 200.0;
 // relevant side, so without this floor the derived tolerance was
 // usually much smaller than the reference's flat envelope.
 input double InpLevelTouchToleranceMinPips  = 9.0;
+// Explicit follow-up: still 10x fewer entries than the reference after
+// the fixes above. Traced to the reference's High-Risk/Low-Risk zones
+// (EZY_ZC_TRIGGER_HIGH_RISK/LOW_RISK, priorities 5-6 in
+// CollectEveryZeroConfCandidates) - these widen the H1 current-map
+// S1/S2 touch surface using an M15-average-range/ATR-derived width
+// (up to InpMaximumZoneRangeATR=1.80x), not just a flat pip tolerance,
+// so price sitting anywhere inside a wide zone counts as touching, not
+// only a brief pass through a narrow band. Approximated here (not the
+// reference's full asymmetric-skew/neighbor-capping/candle-snapping
+// formula, which is real complexity for a proportionally small extra
+// gain) by blending an M15-ATR-based width into EVERY level's
+// tolerance uniformly (not just H1's), applied symmetrically - still
+// zero-confluence, no new gating condition, just a wider touch surface
+// on the exact same marked levels.
+input double InpZoneAtrMultiplier           = 1.8;
 // A level only ever "consumed" (state-based re-entry, matching the
 // reference) after an ACTUAL successful fill - a rejected attempt
 // (spread guard, temporary broker rejection, etc.) leaves it
@@ -298,6 +326,8 @@ struct LevelTouchState
 //======================================================================
 CTrade trade;
 
+int g_handleAtrM15 = INVALID_HANDLE;
+
 double g_peakEquity    = 0.0;
 bool   g_tradingHalted = false;
 
@@ -402,6 +432,7 @@ bool   FindNearestCloses(ENUM_TIMEFRAMES tf,int lookback,double reference,double
                          bool wantSecondTier,
                          double &s1,datetime &s1Time,double &s2,datetime &s2Time,
                          double &r1,datetime &r1Time,double &r2,datetime &r2Time);
+double ZoneAtrWidth();
 double LevelToleranceFromAnchor(ENUM_TIMEFRAMES tf,datetime anchorTime,int fadeDirection);
 void   SetLevelSlot(int idx,double price,int fadeDirection,double tolerance,string tfLabel);
 void   RebuildLevelGroup(int slotBase,ENUM_TIMEFRAMES tf,int lookback,double minSeparationPips,string tfLabel);
@@ -438,6 +469,13 @@ int OnInit()
 
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpDeviationPoints);
+
+   g_handleAtrM15 = iATR(_Symbol,PERIOD_M15,14);
+   if(g_handleAtrM15==INVALID_HANDLE)
+   {
+      Log("Indicator handle creation failed.");
+      return INIT_FAILED;
+   }
 
    g_accountUnitDivisor = ResolveAccountUnitDivisor();
 
@@ -492,6 +530,7 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    WriteFinalReport();
+   if(g_handleAtrM15!=INVALID_HANDLE) IndicatorRelease(g_handleAtrM15);
    RemoveAllDrawings();
 }
 
@@ -1110,21 +1149,39 @@ bool FindNearestCloses(ENUM_TIMEFRAMES tf,int lookback,double reference,double m
 // actual ~9-pip touch tolerance) so a near-zero-wick bar still gets a
 // usable zone, and so a genuinely small-wicked anchor doesn't produce
 // a far tighter zone than the reference ever used.
+// Approximates the reference's M15-average-range/ATR-derived High-Risk/
+// Low-Risk zone widening (up to InpMaximumZoneRangeATR) using a plain
+// M15 ATR(14) read - the actual reference formula also blends in a
+// 40-bar M15 average range, caps against the distance to the nearest
+// neighbouring level, and skews asymmetrically toward the fade side;
+// this is a deliberately simpler symmetric approximation of the same
+// underlying idea (wider zones on real recent volatility, not a flat
+// number) rather than that full formula.
+double ZoneAtrWidth()
+{
+   double atrBuf[];
+   if(CopyBufferSeries(g_handleAtrM15,0,2,atrBuf)<2) return 0.0;
+   return MathMax(0.0,atrBuf[1])*MathMax(0.0,InpZoneAtrMultiplier);
+}
+
 double LevelToleranceFromAnchor(ENUM_TIMEFRAMES tf,datetime anchorTime,int fadeDirection)
 {
    double floorTol=MathMax(0.0,InpLevelTouchToleranceMinPips)*StrategyPipSize();
-   if(anchorTime<=0) return floorTol;
+   double zoneWidth=ZoneAtrWidth();
+   double tol=MathMax(floorTol,zoneWidth);
+
+   if(anchorTime<=0) return tol;
 
    int shift=iBarShift(_Symbol,tf,anchorTime,true);
-   if(shift<0) return floorTol;
+   if(shift<0) return tol;
 
    double h=iHigh(_Symbol,tf,shift);
    double l=iLow(_Symbol,tf,shift);
    double c=iClose(_Symbol,tf,shift);
-   if(h<=0.0 || l<=0.0 || c<=0.0) return floorTol;
+   if(h<=0.0 || l<=0.0 || c<=0.0) return tol;
 
    double dist=(fadeDirection==-1)?(h-c):(c-l);
-   return MathMax(floorTol,dist);
+   return MathMax(tol,dist);
 }
 
 void SetLevelSlot(int idx,double price,int fadeDirection,double tolerance,string tfLabel)
