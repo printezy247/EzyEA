@@ -155,6 +155,16 @@ input group "=== Risk / Sizing (first layer; later layers decay by InpPyramidSiz
 input double InpRiskPercentPerTrade         = 0.25;
 input double InpMaxLotsAbsolute             = 5.0;
 input double InpMaxMarginUsePct             = 40.0;
+// On a small account, InpRiskPercentPerTrade's risk budget can round
+// down below the broker's minimum lot (0.01) once XAUUSD's per-lot
+// dollar sensitivity and an ATR-wide structural SL are applied - the
+// signal never gets a chance to trade at all, not because it was a bad
+// signal but purely because the arithmetic underflowed. If that
+// happens, place the broker's minimum lot instead, but only if doing
+// so wouldn't risk more than InpMinimumLotFallbackMaxRiskPct of equity
+// (a real, if larger-than-requested, risk cap - not a blank check).
+input bool   InpAllowMinimumLotFallback     = true;
+input double InpMinimumLotFallbackMaxRiskPct = 1.0;
 
 input group "=== Spread Guard (auto-calibrating) ==="
 input bool   InpAutoCalibrateSpreadCap      = true;
@@ -531,7 +541,29 @@ double ComputeFirstLayerLots(int direction,double entry,double sl)
    if(perLotLoss<=0.0) return 0.0;
 
    double lots=NormalizeVolumeDown(riskBudget/perLotLoss);
-   if(lots<=0.0) return 0.0;
+
+   if(lots<=0.0)
+   {
+      if(!InpAllowMinimumLotFallback) return 0.0;
+
+      double minVol=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+      if(minVol<=0.0) return 0.0;
+
+      double minVolRiskPct=(equity>0.0)?(minVol*perLotLoss/equity)*100.0:1.0e9;
+      if(minVolRiskPct>InpMinimumLotFallbackMaxRiskPct)
+      {
+         Log("SIZING: minimum-lot fallback blocked - would risk "+
+             DoubleToString(minVolRiskPct,2)+"% of equity, over the "+
+             DoubleToString(InpMinimumLotFallbackMaxRiskPct,2)+"% cap");
+         return 0.0;
+      }
+
+      Log("SIZING: risk budget rounded below broker minimum lot - "+
+          "using minimum lot "+DoubleToString(minVol,2)+
+          " (risking "+DoubleToString(minVolRiskPct,2)+"% of equity instead of "+
+          DoubleToString(InpRiskPercentPerTrade,2)+"%)");
+      lots=minVol;
+   }
 
    lots=MathMin(lots,InpMaxLotsAbsolute);
 
