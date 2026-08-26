@@ -268,7 +268,7 @@ input int    InpExecutionStopCushionPoints  = 2;
 // above the cap. BUY and SELL capacity are independent. A slot is released
 // automatically when its position closes or its pending order is cancelled.
 input group "=== Directional Layer Cap (disabled by default - unrestricted test) ==="
-input bool   InpEnforceDirectionalLayerCap       = false; // V3.184 unrestricted test
+input bool   InpEnforceDirectionalLayerCap       = true; // was false (V3.184 unrestricted test) - enabled per explicit request to reduce daily trade count
 input int    InpMaxActiveLayersPerDirection      = 13;
 input bool   InpCountPendingAsReservedLayer      = true;
 input bool   InpTrimExcessPendingToLayerCap      = true;
@@ -278,7 +278,7 @@ input bool   InpTrimExcessPendingToLayerCap      = true;
 // have floating net P/L below zero, no new MARKET/LIMIT/STOP exposure is
 // allowed in that direction. Existing positions remain managed normally.
 input group "=== Directional Losing-Position Cap (disabled by default) ==="
-input bool   InpEnforceDirectionalLosingCap      = false; // V3.184 unrestricted test
+input bool   InpEnforceDirectionalLosingCap      = true; // was false (V3.184 unrestricted test) - enabled per explicit request to reduce daily trade count
 input int    InpMaxLosingPositionsPerDirection   = 3;
 input bool   InpCancelPendingAtLosingCap         = true;
 
@@ -287,7 +287,7 @@ input bool   InpCancelPendingAtLosingCap         = true;
 // net P/L (profit + commission + swap + fee) is negative. BUY and SELL are
 // combined. At two losing closes, all new entries are blocked until next M5.
 input group "=== M5 Closed-Loss Cap (disabled by default) ==="
-input bool   InpEnforceM5ClosedLossCap             = false; // V3.184 unrestricted test
+input bool   InpEnforceM5ClosedLossCap             = true; // was false (V3.184 unrestricted test) - enabled per explicit request to reduce daily trade count
 input int    InpMaxClosedNegativeEntriesPerM5      = 2;
 input bool   InpCancelPendingAtM5ClosedLossCap      = true;
 
@@ -345,7 +345,7 @@ input group "=== Reduce Frequency: Confluence & Direct-Touch Governors ==="
 // Lower to 0 (or negative) to make the NORMAL path require real confluence
 // (2 trend-following / 3 counter-trend) far more often instead of dropping
 // to zero-confluence whenever position count is this low.
-input int    InpZeroConfMaxOpenPositionsForBypass = 1;
+input int    InpZeroConfMaxOpenPositionsForBypass = 0; // was 1 - lowered per explicit request so the normal path requires real confluence except when completely flat
 
 // V3.170 zero-confluence zone trigger.
 // HIGH-RISK is enabled as a direct zero-confluence execution zone.
@@ -375,7 +375,7 @@ input bool   InpEnableLowRiskZeroConfTouch = true;
 // almost certainly the dominant source of very high daily trade counts.
 // Set false to disable it entirely and rely only on the normal path
 // (which still has its own zero-confluence bypass, governed above).
-input bool   InpEnableDirectZeroConfScanner = true;
+input bool   InpEnableDirectZeroConfScanner = false; // was true - disabled per explicit request; this was the single biggest driver of the 3,460 trades/day seen in testing
 
 
 // Daily cap on successfully deployed layer orders.
