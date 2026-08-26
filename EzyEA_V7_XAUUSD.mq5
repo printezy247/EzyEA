@@ -104,9 +104,22 @@
 //|         (HistoryDeals-based entry lots, fills, closed trades, win rate,                                                                                                                                                                                                |
 //|         closed net P/L) with optional CSV export - the same reporting                                                                                                                                                                                                  |
 //|         already added to EzyEA_V7.1_XAUUSD.mq5.                                                                                                                                                                                                                        |
+//| 1.300 - Further "refine v7 to be more aggressive" pass: (a) added an     |
+//|         optional HIGH-RISK zone (nearer S1/R1 level, same rejection-     |
+//|         wick construction as LOW-RISK) as a fallback candidate zone -    |
+//|         QualifyZone now tries LOW-RISK first, then HIGH-RISK if enabled  |
+//|         (InpEnableHighRiskZone, default true), roughly doubling the      |
+//|         number of candidate touch zones per tier/direction; (b) widened  |
+//|         the entry-timeframe bias tolerance (InpEntryBiasToleranceMinPips |
+//|         15->30, InpEntryBiasToleranceAtrMult 0.60->1.20) so more touches |
+//|         pass the momentum-agreement gate; (c) raised InpMaxZoneRetests   |
+//|         4->8 so zones survive more retests before invalidating; (d)      |
+//|         raised InpMaxConcurrentPerTierDirection 5->8 for more layering   |
+//|         headroom. Set InpEnableHighRiskZone=false and the four inputs    |
+//|         above back to their prior values to restore 1.200's behavior.   |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.200"
+#property version   "1.300"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -133,8 +146,8 @@ input int    InpSupportHistoryBars          = 40;
 
 input group "=== Direction / Entry Bias (EMA13) ==="
 input int    InpDirectionEmaPeriod          = 13;
-input double InpEntryBiasToleranceMinPips   = 15.0;
-input double InpEntryBiasToleranceAtrMult   = 0.60;
+input double InpEntryBiasToleranceMinPips   = 30.0; // was 15.0 - widened per explicit "more aggressive" request
+input double InpEntryBiasToleranceAtrMult   = 1.20; // was 0.60 - widened per explicit "more aggressive" request
 
 input group "=== Entry-Timeframe Confirmation ==="
 input int    InpEntryPivotBars              = 1;
@@ -157,7 +170,7 @@ input int    InpLondonSessionEndHour        = 16;
 input int    InpSessionLevelMaxAgeHours     = 36;
 
 input group "=== READY State Machine ==="
-input int    InpMaxZoneRetests              = 4;
+input int    InpMaxZoneRetests              = 8; // was 4 - raised per explicit "more aggressive" request
 input int    InpArmedExpiryEntryBars        = 60;
 
 input group "=== Zero-Confluence Touch (V3.184-style aggressive trigger) ==="
@@ -167,6 +180,12 @@ input group "=== Zero-Confluence Touch (V3.184-style aggressive trigger) ==="
 // original Pine behaviour (a recent confirmation is mandatory).
 input bool   InpEnableZeroConfluenceTouch   = true;
 
+// The Pine source always arms on the LOW-RISK (S2/R2) zone only. Enabling
+// this lets a tier/direction also arm on the nearer HIGH-RISK (S1/R1)
+// zone whenever LOW-RISK doesn't currently qualify, roughly doubling the
+// number of candidate touch zones per tier/direction.
+input bool   InpEnableHighRiskZone          = true;
+
 input group "=== Concurrency: Multiple Trades Per Tier/Direction (V3.184-style layering) ==="
 // The original Pine strategy is single-instance (one trade total). This
 // EA already runs 5 independent tiers; V3.184's own frequency comes from
@@ -174,7 +193,7 @@ input group "=== Concurrency: Multiple Trades Per Tier/Direction (V3.184-style l
 // than locking to one trade at a time. Raise/lower to trade off frequency
 // against exposure. Set to 1 to restore the original one-trade-per-tier
 // lock (both directions combined).
-input int    InpMaxConcurrentPerTierDirection = 5;
+input int    InpMaxConcurrentPerTierDirection = 8; // was 5 - raised per explicit "more aggressive" request
 
 input group "=== Exit: Hybrid Virtual Trail (shared by every tier) ==="
 input double InpPresetStopLossPips          = 29.0;
@@ -400,7 +419,8 @@ bool   RangesOverlap(double lo1,double hi1,double lo2,double hi2);
 void   UpdateConfirmations(int t);
 void   ProcessArmAndResync(int t,int direction);
 void   ProcessTouch(int t,int direction);
-bool   QualifyZone(int t,int direction,double &outLo,double &outHi,datetime &outTime,int &outRetests,string &outConfirmation,bool &outCounterTrend);
+bool   TryQualifyZoneCandidate(int t,int direction,double zoneLo,double zoneHi,datetime zoneTime,TierConfirmState &side,double cmp,int &outRetests,string &outConfirmation);
+bool   QualifyZone(int t,int direction,double &outLo,double &outHi,datetime &outTime,int &outRetests,string &outConfirmation,bool &outCounterTrend,string &outRisk);
 int    ZoneRetestCount(int t,double zoneLo,double zoneHi,datetime zoneTime,datetime currentEntryTime);
 int    CountOpenPositionsForTierDirection(int t,int direction);
 bool   SubmitEntryOrder(int t,int direction);
@@ -495,6 +515,7 @@ int OnInit()
        " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
        " | tiers=M5/M15/M30/H1/H4, max "+IntegerToString(InpMaxConcurrentPerTierDirection)+" concurrent per tier/direction"+
        " | zero-confluence touch="+(InpEnableZeroConfluenceTouch?"ON":"OFF")+
+       " | high-risk zone="+(InpEnableHighRiskZone?"ON":"OFF")+
        " | exit: preset="+DoubleToString(InpPresetStopLossPips,1)+"p trail="+DoubleToString(InpTrailingDistancePips,1)+
        "p @+"+DoubleToString(InpTrailingActivationPips,1)+"p"+
        " | drawdown breaker="+(InpEnableDrawdownBreaker?DoubleToString(InpMaxEquityDrawdownPct,1)+"%":"OFF"));
@@ -1278,7 +1299,36 @@ void UpdateConfirmations(int t)
 //======================================================================
 // READY arm / resync / invalidate / touch / commit - one lock per tier
 //======================================================================
-bool QualifyZone(int t,int direction,double &outLo,double &outHi,datetime &outTime,int &outRetests,string &outConfirmation,bool &outCounterTrend)
+bool TryQualifyZoneCandidate(int t,int direction,double zoneLo,double zoneHi,datetime zoneTime,
+                              TierConfirmState &side,double cmp,int &outRetests,string &outConfirmation)
+{
+   bool recentReject   =side.rejectAge<=InpArmedConfirmationWindowBars;
+   bool recentChoch    =side.chochAge<=InpArmedConfirmationWindowBars;
+   bool recentSweep    =side.sweepAge<=InpArmedConfirmationWindowBars    && RangesOverlap(side.lastSweepLo,side.lastSweepHi,zoneLo,zoneHi);
+   bool recentPremium  =side.premiumAge<=InpArmedConfirmationWindowBars  && RangesOverlap(side.lastPremiumLo,side.lastPremiumHi,zoneLo,zoneHi);
+   bool recentDisplace =side.displaceAge<=InpArmedConfirmationWindowBars && RangesOverlap(side.lastDisplaceLo,side.lastDisplaceHi,zoneLo,zoneHi);
+
+   bool confirmed=recentReject || recentSweep || recentPremium || recentDisplace || recentChoch;
+   if(!confirmed && !InpEnableZeroConfluenceTouch) return false;
+
+   bool correctSide=(direction==1)?(zoneHi>0.0 && zoneHi<cmp-_Point):(zoneLo>0.0 && zoneLo>cmp+_Point);
+   if(!correctSide) return false;
+   if(zoneHi<=zoneLo) return false;
+
+   int retests=ZoneRetestCount(t,zoneLo,zoneHi,zoneTime,iTime(_Symbol,g_cfg[t].entryTF,1));
+   if(retests>InpMaxZoneRetests) return false;
+
+   outRetests=retests;
+   outConfirmation=recentPremium?((direction==1)?g_tier[t].bull.lastPremiumType:g_tier[t].bear.lastPremiumType)+" SWEEP + RECLAIM":
+                    recentSweep?"LIQUIDITY SWEEP + RECLAIM":
+                    recentDisplace?"DISPLACEMENT CHOCH":
+                    recentReject?"ENTRY ZONE REJECTION":
+                    recentChoch?"STRUCTURE BREAK (CHOCH)":
+                    "ZERO-CONFLUENCE TOUCH";
+   return true;
+}
+
+bool QualifyZone(int t,int direction,double &outLo,double &outHi,datetime &outTime,int &outRetests,string &outConfirmation,bool &outCounterTrend,string &outRisk)
 {
    bool bullishBias=g_tier[t].bullishBias;
    bool bearishBias=g_tier[t].bearishBias;
@@ -1305,39 +1355,40 @@ bool QualifyZone(int t,int direction,double &outLo,double &outHi,datetime &outTi
 
    TierConfirmState side;
    if(direction==1) side=g_tier[t].bull; else side=g_tier[t].bear;
-   double zoneLo=(direction==1)?g_tier[t].buyZoneLo:g_tier[t].sellZoneLo;
-   double zoneHi=(direction==1)?g_tier[t].buyZoneHi:g_tier[t].sellZoneHi;
-   datetime zoneTime=(direction==1)?g_tier[t].buyZoneTime:g_tier[t].sellZoneTime;
-
-   bool recentReject   =side.rejectAge<=InpArmedConfirmationWindowBars;
-   bool recentChoch    =side.chochAge<=InpArmedConfirmationWindowBars;
-   bool recentSweep    =side.sweepAge<=InpArmedConfirmationWindowBars    && RangesOverlap(side.lastSweepLo,side.lastSweepHi,zoneLo,zoneHi);
-   bool recentPremium  =side.premiumAge<=InpArmedConfirmationWindowBars  && RangesOverlap(side.lastPremiumLo,side.lastPremiumHi,zoneLo,zoneHi);
-   bool recentDisplace =side.displaceAge<=InpArmedConfirmationWindowBars && RangesOverlap(side.lastDisplaceLo,side.lastDisplaceHi,zoneLo,zoneHi);
-
-   bool confirmed=recentReject || recentSweep || recentPremium || recentDisplace || recentChoch;
-   if(!confirmed && !InpEnableZeroConfluenceTouch) return false;
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol,tick)) return false;
    double cmp=tick.bid;
 
-   bool correctSide=(direction==1)?(zoneHi>0.0 && zoneHi<cmp-_Point):(zoneLo>0.0 && zoneLo>cmp+_Point);
-   if(!correctSide) return false;
-   if(zoneHi<=zoneLo) return false;
+   double zoneLo=(direction==1)?g_tier[t].buyZoneLo:g_tier[t].sellZoneLo;
+   double zoneHi=(direction==1)?g_tier[t].buyZoneHi:g_tier[t].sellZoneHi;
+   datetime zoneTime=(direction==1)?g_tier[t].buyZoneTime:g_tier[t].sellZoneTime;
 
-   int retests=ZoneRetestCount(t,zoneLo,zoneHi,zoneTime,iTime(_Symbol,g_cfg[t].entryTF,1));
-   if(retests>InpMaxZoneRetests) return false;
+   if(TryQualifyZoneCandidate(t,direction,zoneLo,zoneHi,zoneTime,side,cmp,outRetests,outConfirmation))
+   {
+      outLo=zoneLo; outHi=zoneHi; outTime=zoneTime; outCounterTrend=isCounterTrend; outRisk="LOW RISK";
+      return true;
+   }
 
-   outLo=zoneLo; outHi=zoneHi; outTime=zoneTime; outRetests=retests;
-   outCounterTrend=isCounterTrend;
-   outConfirmation=recentPremium?((direction==1)?g_tier[t].bull.lastPremiumType:g_tier[t].bear.lastPremiumType)+" SWEEP + RECLAIM":
-                    recentSweep?"LIQUIDITY SWEEP + RECLAIM":
-                    recentDisplace?"DISPLACEMENT CHOCH":
-                    recentReject?"ENTRY ZONE REJECTION":
-                    recentChoch?"STRUCTURE BREAK (CHOCH)":
-                    "ZERO-CONFLUENCE TOUCH";
-   return true;
+   // HIGH-RISK zone: the nearer S1/R1 level, same rejection-wick zone
+   // construction as LOW-RISK. Off by default in the Pine source (which
+   // always arms on LOW-RISK only) - enabling it roughly doubles the
+   // number of candidate touch zones per tier/direction, per explicit
+   // request to make the EA more aggressive.
+   if(InpEnableHighRiskZone)
+   {
+      double hrLo=0,hrHi=0; datetime hrTime=0;
+      double hrLevel=(direction==1)?g_tier[t].S1:g_tier[t].R1;
+      SupportZone(t,hrLevel,direction==1,hrLo,hrHi,hrTime);
+
+      if(TryQualifyZoneCandidate(t,direction,hrLo,hrHi,hrTime,side,cmp,outRetests,outConfirmation))
+      {
+         outLo=hrLo; outHi=hrHi; outTime=hrTime; outCounterTrend=isCounterTrend; outRisk="HIGH RISK";
+         return true;
+      }
+   }
+
+   return false;
 }
 
 int ZoneRetestCount(int t,double zoneLo,double zoneHi,datetime zoneTime,datetime currentEntryTime)
@@ -1393,15 +1444,15 @@ void ProcessArmAndResync(int t,int direction)
    if(direction==1) side=g_tier[t].buySide; else side=g_tier[t].sellSide;
    bool tradeLockedThisDirection=CountOpenPositionsForTierDirection(t,direction)>=InpMaxConcurrentPerTierDirection;
 
-   double lo=0,hi=0; datetime tm=0; int retests=0; string confirmation=""; bool counterTrend=false;
-   bool qualifies=QualifyZone(t,direction,lo,hi,tm,retests,confirmation,counterTrend);
+   double lo=0,hi=0; datetime tm=0; int retests=0; string confirmation=""; bool counterTrend=false; string risk="";
+   bool qualifies=QualifyZone(t,direction,lo,hi,tm,retests,confirmation,counterTrend,risk);
 
    if(!side.armed)
    {
       if(!tradeLockedThisDirection && qualifies)
       {
          side.armed=true;
-         side.risk="LOW RISK";
+         side.risk=risk;
          side.confirmation=confirmation;
          side.counterTrend=counterTrend;
          side.supportLo=lo; side.supportHi=hi;
@@ -1425,7 +1476,7 @@ void ProcessArmAndResync(int t,int direction)
             side.entryLo=lo; side.entryHi=hi; side.entryTime=tm;
             side.retests=retests;
             side.zoneExited=false;
-            side.risk="LOW RISK";
+            side.risk=risk;
             side.confirmation=confirmation;
             side.counterTrend=counterTrend;
             side.armedAtClock=TimeCurrent();
