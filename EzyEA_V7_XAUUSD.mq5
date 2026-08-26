@@ -87,9 +87,20 @@
 //|                                                                                                                                                                                                                                                                 |
 //| CHANGELOG                                                                                                                                                                                                                                                        |
 //| 1.000 - Initial build.                                                                                                                                                                                                                                              |
+//| 1.100 - Per explicit request ("more aggressive" + "use v3.184 as                                                                                                                                                                                                      |
+//|         reference trigger"): (a) InpEnableZeroConfluenceTouch (default                                                                                                                                                                                                |
+//|         true) lets QualifyZone fire on a correctly-sided zone touch                                                                                                                                                                                                   |
+//|         even with no recent reject/sweep/displacement/CHOCH confirmation,                                                                                                                                                                                             |
+//|         matching V3.184's zero-confluence philosophy; (b) replaced the                                                                                                                                                                                                |
+//|         one-trade-per-tier lock with InpMaxConcurrentPerTierDirection                                                                                                                                                                                                 |
+//|         (default 5), allowing several concurrent layers per tier per                                                                                                                                                                                                  |
+//|         direction - and both directions of the same tier simultaneously -                                                                                                                                                                                            |
+//|         instead of one trade total per tier. Set                                                                                                                                                                                                                      |
+//|         InpEnableZeroConfluenceTouch=false and                                                                                                                                                                                                                        |
+//|         InpMaxConcurrentPerTierDirection=1 to restore 1.000's behavior.                                                                                                                                                                                               |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.000"
+#property version   "1.100"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -142,6 +153,22 @@ input int    InpSessionLevelMaxAgeHours     = 36;
 input group "=== READY State Machine ==="
 input int    InpMaxZoneRetests              = 4;
 input int    InpArmedExpiryEntryBars        = 60;
+
+input group "=== Zero-Confluence Touch (V3.184-style aggressive trigger) ==="
+// V3.184's dominant frequency philosophy: a touch of a valid, correctly-
+// sided zone fires immediately, with no requirement for a fresh reject/
+// sweep/displacement/CHOCH confirmation. Set false to restore the strict
+// original Pine behaviour (a recent confirmation is mandatory).
+input bool   InpEnableZeroConfluenceTouch   = true;
+
+input group "=== Concurrency: Multiple Trades Per Tier/Direction (V3.184-style layering) ==="
+// The original Pine strategy is single-instance (one trade total). This
+// EA already runs 5 independent tiers; V3.184's own frequency comes from
+// also allowing several concurrent layers in the same direction rather
+// than locking to one trade at a time. Raise/lower to trade off frequency
+// against exposure. Set to 1 to restore the original one-trade-per-tier
+// lock (both directions combined).
+input int    InpMaxConcurrentPerTierDirection = 5;
 
 input group "=== Exit: Hybrid Virtual Trail (shared by every tier) ==="
 input double InpPresetStopLossPips          = 29.0;
@@ -354,6 +381,7 @@ void   ProcessArmAndResync(int t,int direction);
 void   ProcessTouch(int t,int direction);
 bool   QualifyZone(int t,int direction,double &outLo,double &outHi,datetime &outTime,int &outRetests,string &outConfirmation,bool &outCounterTrend);
 int    ZoneRetestCount(int t,double zoneLo,double zoneHi,datetime zoneTime,datetime currentEntryTime);
+int    CountOpenPositionsForTierDirection(int t,int direction);
 bool   SubmitEntryOrder(int t,int direction);
 
 int    EnsureManagedSlot(ulong ticket);
@@ -439,7 +467,8 @@ int OnInit()
    Log("EzyEA V7 initialized on "+_Symbol+
        " | account unit divisor="+DoubleToString(g_accountUnitDivisor,2)+
        " | risk/trade="+DoubleToString(InpRiskPercentPerTrade,2)+"%"+
-       " | tiers=M5/M15/M30/H1/H4, one active trade per tier"+
+       " | tiers=M5/M15/M30/H1/H4, max "+IntegerToString(InpMaxConcurrentPerTierDirection)+" concurrent per tier/direction"+
+       " | zero-confluence touch="+(InpEnableZeroConfluenceTouch?"ON":"OFF")+
        " | exit: preset="+DoubleToString(InpPresetStopLossPips,1)+"p trail="+DoubleToString(InpTrailingDistancePips,1)+
        "p @+"+DoubleToString(InpTrailingActivationPips,1)+"p"+
        " | drawdown breaker="+(InpEnableDrawdownBreaker?DoubleToString(InpMaxEquityDrawdownPct,1)+"%":"OFF"));
@@ -464,13 +493,14 @@ void OnTick()
    {
       for(int t=0;t<EZY_TIER_COUNT;t++)
       {
-         // Refresh whether the tier's locked trade is still open.
-         if(g_tier[t].tradeActive && !PositionSelectByTicket(g_tier[t].ticket))
-         {
-            g_tier[t].tradeActive=false;
-            g_tier[t].tradeDirection=0;
-            g_tier[t].ticket=0;
-         }
+         // Refresh the tier's live-trade status (cosmetic only - entry
+         // gating below reads live position counts directly, since
+         // multiple concurrent trades per tier/direction are now allowed).
+         int buyCount =CountOpenPositionsForTierDirection(t,1);
+         int sellCount=CountOpenPositionsForTierDirection(t,-1);
+         g_tier[t].tradeActive=(buyCount>0 || sellCount>0);
+         g_tier[t].tradeDirection=(buyCount>0)?1:((sellCount>0)?-1:0);
+         if(!g_tier[t].tradeActive) g_tier[t].ticket=0;
 
          datetime entryBarTime=iTime(_Symbol,g_cfg[t].entryTF,0);
          if(entryBarTime!=0 && entryBarTime!=g_tier[t].bull.lastProcessedEntryTime)
@@ -1259,7 +1289,7 @@ bool QualifyZone(int t,int direction,double &outLo,double &outHi,datetime &outTi
    bool recentDisplace =side.displaceAge<=InpArmedConfirmationWindowBars && RangesOverlap(side.lastDisplaceLo,side.lastDisplaceHi,zoneLo,zoneHi);
 
    bool confirmed=recentReject || recentSweep || recentPremium || recentDisplace || recentChoch;
-   if(!confirmed) return false;
+   if(!confirmed && !InpEnableZeroConfluenceTouch) return false;
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol,tick)) return false;
@@ -1278,7 +1308,8 @@ bool QualifyZone(int t,int direction,double &outLo,double &outHi,datetime &outTi
                     recentSweep?"LIQUIDITY SWEEP + RECLAIM":
                     recentDisplace?"DISPLACEMENT CHOCH":
                     recentReject?"ENTRY ZONE REJECTION":
-                    recentChoch?"STRUCTURE BREAK (CHOCH)":"";
+                    recentChoch?"STRUCTURE BREAK (CHOCH)":
+                    "ZERO-CONFLUENCE TOUCH";
    return true;
 }
 
@@ -1309,11 +1340,31 @@ int ZoneRetestCount(int t,double zoneLo,double zoneHi,datetime zoneTime,datetime
    return retests;
 }
 
+int CountOpenPositionsForTierDirection(int t,int direction)
+{
+   string wantComment="V7"+g_cfg[t].label;
+   ENUM_POSITION_TYPE wantType=(direction==1)?POSITION_TYPE_BUY:POSITION_TYPE_SELL;
+   int count=0;
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=InpMagicNumber) continue;
+      if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE)!=wantType) continue;
+      if(PositionGetString(POSITION_COMMENT)!=wantComment) continue;
+      count++;
+   }
+   return count;
+}
+
 void ProcessArmAndResync(int t,int direction)
 {
    TierSideState side;
    if(direction==1) side=g_tier[t].buySide; else side=g_tier[t].sellSide;
-   bool tradeLockedThisDirection=g_tier[t].tradeActive && g_tier[t].tradeDirection==direction;
+   bool tradeLockedThisDirection=CountOpenPositionsForTierDirection(t,direction)>=InpMaxConcurrentPerTierDirection;
 
    double lo=0,hi=0; datetime tm=0; int retests=0; string confirmation=""; bool counterTrend=false;
    bool qualifies=QualifyZone(t,direction,lo,hi,tm,retests,confirmation,counterTrend);
@@ -1392,7 +1443,7 @@ void ProcessTouch(int t,int direction)
    TierSideState side;
    if(direction==1) side=g_tier[t].buySide; else side=g_tier[t].sellSide;
    if(!side.armed || side.touchLatched) return;
-   if(g_tier[t].tradeActive) return; // one active trade per tier - the other side simply waits
+   if(CountOpenPositionsForTierDirection(t,direction)>=InpMaxConcurrentPerTierDirection) return;
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol,tick)) return;
