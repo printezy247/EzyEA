@@ -323,15 +323,35 @@ input bool   InpPrintExecutionLog        = true;
 // Compatibility inputs retained for older SET files. The normal V3.081
 // policy remains exactly 2 trend-following and 3 counter-trend confluences.
 
+input group "=== Reduce Frequency: Confluence & Direct-Touch Governors ==="
+// These three were hardcoded consts in the original V3.184 file (always
+// on, not user-adjustable) - exposed here as inputs with their ORIGINAL
+// default values unchanged, so nothing differs from the source file
+// unless you explicitly adjust them. Recommended experiment order for
+// cutting daily trade count toward a specific target:
+//   1) Try InpEnableDirectZeroConfScanner=false first - the single
+//      biggest lever (see its own comment below).
+//   2) Then lower InpZeroConfMaxOpenPositionsForBypass toward 0 so the
+//      normal path requires real confluence (2 trend / 3 counter-trend)
+//      far more often instead of dropping to zero-confluence.
+//   3) Combine with the existing InpEnforceDirectionalLayerCap /
+//      InpEnforceDirectionalLosingCap / InpEnforceM5ClosedLossCap
+//      governors above (also off by default) and/or a real
+//      InpDailyLossStopPct / InpDailyEquityTargetPct.
+
 // V3.094 low-exposure exception.
 // A valid mapped READY zone may arm with zero required confluences only while
 // Direct zero-confluence exposure is limited by current open-position capacity.
-const int    V3104_ZERO_CONF_MAX_OPEN_POSITIONS = 1;
+// Lower to 0 (or negative) to make the NORMAL path require real confluence
+// (2 trend-following / 3 counter-trend) far more often instead of dropping
+// to zero-confluence whenever position count is this low.
+input int    InpZeroConfMaxOpenPositionsForBypass = 1;
 
 // V3.170 zero-confluence zone trigger.
 // HIGH-RISK is enabled as a direct zero-confluence execution zone.
 // LOW-RISK is eligible only after a completed M5 sweep and reclaim.
-const bool   V3170_ZERO_CONF_LOW_RISK_TOUCH_RULE = true;
+// Set false to remove LOW-RISK zones from the zero-confluence trigger set.
+input bool   InpEnableLowRiskZeroConfTouch = true;
 
 // Additional V3.102 zero-confluence level trigger.
 // BUY fallback stores the current S1 level; SELL fallback stores current R1.
@@ -349,7 +369,13 @@ const bool   V3170_ZERO_CONF_LOW_RISK_TOUCH_RULE = true;
 // The direct zero-confluence scanner
 // evaluates HIGH-RISK, LOW-RISK, current-map H1, H4, D1 and W1 levels.
 // Every direct zero-confluence trigger requires M5 sweep and reclaim.
-const bool   V3104_ZERO_CONF_DIRECT_MAP_FALLBACK = true;
+// SINGLE BIGGEST FREQUENCY LEVER: this scanner runs as a SEPARATE engine
+// from the normal READY/setup system and fires on a raw touch of any
+// mapped H1/H4/D1/W1 level with essentially no other qualification -
+// almost certainly the dominant source of very high daily trade counts.
+// Set false to disable it entirely and rely only on the normal path
+// (which still has its own zero-confluence bypass, governed above).
+input bool   InpEnableDirectZeroConfScanner = true;
 
 
 // Daily cap on successfully deployed layer orders.
@@ -1262,7 +1288,7 @@ void BuildCurrentZeroConfTriggerMap(int direction,
       map.highRiskHi=g_buyHigh.hi;
 
       map.lowRiskValid=
-         V3170_ZERO_CONF_LOW_RISK_TOUCH_RULE &&
+         InpEnableLowRiskZeroConfTouch &&
          g_buyLow.valid;
       map.lowRiskLo=g_buyLow.lo;
       map.lowRiskHi=g_buyLow.hi;
@@ -1283,7 +1309,7 @@ void BuildCurrentZeroConfTriggerMap(int direction,
       map.highRiskHi=g_sellHigh.hi;
 
       map.lowRiskValid=
-         V3170_ZERO_CONF_LOW_RISK_TOUCH_RULE &&
+         InpEnableLowRiskZeroConfTouch &&
          g_sellLow.valid;
       map.lowRiskLo=g_sellLow.lo;
       map.lowRiskHi=g_sellLow.hi;
@@ -1881,7 +1907,7 @@ bool SubmitDirectZeroConfMarket()
 
 void ProcessDirectZeroConfluenceTriggers()
 {
-   if(!V3104_ZERO_CONF_DIRECT_MAP_FALLBACK)
+   if(!InpEnableDirectZeroConfScanner)
       return;
 
    if(!DailyRiskCapacityAvailable("DIRECT ZERO-CONF TRIGGER SCAN"))
@@ -1941,7 +1967,7 @@ void ProcessDirectZeroConfluenceTriggers()
    {
       int runningPositions=CountOurPositions();
 
-      if(runningPositions<=V3104_ZERO_CONF_MAX_OPEN_POSITIONS)
+      if(runningPositions<=InpZeroConfMaxOpenPositionsForBypass)
       {
          bool chooseBuy=buyTouched && !g_directZeroConf.buyTouchConsumed;
          bool chooseSell=sellTouched && !g_directZeroConf.sellTouchConsumed;
@@ -2380,7 +2406,7 @@ bool SubmitEveryZeroConfCandidate(ZeroConfTriggerCandidate &candidate,
 
 void ProcessEveryZeroConfluenceTriggers()
 {
-   if(!V3104_ZERO_CONF_DIRECT_MAP_FALLBACK)
+   if(!InpEnableDirectZeroConfScanner)
       return;
 
    MqlTick tick;
