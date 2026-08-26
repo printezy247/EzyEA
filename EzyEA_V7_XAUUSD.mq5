@@ -98,9 +98,15 @@
 //|         instead of one trade total per tier. Set                                                                                                                                                                                                                      |
 //|         InpEnableZeroConfluenceTouch=false and                                                                                                                                                                                                                        |
 //|         InpMaxConcurrentPerTierDirection=1 to restore 1.000's behavior.                                                                                                                                                                                               |
+//| 1.200 - Added lot-traded / backtest reporting: a live running fill/lot                                                                                                                                                                                                 |
+//|         counter (g_totalLotsTraded/g_totalFills) surfaced in the status                                                                                                                                                                                                |
+//|         label and periodic log, plus WriteBacktestReport() on OnDeinit                                                                                                                                                                                                 |
+//|         (HistoryDeals-based entry lots, fills, closed trades, win rate,                                                                                                                                                                                                |
+//|         closed net P/L) with optional CSV export - the same reporting                                                                                                                                                                                                  |
+//|         already added to EzyEA_V7.1_XAUUSD.mq5.                                                                                                                                                                                                                        |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "1.100"
+#property version   "1.200"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -207,8 +213,12 @@ input group "=== Execution ==="
 input ulong  InpMagicNumber                 = 190070;
 input int    InpDeviationPoints             = 20;
 
-input group "=== Reporting ==="
+input group "=== Reporting: Status Log ==="
 input int    InpStatusLogIntervalSeconds    = 60;
+
+input group "=== Reporting: Lot-Traded / Backtest Report ==="
+input bool   InpWriteCSVReport              = true;
+input string InpCSVReportPrefix             = "EzyEA_V7_XAUUSD_Report";
 
 input group "=== Chart Drawing ==="
 input bool   InpApplyPremiumTheme           = true;
@@ -292,6 +302,14 @@ struct ManagedPositionState
    bool     peakReconstructed;
 };
 
+struct BacktestTradeRow
+{
+   long   positionId;
+   double entryLots;
+   double netPnl;
+   bool   hasExit;
+};
+
 //======================================================================
 // Globals
 //======================================================================
@@ -334,6 +352,9 @@ int g_gateSpreadRejects      = 0;
 int g_gateDistanceRejects    = 0;
 int g_gateSizingRejects      = 0;
 int g_gateDrawdownRejects    = 0;
+
+double g_totalLotsTraded = 0.0;
+int    g_totalFills      = 0;
 
 //======================================================================
 // Forward declarations
@@ -398,6 +419,8 @@ void   RemoveAllDrawings();
 
 void   WriteFinalReport();
 void   PeriodicStatusLog();
+int    EnsureBacktestRow(BacktestTradeRow &rows[],long positionId);
+void   WriteBacktestReport();
 
 //======================================================================
 // Event handlers
@@ -462,6 +485,9 @@ int OnInit()
 
    g_lastStatusLogTime = 0;
 
+   g_totalLotsTraded = 0.0;
+   g_totalFills = 0;
+
    ApplyPremiumChartTheme();
 
    Log("EzyEA V7 initialized on "+_Symbol+
@@ -479,6 +505,7 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    WriteFinalReport();
+   WriteBacktestReport();
    RemoveAllDrawings();
 }
 
@@ -1505,6 +1532,9 @@ bool SubmitEntryOrder(int t,int direction)
    if(sent && TradeRetcodeAccepted(retcode))
    {
       g_gateAccepted++;
+      g_totalLotsTraded+=lots;
+      g_totalFills++;
+
       ulong ticketOut=trade.ResultOrder();
       if(!PositionSelectByTicket(ticketOut))
       {
@@ -1526,7 +1556,8 @@ bool SubmitEntryOrder(int t,int direction)
       g_tier[t].ticket=ticketOut;
 
       Log("LIVE ["+g_cfg[t].label+"/"+g_cfg[t].modeLabel+"] dir="+(direction==1?"BUY":"SELL")+
-          " lots="+DoubleToString(lots,2)+" entry="+PriceText(entry)+" sl="+PriceText(sl));
+          " lots="+DoubleToString(lots,2)+" entry="+PriceText(entry)+" sl="+PriceText(sl)+
+          " | total lots traded="+DoubleToString(g_totalLotsTraded,2));
       return true;
    }
 
@@ -1715,6 +1746,131 @@ void ManageTrailing()
 }
 
 //======================================================================
+// Lot-traded / backtest report - reconstructed from broker deal history
+// at OnDeinit, same pattern used across the EzyEA family.
+//======================================================================
+int EnsureBacktestRow(BacktestTradeRow &rows[],long positionId)
+{
+   for(int i=0;i<ArraySize(rows);i++)
+      if(rows[i].positionId==positionId) return i;
+
+   int n=ArraySize(rows);
+   ArrayResize(rows,n+1);
+   rows[n].positionId=positionId;
+   rows[n].entryLots=0.0;
+   rows[n].netPnl=0.0;
+   rows[n].hasExit=false;
+   return n;
+}
+
+void WriteBacktestReport()
+{
+   if(!HistorySelect(0,TimeCurrent()))
+   {
+      Log("REPORT: HistorySelect failed.");
+      return;
+   }
+
+   BacktestTradeRow rows[];
+   int deals=HistoryDealsTotal();
+   int actualFills=0;
+
+   for(int i=0;i<deals;i++)
+   {
+      ulong deal=HistoryDealGetTicket(i);
+      if(deal==0) continue;
+      if(HistoryDealGetString(deal,DEAL_SYMBOL)!=_Symbol) continue;
+      if((ulong)HistoryDealGetInteger(deal,DEAL_MAGIC)!=InpMagicNumber) continue;
+
+      ENUM_DEAL_TYPE type=(ENUM_DEAL_TYPE)HistoryDealGetInteger(deal,DEAL_TYPE);
+      if(type!=DEAL_TYPE_BUY && type!=DEAL_TYPE_SELL) continue;
+
+      long positionId=(long)HistoryDealGetInteger(deal,DEAL_POSITION_ID);
+      if(positionId<=0) continue;
+
+      int row=EnsureBacktestRow(rows,positionId);
+      double profit=HistoryDealGetDouble(deal,DEAL_PROFIT)+HistoryDealGetDouble(deal,DEAL_SWAP)+HistoryDealGetDouble(deal,DEAL_COMMISSION);
+      rows[row].netPnl+=profit;
+
+      ENUM_DEAL_ENTRY entry=(ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal,DEAL_ENTRY);
+      double volume=HistoryDealGetDouble(deal,DEAL_VOLUME);
+      if((entry==DEAL_ENTRY_IN || entry==DEAL_ENTRY_INOUT) && volume>0.0)
+      {
+         rows[row].entryLots+=volume;
+         actualFills++;
+      }
+      if(entry==DEAL_ENTRY_OUT || entry==DEAL_ENTRY_OUT_BY || entry==DEAL_ENTRY_INOUT)
+         rows[row].hasExit=true;
+   }
+
+   double totalEntryLots=0.0; int closedTrades=0,wins=0,losses=0,breakeven=0,openTrades=0;
+   double closedNet=0.0; double pnlEpsilon=0.005;
+
+   for(int i=0;i<ArraySize(rows);i++)
+   {
+      if(rows[i].entryLots<=0.0) continue;
+      totalEntryLots+=rows[i].entryLots;
+
+      if(PositionSelectByTicket((ulong)rows[i].positionId)) { openTrades++; continue; }
+      if(!rows[i].hasExit) continue;
+
+      closedTrades++;
+      closedNet+=rows[i].netPnl;
+      if(rows[i].netPnl>pnlEpsilon) wins++;
+      else if(rows[i].netPnl<-pnlEpsilon) losses++;
+      else breakeven++;
+   }
+
+   double winRate=(wins+losses>0)?100.0*(double)wins/(double)(wins+losses):0.0;
+
+   Log("================ EZYEA V7 LOT-TRADED / BACKTEST SUMMARY ================");
+   Log("TOTAL ENTRY LOTS: "+DoubleToString(totalEntryLots,VolumeDigits())+" | ACTUAL ENTRY FILLS: "+IntegerToString(actualFills));
+   Log("CLOSED TRADES: "+IntegerToString(closedTrades)+" | wins="+IntegerToString(wins)+" | losses="+IntegerToString(losses)+
+       " | breakeven="+IntegerToString(breakeven)+" | open="+IntegerToString(openTrades));
+   Log("WINRATE: "+DoubleToString(winRate,2)+"% | CLOSED NET: "+DoubleToString(closedNet,2)+" "+AccountInfoString(ACCOUNT_CURRENCY));
+   Log("===========================================================================");
+
+   if(!InpWriteCSVReport) return;
+
+   MqlDateTime dt; TimeToStruct(TimeCurrent(),dt);
+   string filename=StringFormat("%s_%s_%04d%02d%02d_%02d%02d.csv",InpCSVReportPrefix,_Symbol,dt.year,dt.mon,dt.day,dt.hour,dt.min);
+   int handle=FileOpen(filename,FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON,',');
+   if(handle==INVALID_HANDLE)
+   {
+      Log("REPORT: could not create CSV. Error="+IntegerToString(GetLastError()));
+      return;
+   }
+
+   FileWrite(handle,"PositionID","EntryLots","NetPnL","Status");
+   for(int i=0;i<ArraySize(rows);i++)
+   {
+      if(rows[i].entryLots<=0.0) continue;
+      string status="INCOMPLETE";
+      if(PositionSelectByTicket((ulong)rows[i].positionId)) status="OPEN";
+      else if(rows[i].hasExit)
+      {
+         if(rows[i].netPnl>pnlEpsilon) status="WIN";
+         else if(rows[i].netPnl<-pnlEpsilon) status="LOSS";
+         else status="BREAKEVEN";
+      }
+      FileWrite(handle,(string)rows[i].positionId,DoubleToString(rows[i].entryLots,VolumeDigits()),DoubleToString(rows[i].netPnl,2),status);
+   }
+   FileWrite(handle,"");
+   FileWrite(handle,"SUMMARY","Value");
+   FileWrite(handle,"TotalEntryLots",DoubleToString(totalEntryLots,VolumeDigits()));
+   FileWrite(handle,"ActualEntryFills",actualFills);
+   FileWrite(handle,"ClosedTrades",closedTrades);
+   FileWrite(handle,"WinningTrades",wins);
+   FileWrite(handle,"LosingTrades",losses);
+   FileWrite(handle,"BreakevenTrades",breakeven);
+   FileWrite(handle,"OpenTrades",openTrades);
+   FileWrite(handle,"WinRatePct",DoubleToString(winRate,2));
+   FileWrite(handle,"ClosedNet",DoubleToString(closedNet,2));
+   FileClose(handle);
+   Log("REPORT: CSV written to "+filename);
+}
+
+//======================================================================
 // Chart drawing
 //======================================================================
 void DrawStatusLabel()
@@ -1731,7 +1887,8 @@ void DrawStatusLabel()
       else text+="-";
       text+="  ";
    }
-   text+="| equity="+DoubleToString(EffectiveAccountEquity(),2)+" | "+(g_tradingHalted?"HALTED":"ACTIVE");
+   text+="| lots traded="+DoubleToString(g_totalLotsTraded,2)+
+         " | equity="+DoubleToString(EffectiveAccountEquity(),2)+" | "+(g_tradingHalted?"HALTED":"ACTIVE");
 
    if(ObjectFind(0,name)<0)
    {
@@ -1822,7 +1979,9 @@ void WriteFinalReport()
        " | spreadRejects="+IntegerToString(g_gateSpreadRejects)+
        " distanceRejects="+IntegerToString(g_gateDistanceRejects)+
        " sizingRejects="+IntegerToString(g_gateSizingRejects)+
-       " drawdownRejects="+IntegerToString(g_gateDrawdownRejects));
+       " drawdownRejects="+IntegerToString(g_gateDrawdownRejects)+
+       " | totalLotsTraded="+DoubleToString(g_totalLotsTraded,2)+
+       " totalFills="+IntegerToString(g_totalFills));
 }
 
 void PeriodicStatusLog()
@@ -1838,6 +1997,7 @@ void PeriodicStatusLog()
    }
 
    Log("STATUS | equity="+DoubleToString(EffectiveAccountEquity(),2)+" | "+tiers+
+       " | lots traded="+DoubleToString(g_totalLotsTraded,2)+" fills="+IntegerToString(g_totalFills)+
        " | halted="+(g_tradingHalted?"YES":"NO"));
 
    Log("DEPLOYMENT GATE BREAKDOWN | attempts="+IntegerToString(g_gateAttempts)+
