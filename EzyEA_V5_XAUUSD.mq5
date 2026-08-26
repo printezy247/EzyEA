@@ -269,7 +269,7 @@ input int    InpExecutionStopCushionPoints  = 2;
 // automatically when its position closes or its pending order is cancelled.
 input group "=== Directional Layer Cap (disabled by default - unrestricted test) ==="
 input bool   InpEnforceDirectionalLayerCap       = true; // was false (V3.184 unrestricted test) - enabled per explicit request to reduce daily trade count
-input int    InpMaxActiveLayersPerDirection      = 13;
+input int    InpMaxActiveLayersPerDirection      = 22; // was 13 - raised per explicit request; 13 helped push frequency down to ~48-65/day, overshooting the 300-700/day target
 input bool   InpCountPendingAsReservedLayer      = true;
 input bool   InpTrimExcessPendingToLayerCap      = true;
 
@@ -279,7 +279,7 @@ input bool   InpTrimExcessPendingToLayerCap      = true;
 // allowed in that direction. Existing positions remain managed normally.
 input group "=== Directional Losing-Position Cap (disabled by default) ==="
 input bool   InpEnforceDirectionalLosingCap      = true; // was false (V3.184 unrestricted test) - enabled per explicit request to reduce daily trade count
-input int    InpMaxLosingPositionsPerDirection   = 3;
+input int    InpMaxLosingPositionsPerDirection   = 6; // was 3 - raised per explicit request to loosen an over-tight frequency cap
 input bool   InpCancelPendingAtLosingCap         = true;
 
 // V3.160 current-M5 realised-loss governor.
@@ -288,7 +288,7 @@ input bool   InpCancelPendingAtLosingCap         = true;
 // combined. At two losing closes, all new entries are blocked until next M5.
 input group "=== M5 Closed-Loss Cap (disabled by default) ==="
 input bool   InpEnforceM5ClosedLossCap             = true; // was false (V3.184 unrestricted test) - enabled per explicit request to reduce daily trade count
-input int    InpMaxClosedNegativeEntriesPerM5      = 2;
+input int    InpMaxClosedNegativeEntriesPerM5      = 5; // was 2 - raised per explicit request to loosen an over-tight frequency cap
 input bool   InpCancelPendingAtM5ClosedLossCap      = true;
 
 // Real brokers may enforce a larger pending-order distance than Strategy Tester.
@@ -345,7 +345,7 @@ input group "=== Reduce Frequency: Confluence & Direct-Touch Governors ==="
 // Lower to 0 (or negative) to make the NORMAL path require real confluence
 // (2 trend-following / 3 counter-trend) far more often instead of dropping
 // to zero-confluence whenever position count is this low.
-input int    InpZeroConfMaxOpenPositionsForBypass = 0; // was 1 - lowered per explicit request so the normal path requires real confluence except when completely flat
+input int    InpZeroConfMaxOpenPositionsForBypass = 2; // was 0 (originally 1) - raised per explicit request; 0 helped push frequency down to ~48-65/day, overshooting the 300-700/day target, so a small bypass allowance is restored
 
 // V3.170 zero-confluence zone trigger.
 // HIGH-RISK is enabled as a direct zero-confluence execution zone.
