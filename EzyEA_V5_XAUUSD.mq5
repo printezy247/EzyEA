@@ -116,9 +116,22 @@
 //|         compliance/execution-safety check (spread guard, broker minimum                                                                                                                                                                                                                                                          |
 //|         stop distance, margin cap, drawdown breaker, basket equity stop)                                                                                                                                                                                                                                                              |
 //|         unchanged, per explicit instruction to keep those.                                                                                                                                                                                                                                                                                  |
+//| 2.200 - Live/tester feedback: only 19 trades/day even with three                                                                                                                                                                                                                                                                                |
+//|         zero-confluence sources and no volatility gate - traced to the                                                                                                                                                                                                                                                                            |
+//|         "one basket per direction" exclusivity, which silently dropped                                                                                                                                                                                                                                                                              |
+//|         every touch on a side that already had a basket running (e.g.                                                                                                                                                                                                                                                                                |
+//|         while one rode its trailing stop into a swing). Per explicit                                                                                                                                                                                                                                                                                  |
+//|         follow-up ("remove all filter and entry zero confluence on                                                                                                                                                                                                                                                                                      |
+//|         every level touch ... aggressive scalping"): removed the per-                                                                                                                                                                                                                                                                                    |
+//|         direction exclusivity entirely - every fired touch now opens                                                                                                                                                                                                                                                                                      |
+//|         its OWN independent basket. g_baskets[2] (fixed long/short                                                                                                                                                                                                                                                                                          |
+//|         slots) became a dynamic array; the only remaining limits are                                                                                                                                                                                                                                                                                        |
+//|         InpMaxConcurrentBaskets/InpMaxConcurrentPerDirection, which are                                                                                                                                                                                                                                                                                        |
+//|         basic margin/position-count safety caps (raise them for a                                                                                                                                                                                                                                                                                              |
+//|         bigger account), not strategic entry filters.                                                                                                                                                                                                                                                                                                            |
 //+------------------------------------------------------------------+
 #property copyright "EzyEA"
-#property version   "2.100"
+#property version   "2.200"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -165,6 +178,15 @@ input group "=== Entry Source 3: EMA13 touch (M5, live value), zero confluence =
 input bool   InpEnableEmaTouchEntries       = true;
 input int    InpEmaPeriod                   = 13;
 input double InpEmaTouchTolerancePoints     = 30.0;
+
+input group "=== Concurrency Caps (basic execution/margin safety, not a strategic filter) ==="
+// Every qualifying touch (BB/SND/EMA, whichever fired) opens its OWN
+// independent basket - there is no "already have a basket this
+// direction" restriction anymore. These two caps are the only limit on
+// how many can run at once, purely to bound margin/position-count
+// exposure on a small account - raise them for a bigger account.
+input int    InpMaxConcurrentBaskets        = 20;
+input int    InpMaxConcurrentPerDirection   = 10;
 
 input group "=== Anti-Martingale Pyramid Layering ==="
 input int    InpMaxPyramidLayers            = 3;
@@ -294,7 +316,11 @@ double g_peakEquity    = 0.0;
 bool   g_tradingHalted = false;
 
 // Basket slots: 0 = long (direction 1), 1 = short (direction -1).
-PyramidBasket g_baskets[2];
+// Dynamic - every fired touch appends its own basket (see TryFireTouch/
+// OpenBasket); closed baskets are removed (see RemoveClosedBaskets), not
+// left as inactive slots. Size is bounded at runtime by
+// InpMaxConcurrentBaskets/InpMaxConcurrentPerDirection.
+PyramidBasket g_baskets[];
 
 // Zero-confluence touch state, shared by all three entry sources -
 // edge-triggered, state-based re-arm (must fully return inside/off the
@@ -326,6 +352,7 @@ int g_gateVolatilityRejects  = 0; // now means "ATR not ready yet", not a strate
 int g_gateDistanceRejects    = 0;
 int g_gateSizingRejects      = 0;
 int g_gateDrawdownRejects    = 0;
+int g_gateConcurrencyRejects = 0;
 
 //======================================================================
 // Forward declarations
@@ -370,8 +397,10 @@ bool   IsSwingLow(ENUM_TIMEFRAMES tf,int shift,int pivotBars);
 void   RebuildLevelForTimeframe(int slotIndex,ENUM_TIMEFRAMES tf,int lookback,string tfLabel);
 void   UpdateLevelsOnNewBars();
 
-int    BasketSlot(int direction);
 void   ProcessZeroConfluenceTouchTriggers();
+int    CountBasketsByDirection(int direction);
+void   RemoveBasket(int b);
+void   RemoveClosedBaskets();
 void   TryFireTouch(int direction);
 void   OpenBasket(int direction,double atrFast);
 void   TryAddPyramidLayer(int b,double atrFast);
@@ -429,20 +458,7 @@ int OnInit()
    g_peakEquity    = AccountInfoDouble(ACCOUNT_EQUITY);
    g_tradingHalted = false;
 
-   for(int b=0;b<2;b++)
-   {
-      g_baskets[b].active = false;
-      g_baskets[b].direction = (b==0)?1:-1;
-      g_baskets[b].layerCount = 0;
-      for(int i=0;i<8;i++) g_baskets[b].tickets[i]=0;
-      g_baskets[b].lastLayerEntryPrice = 0.0;
-      g_baskets[b].peakFavorablePrice  = 0.0;
-      g_baskets[b].trailActive         = false;
-      g_baskets[b].trailStopPrice      = 0.0;
-      g_baskets[b].openTime            = 0;
-      g_baskets[b].lastLayerTime       = 0;
-      g_baskets[b].atrAtOpen           = 0.0;
-   }
+   ArrayResize(g_baskets,0); // no baskets pre-seeded - every one is opened by an actual touch
 
    g_inUpperZone    = false;
    g_inLowerZone    = false;
@@ -477,7 +493,8 @@ int OnInit()
        " | no volatility gate (ATR sizing-only)"+
        " | max pyramid layers="+IntegerToString(InpMaxPyramidLayers)+
        " (size ratio "+DoubleToString(InpPyramidSizeRatio,2)+")"+
-       " | concurrent baskets: long+short"+
+       " | every touch opens its own basket, cap="+IntegerToString(InpMaxConcurrentBaskets)+
+       " total / "+IntegerToString(InpMaxConcurrentPerDirection)+" per direction"+
        " | basket equity stop="+DoubleToString(InpBasketMaxLossEquityPct,2)+"%"+
        " | drawdown breaker="+(InpEnableDrawdownBreaker?DoubleToString(InpMaxEquityDrawdownPct,1)+"%":"OFF"));
 
@@ -499,8 +516,9 @@ void OnTick()
 {
    UpdateDrawdownBreaker();
 
-   for(int b=0;b<2;b++)
+   for(int b=ArraySize(g_baskets)-1;b>=0;b--)
       PruneBasketTickets(b);
+   RemoveClosedBaskets();
 
    double atrFast=CurrentAtrFast();
 
@@ -509,17 +527,17 @@ void OnTick()
       UpdateLevelsOnNewBars();
       ProcessZeroConfluenceTouchTriggers();
 
-      for(int b=0;b<2;b++)
-         if(g_baskets[b].active && atrFast>0.0)
+      if(atrFast>0.0)
+         for(int b=ArraySize(g_baskets)-1;b>=0;b--)
             TryAddPyramidLayer(b,atrFast);
    }
 
-   for(int b=0;b<2;b++)
+   for(int b=ArraySize(g_baskets)-1;b>=0;b--)
    {
-      if(!g_baskets[b].active) continue;
       ManageBasketExit(b,atrFast);
       EnforceMaxHoldingTime(b);
    }
+   RemoveClosedBaskets();
 
    if(InpDrawBands)        DrawBands();
    if(InpDrawLevels)       DrawLevels();
@@ -859,12 +877,7 @@ void CloseAllPositions(string reason)
              " retcode="+IntegerToString(retcode)+" reason="+reason);
    }
 
-   for(int b=0;b<2;b++)
-   {
-      g_baskets[b].active=false;
-      g_baskets[b].layerCount=0;
-      for(int i=0;i<8;i++) g_baskets[b].tickets[i]=0;
-   }
+   ArrayResize(g_baskets,0);
 }
 
 //======================================================================
@@ -1055,15 +1068,11 @@ void UpdateLevelsOnNewBars()
 
 //======================================================================
 // Entry: three zero-confluence touch sources (BB band / SND levels /
-// EMA13), all edge-triggered with state-based re-arm, all funnelled
-// through the same TryFireTouch()/basket-per-direction gate below. No
-// volatility gate, no confirmation wait, no confluence requirement.
+// EMA13), all edge-triggered with state-based re-arm, every fired touch
+// opening its OWN independent basket (no per-direction exclusivity) -
+// see TryFireTouch. No volatility gate, no confirmation wait, no
+// confluence requirement anywhere.
 //======================================================================
-int BasketSlot(int direction)
-{
-   return (direction==1)?0:1;
-}
-
 void ProcessZeroConfluenceTouchTriggers()
 {
    MqlTick tick;
@@ -1147,10 +1156,46 @@ void ProcessZeroConfluenceTouchTriggers()
    g_hasPreviousCMP=true;
 }
 
+int CountBasketsByDirection(int direction)
+{
+   int n=0;
+   for(int i=0;i<ArraySize(g_baskets);i++)
+      if(g_baskets[i].active && g_baskets[i].direction==direction) n++;
+   return n;
+}
+
+void RemoveBasket(int b)
+{
+   int last=ArraySize(g_baskets)-1;
+   if(last<0) return;
+   if(b!=last) g_baskets[b]=g_baskets[last];
+   ArrayResize(g_baskets,last);
+}
+
+void RemoveClosedBaskets()
+{
+   for(int b=ArraySize(g_baskets)-1;b>=0;b--)
+      if(!g_baskets[b].active) RemoveBasket(b);
+}
+
 void TryFireTouch(int direction)
 {
-   int slot=BasketSlot(direction);
-   if(g_baskets[slot].active) return; // that side already has a running basket - pyramiding handles further adds into it
+   // NO "already have a basket this direction" check anymore - every
+   // qualifying touch (SND/EMA/BB, whichever fired) opens its OWN
+   // independent basket. The only limits are the concurrency caps below
+   // and the broker-guidance safety checks that follow - per explicit
+   // instruction: "remove all filter and entry zero confluence on every
+   // level touch".
+   if(ArraySize(g_baskets)>=InpMaxConcurrentBaskets)
+   {
+      g_gateConcurrencyRejects++;
+      return;
+   }
+   if(CountBasketsByDirection(direction)>=InpMaxConcurrentPerDirection)
+   {
+      g_gateConcurrencyRejects++;
+      return;
+   }
 
    g_gateAttempts++;
 
@@ -1177,38 +1222,44 @@ void TryFireTouch(int direction)
 }
 
 //======================================================================
-// Basket open (first layer) / pyramid adds
+// Basket open (first layer) / pyramid adds. Every fired touch appends a
+// brand-new basket to the dynamic array - there is no per-direction
+// exclusivity anymore (see TryFireTouch).
 //======================================================================
 void OpenBasket(int direction,double atrFast)
 {
-   int slot=BasketSlot(direction);
-   if(g_baskets[slot].active) return; // safety - caller already checks this
-
    double structuralSlDistance=MathMax(_Point,InpStructuralSlAtrMult*atrFast);
 
-   ulong ticket=0;
-   if(!SubmitLayerOrder(direction,slot,-1.0,structuralSlDistance,ticket))
-      return; // SubmitLayerOrder logs its own rejection reason
+   int b=ArraySize(g_baskets);
+   ArrayResize(g_baskets,b+1);
 
-   g_baskets[slot].active              = true;
-   g_baskets[slot].direction           = direction;
-   g_baskets[slot].layerCount          = 1;
-   g_baskets[slot].tickets[0]          = ticket;
-   for(int i=1;i<8;i++) g_baskets[slot].tickets[i]=0;
+   ulong ticket=0;
+   if(!SubmitLayerOrder(direction,b,-1.0,structuralSlDistance,ticket))
+   {
+      ArrayResize(g_baskets,b); // roll back the appended (empty) slot
+      return; // SubmitLayerOrder logs its own rejection reason
+   }
+
+   g_baskets[b].active              = true;
+   g_baskets[b].direction           = direction;
+   g_baskets[b].layerCount          = 1;
+   g_baskets[b].tickets[0]          = ticket;
+   for(int i=1;i<8;i++) g_baskets[b].tickets[i]=0;
 
    double entryPrice=0.0;
    if(PositionSelectByTicket(ticket))
       entryPrice=PositionGetDouble(POSITION_PRICE_OPEN);
 
-   g_baskets[slot].lastLayerEntryPrice = entryPrice;
-   g_baskets[slot].peakFavorablePrice  = entryPrice;
-   g_baskets[slot].trailActive         = false;
-   g_baskets[slot].trailStopPrice      = 0.0;
-   g_baskets[slot].openTime            = TimeCurrent();
-   g_baskets[slot].lastLayerTime       = TimeCurrent();
-   g_baskets[slot].atrAtOpen           = atrFast;
+   g_baskets[b].lastLayerEntryPrice = entryPrice;
+   g_baskets[b].peakFavorablePrice  = entryPrice;
+   g_baskets[b].trailActive         = false;
+   g_baskets[b].trailStopPrice      = 0.0;
+   g_baskets[b].openTime            = TimeCurrent();
+   g_baskets[b].lastLayerTime       = TimeCurrent();
+   g_baskets[b].atrAtOpen           = atrFast;
 
-   Log("BASKET OPEN ["+(direction==1?"LONG":"SHORT")+"] entry="+PriceText(entryPrice)+
+   Log("BASKET OPEN ["+(direction==1?"LONG":"SHORT")+"] #"+IntegerToString(ArraySize(g_baskets))+
+       " entry="+PriceText(entryPrice)+
        " atrFast="+PriceText(atrFast)+
        " structuralSL="+PriceText(structuralSlDistance));
 }
@@ -1627,21 +1678,28 @@ void DrawStatusLabel()
    string name="V5_StatusLabel";
    double atrFast=CurrentAtrFast();
 
-   string longText=g_baskets[0].active
-                   ?("LONG layers="+IntegerToString(g_baskets[0].layerCount)+"/"+IntegerToString(InpMaxPyramidLayers)+
-                     " trail="+(g_baskets[0].trailActive?"ARMED":"-")+
-                     " pnl="+DoubleToString(BasketFloatingPnL(0),2))
-                   :"LONG -";
-   string shortText=g_baskets[1].active
-                    ?("SHORT layers="+IntegerToString(g_baskets[1].layerCount)+"/"+IntegerToString(InpMaxPyramidLayers)+
-                      " trail="+(g_baskets[1].trailActive?"ARMED":"-")+
-                      " pnl="+DoubleToString(BasketFloatingPnL(1),2))
-                    :"SHORT -";
+   int longCount=0,shortCount=0,longLayers=0,shortLayers=0,longArmed=0,shortArmed=0;
+   double totalPnl=0.0;
+   for(int i=0;i<ArraySize(g_baskets);i++)
+   {
+      if(!g_baskets[i].active) continue;
+      totalPnl+=BasketFloatingPnL(i);
+      if(g_baskets[i].direction==1)
+      {
+         longCount++; longLayers+=g_baskets[i].layerCount;
+         if(g_baskets[i].trailActive) longArmed++;
+      }
+      else
+      {
+         shortCount++; shortLayers+=g_baskets[i].layerCount;
+         if(g_baskets[i].trailActive) shortArmed++;
+      }
+   }
 
    string text=StringFormat(
-      "EzyEA V5 | ATR(fast)=%s | %s | %s | equity=%.2f | %s",
-      PriceText(atrFast),longText,shortText,
-      EffectiveAccountEquity(),
+      "EzyEA V5 | ATR(fast)=%s | LONG baskets=%d layers=%d armed=%d | SHORT baskets=%d layers=%d armed=%d | pnl=%.2f | equity=%.2f | %s",
+      PriceText(atrFast),longCount,longLayers,longArmed,shortCount,shortLayers,shortArmed,
+      totalPnl,EffectiveAccountEquity(),
       g_tradingHalted?"HALTED":"ACTIVE");
 
    if(ObjectFind(0,name)<0)
@@ -1662,7 +1720,7 @@ void DrawLiveTradeLevels()
 {
    ObjectsDeleteAll(0,"V5_LIVE_");
 
-   for(int b=0;b<2;b++)
+   for(int b=0;b<ArraySize(g_baskets);b++)
    {
       if(!g_baskets[b].active) continue;
 
@@ -1753,7 +1811,8 @@ void WriteFinalReport()
        " atrNotReadyRejects="+IntegerToString(g_gateVolatilityRejects)+
        " distanceRejects="+IntegerToString(g_gateDistanceRejects)+
        " sizingRejects="+IntegerToString(g_gateSizingRejects)+
-       " drawdownRejects="+IntegerToString(g_gateDrawdownRejects));
+       " drawdownRejects="+IntegerToString(g_gateDrawdownRejects)+
+       " concurrencyCapRejects="+IntegerToString(g_gateConcurrencyRejects));
 }
 
 void PeriodicStatusLog()
@@ -1762,13 +1821,20 @@ void PeriodicStatusLog()
    if(TimeCurrent()-g_lastStatusLogTime<InpStatusLogIntervalSeconds) return;
    g_lastStatusLogTime=TimeCurrent();
 
+   int activeCount=0,longCount=0,shortCount=0;
+   double totalPnl=0.0;
+   for(int i=0;i<ArraySize(g_baskets);i++)
+   {
+      if(!g_baskets[i].active) continue;
+      activeCount++;
+      totalPnl+=BasketFloatingPnL(i);
+      if(g_baskets[i].direction==1) longCount++; else shortCount++;
+   }
+
    Log("STATUS | equity="+DoubleToString(EffectiveAccountEquity(),2)+
-       " | LONG="+(g_baskets[0].active?"ACTIVE layers="+IntegerToString(g_baskets[0].layerCount)+
-                   " trail="+(g_baskets[0].trailActive?"ARMED":"OFF")+
-                   " pnl="+DoubleToString(BasketFloatingPnL(0),2):"NONE")+
-       " | SHORT="+(g_baskets[1].active?"ACTIVE layers="+IntegerToString(g_baskets[1].layerCount)+
-                    " trail="+(g_baskets[1].trailActive?"ARMED":"OFF")+
-                    " pnl="+DoubleToString(BasketFloatingPnL(1),2):"NONE")+
+       " | active baskets="+IntegerToString(activeCount)+
+       " (long="+IntegerToString(longCount)+" short="+IntegerToString(shortCount)+")"+
+       " | floatingPnl="+DoubleToString(totalPnl,2)+
        " | halted="+(g_tradingHalted?"YES":"NO"));
 
    Log("DEPLOYMENT GATE BREAKDOWN | attempts="+IntegerToString(g_gateAttempts)+
@@ -1778,5 +1844,6 @@ void PeriodicStatusLog()
        " atrNotReady="+IntegerToString(g_gateVolatilityRejects)+
        " distance="+IntegerToString(g_gateDistanceRejects)+
        " sizing="+IntegerToString(g_gateSizingRejects)+
-       " drawdown="+IntegerToString(g_gateDrawdownRejects));
+       " drawdown="+IntegerToString(g_gateDrawdownRejects)+
+       " concurrencyCap="+IntegerToString(g_gateConcurrencyRejects));
 }
