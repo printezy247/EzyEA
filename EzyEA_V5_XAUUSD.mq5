@@ -52,11 +52,13 @@ enum ENUM_EZY_ACCOUNT_SCALE
 };
 
 //------------------------------ Inputs ------------------------------
+input group "=== Level & Zone Construction (H1 direction, M15 support/HIGH-RISK zone) ==="
 input int    InpDirectionHistory       = 48;
 input int    InpSupportHistory         = 40;
 input double InpMaximumZoneRangeATR     = 1.80;
 
 
+input group "=== Drawing: Direction Levels & Dashboard Colors ==="
 input bool   InpShowDirectionLevels    = true;
 input bool   InpShowSupportingZones    = true;
 input bool   InpShowDashboard          = true;
@@ -72,6 +74,7 @@ input color  InpNeutralColor           = C'204,211,218';
 //
 // Premium MT5 presentation
 //
+input group "=== Chart Drawing: Premium Theme ==="
 input bool   InpApplyPremiumTheme       = true;
 input bool   InpShowDrawingLabels       = true;
 input bool   InpShowLowRiskSourceMarker = false;
@@ -100,6 +103,7 @@ input color  InpTradeLevelGold         = C'255,215,0';
 // Phase 2 automated execution — M5 chart.
 // H4 SNR lines -> M15 overlap zone -> M3 reversal -> M5 READY.
 //
+input group "=== Execution: Magic Number ==="
 input ulong  InpMagicNumber              = 190060;
 
 // REAL STANDARD + CENT ACCOUNT PROFILE FOR XAUUSD.sc.
@@ -110,6 +114,7 @@ input ulong  InpMagicNumber              = 190060;
 // Broker-native displayed deposit units drive the per-100 lot rule:
 // USD 600 -> 0.06 lot; USC 600 -> 0.06 cent-symbol lot.
 // Risk and margin remain broker-native via OrderCalcProfit/OrderCalcMargin.
+input group "=== Cent-Account Handling & Broker-Native Lot Scaling ==="
 input ENUM_EZY_ACCOUNT_SCALE InpAccountScaleMode = EZY_ACCOUNT_AUTO;
 input double InpCentAccountUnitDivisor            = 100.0;
 // Strategy Tester deposits are normally entered in standard account currency,
@@ -165,6 +170,7 @@ input bool   InpUseBalanceForLotSizing              = true;
 // $100 equity is the minimum trading account and corresponds to a 0.01-lot
 // BASE layer. Larger accounts scale that base layer proportionally.
 // Final layer count is still constrained by the setup's monetary risk budget.
+input group "=== Confidence-Tier Lot Sizing (per $100 equity) ==="
 input double InpMinimumAccountEquity      = 5.0; // keep $100 base sizing alive after small drawdown
 input double InpBaseEquity                = 100.0;
 
@@ -194,6 +200,7 @@ input int    InpQualityConfidenceMin       = 5;
 
 // Normal confluence-qualified entry tolerance.
 // Zero-confluence fallbacks use their separate, wider profile below.
+input group "=== Zero-Confluence Touch Tolerance ==="
 input double InpEntryTouchTolerancePips     = 5.0;
 
 // V3.170 quality zero-confluence profile.
@@ -215,6 +222,7 @@ input bool   InpZeroConfUseTickPathCrossing      = true;
 // READY touch is detected from the symbol's CHART price (Bid or Last),
 // matching what is visibly touching the rectangle. Actual BUY/SELL execution
 // still uses the broker's executable Ask/Bid prices.
+input group "=== Touch Detection Price Source ==="
 input bool   InpUseChartPriceForReadyTouch  = true;
 
 // Once a legitimate chart CMP touch occurs, keep a short execution latch so
@@ -223,6 +231,7 @@ input bool   InpUseChartPriceForReadyTouch  = true;
 // V3.104 prevents OnTick/OnTimer from submitting the same touched setup
 // repeatedly during the same tester/server moment. Forced zero-confluence
 // entries retry indefinitely at this interval until MARKET is accepted.
+input group "=== Deployment Retry ==="
 input int    InpDeploymentRetryIntervalMs   = 100;
 
 // The user's confidence lot is the target volume. Percentage risk may still
@@ -232,6 +241,7 @@ input int    InpDeploymentRetryIntervalMs   = 100;
 // fall back to MARKET layers using the same total setup volume.
 
 // Small broker stop-distance cushion.
+input group "=== Broker Stop-Distance Cushion ==="
 input int    InpExecutionStopCushionPoints  = 2;
 
 // V2.009D AGGRESSIVE MARKET + LIMIT.
@@ -257,6 +267,7 @@ input int    InpExecutionStopCushionPoints  = 2;
 // reserve a layer slot so a later pending fill cannot push the direction
 // above the cap. BUY and SELL capacity are independent. A slot is released
 // automatically when its position closes or its pending order is cancelled.
+input group "=== Directional Layer Cap (disabled by default - unrestricted test) ==="
 input bool   InpEnforceDirectionalLayerCap       = false; // V3.184 unrestricted test
 input int    InpMaxActiveLayersPerDirection      = 13;
 input bool   InpCountPendingAsReservedLayer      = true;
@@ -266,6 +277,7 @@ input bool   InpTrimExcessPendingToLayerCap      = true;
 // BUY and SELL are independent. Once three EA positions in one direction
 // have floating net P/L below zero, no new MARKET/LIMIT/STOP exposure is
 // allowed in that direction. Existing positions remain managed normally.
+input group "=== Directional Losing-Position Cap (disabled by default) ==="
 input bool   InpEnforceDirectionalLosingCap      = false; // V3.184 unrestricted test
 input int    InpMaxLosingPositionsPerDirection   = 3;
 input bool   InpCancelPendingAtLosingCap         = true;
@@ -274,6 +286,7 @@ input bool   InpCancelPendingAtLosingCap         = true;
 // Count EA closing deals completed during the current M5 whose realised
 // net P/L (profit + commission + swap + fee) is negative. BUY and SELL are
 // combined. At two losing closes, all new entries are blocked until next M5.
+input group "=== M5 Closed-Loss Cap (disabled by default) ==="
 input bool   InpEnforceM5ClosedLossCap             = false; // V3.184 unrestricted test
 input int    InpMaxClosedNegativeEntriesPerM5      = 2;
 input bool   InpCancelPendingAtM5ClosedLossCap      = true;
@@ -283,6 +296,7 @@ input bool   InpCancelPendingAtM5ClosedLossCap      = true;
 // nearest broker-valid price. On XAU, 20 strategy pips = 2.00 price.
 
 // Execution controls.
+input group "=== Execution: Deviation & Latency Handling ==="
 input int    InpDeviationPoints          = 20;
 
 // V3.178 latency-resilient execution. This changes request tolerance and
@@ -344,6 +358,7 @@ const bool   V3104_ZERO_CONF_DIRECT_MAP_FALLBACK = true;
 // Zero-confluence direct-map routing only.
 
 // Stop the campaign for the broker day after target/loss threshold.
+input group "=== Daily Campaign Target / Loss Stop (disabled by default) ==="
 input double InpDailyEquityTargetPct           = 0.0; // disabled; exits are trade-structure based
 
 // V3.168 broker-day equity risk guard.
@@ -357,6 +372,7 @@ input bool   InpCancelPendingAtDailyLossStop   = true;
 
 // Take profit is disabled in V3.081. These inputs remain only for
 // backward-compatible SET files and inactive legacy paths.
+input group "=== Take Profit (disabled - exit by SL/trailing only) ==="
 input bool   InpUseTakeProfit                  = false; // no take profit; exit by preset/trailing SL
 input double InpFixedTakeProfitPips            = 0.0;  // retained for compatibility; disabled
 
@@ -367,6 +383,7 @@ input double InpFixedTakeProfitPips            = 0.0;  // retained for compatibi
 // a visible broker SL exactly 24 strategy pips from its entry. If the broker
 // rejects that SL with the opening request, the route is retried without SL
 // and the exact virtual stop protects it immediately after fill. No TP is used.
+input group "=== Preset Stop Loss ==="
 input double InpPresetStopLossPips          = 24.0;
 input bool   InpRetryEntryWithoutSLOnReject = true;
 
@@ -378,6 +395,7 @@ input bool   InpRetryEntryWithoutSLOnReject = true;
 // BUY  stop = best Bid - InpTrailingDistancePips * strategy pip
 // SELL stop = best Ask + InpTrailingDistancePips * strategy pip
 // On XAU, one strategy pip is 0.10 price; therefore SL24 is 2.40 price and trail13 is 1.30 price.
+input group "=== Hybrid Trailing Stop (fixed pip) ==="
 input bool   InpUseFixedPipTrail               = true;
 input bool   InpEnableTrailingAfterEntry        = true;
 input double InpTrailingActivationPips         = 0.0;
@@ -389,6 +407,7 @@ input double InpTrailingStepPips               = 1.0;
 // Historical M1 highs/lows cannot arm a trail immediately after attaching
 // the EA to a real XAUUSD.sc chart. The live trail first requires one full
 // trailing distance plus spread/cushion and a short warmup.
+input group "=== Live XAUUSD.sc Trail Parity Guards ==="
 input bool   InpLiveXAUProtectionParity              = true;
 input bool   InpLiveXAUDisableHistoricalPeakRebuild  = true;
 input bool   InpLiveXAURequireFullTrailBeforeArm     = true;
@@ -396,6 +415,7 @@ input bool   InpLiveXAUIncludeSpreadInTrailArm       = true;
 input int    InpLiveXAUTrailWarmupSeconds            = 15;
 input int    InpLiveXAUExtraProtectionCushionPoints  = 2;
 
+input group "=== Virtual Trail Fallback ==="
 input bool   InpUseVirtualTrailFallback        = true;
 input bool   InpReconstructTrailFromM1         = true;
 input int    InpVirtualTrailCloseDeviationPts  = 30;
@@ -404,6 +424,7 @@ input int    InpTrailBrokerCushionPoints       = 2;
 // V3.175 synchronized live exit execution.
 // One accepted close request owns the ticket until its closing deal arrives
 // or the lock times out. Broker-SL retries are throttled after Invalid stops.
+input group "=== Synchronized Exit Execution ==="
 input bool   InpSynchronizeExitRequests          = true;
 input int    InpExitCloseLockTimeoutMs           = 5000;
 input int    InpExitModifyMinimumIntervalMs      = 300;
@@ -414,6 +435,7 @@ input bool   InpExitLogFillSlippage              = true;
 // Legacy compatibility inputs retained but hard-disabled in V2.009F.
 
 // Automatic post-test report.
+input group "=== CSV Backtest Report (includes total + per-position lots traded) ==="
 input bool   InpWriteCSVReport                 = true;
 input string InpCSVReportPrefix                = "EzyMap_Scalp_Mastery_V3_182_Zero_Conf_Actual_Deal_Report";
 
@@ -421,6 +443,7 @@ input string InpCSVReportPrefix                = "EzyMap_Scalp_Mastery_V3_182_Ze
 // for this symbol and magic number, so the figures survive EA/chart restarts.
 // "total trades" means fully closed position campaigns; breakeven trades are
 // reported separately and excluded from the win-rate denominator.
+input group "=== Journal Performance Reporting (includes lot-traded stats) ==="
 input bool   InpReportPerformanceToJournal      = true;
 input int    InpStatsHistoryDays                 = 0;   // 0 = all available history
 input int    InpStatsReportIntervalSeconds       = 300; // periodic report while attached
