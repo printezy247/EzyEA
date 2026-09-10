@@ -1,0 +1,70 @@
+<svg width="800" height="220" viewBox="0 0 800 220" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="archGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffd700"/>
+      <stop offset="50%" stop-color="#ff8c00"/>
+      <stop offset="100%" stop-color="#ff6b6b"/>
+    </linearGradient>
+    <filter id="archGlow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  
+  <rect x="10" y="10" width="780" height="200" rx="16" fill="#0a0e1a" stroke="url(#archGrad)" stroke-width="1.5"/>
+  <text x="400" y="38" text-anchor="middle" fill="url(#archGrad)" font-family="Segoe UI" font-weight="800" font-size="16">🏗️ EA ARCHITECTURE & PIPELINE</text>
+  
+  <g font-family="Segoe UI, system-ui, sans-serif" font-size="10" fill="#e2e8f0">
+    <!-- Row 1: Core Components -->
+    <text x="60" y="75" text-anchor="middle" font-weight="600" fill="#ffd700">📈</text>
+    <text x="60" y="90" text-anchor="middle" font-weight="600">Signal Engine</text>
+    <text x="60" y="105" text-anchor="middle" fill="#94a3b8" font-size="9">Zone Quality analysis</text>
+    <text x="60" y="120" text-anchor="middle" fill="#ffd700" font-size="8">Volume + Session filter</text>
+    <text x="60" y="135" text-anchor="middle" fill="#ffd700" font-size="8">Multi-timeframe bias</text>
+    
+    <text x="210" y="75" text-anchor="middle" font-weight="600" fill="#ff6b6b">🎯</text>
+    <text x="210" y="90" text-anchor="middle" font-weight="600">Entry Logic</text>
+    <text x="210" y="105" text-anchor="middle" fill="#94a3b8" font-size="9">Trigger refinement</text>
+    <text x="210" y="120" text-anchor="middle" fill="#ff6b6b" font-size="8">Governor filters</text>
+    <text x="210" y="135" text-anchor="middle" fill="#ff6b6b" font-size="8">Confidence thresholds</text>
+    
+    <text x="360" y="75" text-anchor="middle" font-weight="600" fill="#48dbfb">🛡️</text>
+    <text x="360" y="90" text-anchor="middle" font-weight="600">Risk Management</text>
+    <text x="360" y="105" text-anchor="middle" fill="#94a3b8" font-size="9">Fixed TP/SL</text>
+    <text x="360" y="120" text-anchor="middle" fill="#48dbfb" font-size="8">Trailing stop (7-24)</text>
+    <text x="360" y="135" text-anchor="middle" fill="#48dbfb" font-size="8">Drawdown guardian</text>
+    
+    <text x="510" y="75" text-anchor="middle" font-weight="600" fill="#a29bfe">💰</text>
+    <text x="510" y="90" text-anchor="middle" font-weight="600">Position Sizing</text>
+    <text x="510" y="105" text-anchor="middle" fill="#94a3b8" font-size="9">Lot calculation</text>
+    <text x="510" y="120" text-anchor="middle" fill="#a29bfe" font-size="8">Risk % per trade</text>
+    <text x="510" y="135" text-anchor="middle" fill="#a29bfe" font-size="8">Max concurrent trades</text>
+    
+    <text x="660" y="75" text-anchor="middle" font-weight="600" fill="#ff9f43">⚡</text>
+    <text x="660" y="90" text-anchor="middle" font-weight="600">Execution</text>
+    <text x="660" y="105" text-anchor="middle" fill="#94a3b8" font-size="9">Instant / Pending</text>
+    <text x="660" y="120" text-anchor="middle" fill="#ff9f43" font-size="8">Spread filter</text>
+    <text x="660" y="135" text-anchor="middle" fill="#ff9f43" font-size="8">Slippage control</text>
+    
+    <!-- Row 2: File Structure -->
+    <text x="80" y="175" text-anchor="middle" font-weight="600" fill="#ffd700">📁</text>
+    <text x="80" y="190" text-anchor="middle" font-weight="600">MQ5 Source</text>
+    <text x="80" y="205" text-anchor="middle" fill="#94a3b8" font-size="8">Versioned .mq5 files</text>
+    
+    <text x="210" y="175" text-anchor="middle" font-weight="600" fill="#ff6b6b">⚙️</text>
+    <text x="210" y="190" text-anchor="middle" font-weight="600">SET Files</text>
+    <text x="210" y="205" text-anchor="middle" fill="#94a3b8" font-size="8">Optimized parameters</text>
+    
+    <text x="360" y="175" text-anchor="middle" font-weight="600" fill="#48dbfb">📋</text>
+    <text x="360" y="190" text-anchor="middle" font-weight="600">CHANGES.md</text>
+    <text x="360" y="205" text-anchor="middle" fill="#94a3b8" font-size="8">Version history</text>
+    
+    <text x="510" y="175" text-anchor="middle" font-weight="600" fill="#a29bfe">📊</text>
+    <text x="510" y="190" text-anchor="middle" font-weight="600">Indicators</text>
+    <text x="510" y="205" text-anchor="middle" fill="#94a3b8" font-size="8">EzyMap Zone/Session</text>
+    
+    <text x="660" y="175" text-anchor="middle" font-weight="600" fill="#ff9f43">🧪</text>
+    <text x="660" y="190" text-anchor="middle" font-weight="600">Diagnostics</text>
+    <text x="660" y="205" text-anchor="middle" fill="#94a3b8" font-size="8">Baseline + FixedExit</text>
+  </g>
+</svg>

@@ -1,0 +1,14 @@
+<svg width="400" height="60" viewBox="0 0 400 60" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="footGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffd700">
+        <animate attributeName="stop-color" values="#ffd700;#ff8c00;#ff6b6b;#ff9ff3;#ffd700" dur="8s" repeatCount="indefinite"/>
+      </stop>
+      <stop offset="100%" stop-color="#ff8c00">
+        <animate attributeName="stop-color" values="#ff8c00;#ff6b6b;#ff9ff3;#ffd700;#ff8c00" dur="8s" repeatCount="indefinite"/>
+      </stop>
+    </linearGradient>
+  </defs>
+  <text x="200" y="35" text-anchor="middle" font-family="Segoe UI, system-ui, sans-serif" font-weight="800" font-size="20" fill="url(#footGrad)">printezy · EzyEA</text>
+  <text x="200" y="52" text-anchor="middle" font-family="Segoe UI" font-size="10" fill="#64748b">Multi-version MetaTrader 5 EAs for Gold & Bitcoin. Prop-firm ready.</text>
+</svg>

@@ -1,0 +1,74 @@
+<svg width="240" height="240" viewBox="0 0 240 240" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="eaGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffd700">
+        <animate attributeName="stop-color" values="#ffd700;#ff8c00;#ff6b6b;#ff9ff3;#ffd700" dur="8s" repeatCount="indefinite"/>
+      </stop>
+      <stop offset="100%" stop-color="#ff8c00">
+        <animate attributeName="stop-color" values="#ff8c00;#ff6b6b;#ff9ff3;#ffd700;#ff8c00" dur="8s" repeatCount="indefinite"/>
+      </stop>
+    </linearGradient>
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffd700"/>
+      <stop offset="100%" stop-color="#ff8c00"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  
+  <!-- Outer rotating rings -->
+  <g transform="translate(120, 120)">
+    <ellipse rx="100" ry="25" fill="none" stroke="url(#ringGrad)" stroke-width="1.5" opacity="0.4" stroke-dasharray="8 4">
+      <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="20s" repeatCount="indefinite"/>
+    </ellipse>
+    <ellipse rx="80" ry="20" fill="none" stroke="url(#ringGrad)" stroke-width="1" opacity="0.3" stroke-dasharray="6 6">
+      <animateTransform attributeName="transform" type="rotate" from="360" to="0" dur="15s" repeatCount="indefinite"/>
+    </ellipse>
+    <ellipse rx="60" ry="15" fill="none" stroke="url(#ringGrad)" stroke-width="0.8" opacity="0.2" stroke-dasharray="4 8">
+      <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="12s" repeatCount="indefinite"/>
+    </ellipse>
+  </g>
+  
+  <!-- Floating gold particles -->
+  <g transform="translate(120, 120)">
+    <circle r="4" fill="#ffd700" opacity="0.8">
+      <animate attributeName="cx" values="0;70;0;-70;0" dur="7s" repeatCount="indefinite"/>
+      <animate attributeName="cy" values="-70;0;70;0;-70" dur="7s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0.3;0.9;0.3;0.9;0.3" dur="7s" repeatCount="indefinite"/>
+    </circle>
+    <circle r="3" fill="#ff8c00" opacity="0.7">
+      <animate attributeName="cx" values="0;-60;0;60;0" dur="9s" repeatCount="indefinite"/>
+      <animate attributeName="cy" values="60;0;-60;0;60" dur="9s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0.2;0.8;0.2;0.8;0.2" dur="9s" repeatCount="indefinite"/>
+    </circle>
+    <circle r="2.5" fill="#ff9ff3" opacity="0.6">
+      <animate attributeName="cx" values="0;50;0;-50;0" dur="6s" repeatCount="indefinite"/>
+      <animate attributeName="cy" values="-50;0;50;0;-50" dur="6s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0.4;1;0.4;1;0.4" dur="6s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+  
+  <!-- Central pulsing gold orb -->
+  <circle cx="120" cy="120" r="50" fill="url(#eaGrad)" filter="url(#glow)">
+    <animate attributeName="r" values="45;55;45" dur="2.5s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0.8;1;0.8" dur="2.5s" repeatCount="indefinite"/>
+  </circle>
+  
+  <!-- Inner core -->
+  <circle cx="120" cy="120" r="28" fill="#ffffff" opacity="0.15">
+    <animate attributeName="r" values="25;32;25" dur="2.5s" repeatCount="indefinite"/>
+  </circle>
+  
+  <!-- Chart/Candle symbol -->
+  <g transform="translate(120, 120)">
+    <path d="M-20 10 L-15 -5 L-10 5 L-5 -5 L0 0 L5 -8 L10 5 L15 -10 L20 10" stroke="#ffffff" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round" opacity="0.9">
+      <animate attributeName="stroke-dashoffset" values="0;40;0" dur="3s" repeatCount="indefinite"/>
+      <animate attributeName="opacity" values="0.7;1;0.7" dur="3s" repeatCount="indefinite"/>
+    </path>
+  </g>
+</svg>

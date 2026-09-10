@@ -1,0 +1,96 @@
+<svg width="900" height="400" viewBox="0 0 900 400" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="vGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffd700"/>
+      <stop offset="100%" stop-color="#ff8c00"/>
+    </linearGradient>
+    <linearGradient id="vGrad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff6b6b"/>
+      <stop offset="100%" stop-color="#ff9ff3"/>
+    </linearGradient>
+    <linearGradient id="vGrad3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#48dbfb"/>
+      <stop offset="100%" stop-color="#00cec9"/>
+    </linearGradient>
+    <linearGradient id="vGrad4" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#a29bfe"/>
+      <stop offset="100%" stop-color="#fd79a8"/>
+    </linearGradient>
+    <filter id="vGlow">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- V1: Foundation -->
+  <g transform="translate(30, 20)" filter="url(#vGlow)">
+    <rect x="0" y="0" width="260" height="180" rx="16" fill="url(#vGrad1)" opacity="0.15" stroke="url(#vGrad1)" stroke-width="1.5"/>
+    <circle cx="130" cy="50" r="35" fill="url(#vGrad1)" opacity="0.2">
+      <animate attributeName="r" values="32;38;32" dur="3s" repeatCount="indefinite"/>
+    </circle>
+    <text x="130" y="55" text-anchor="middle" font-size="28">🥇</text>
+    <text x="130" y="105" text-anchor="middle" fill="#e2e8f0" font-family="Segoe UI" font-weight="700" font-size="14">V1 Foundation</text>
+    <text x="130" y="125" text-anchor="middle" fill="#94a3b8" font-family="Segoe UI" font-size="10">EzyEA_V1_XAUUSD.mq5<br/>EzyEA_V1.1_XAUUSD.mq5</text>
+    <text x="130" y="155" text-anchor="middle" fill="#ffd700" font-family="Segoe UI" font-weight="600" font-size="9">Core logic • Gold focus</text>
+  </g>
+
+  <!-- V2: Zone Quality & Session Vol -->
+  <g transform="translate(320, 20)" filter="url(#vGlow)">
+    <rect x="0" y="0" width="260" height="180" rx="16" fill="url(#vGrad2)" opacity="0.15" stroke="url(#vGrad2)" stroke-width="1.5"/>
+    <circle cx="130" cy="50" r="35" fill="url(#vGrad2)" opacity="0.2">
+      <animate attributeName="r" values="32;38;32" dur="3.5s" repeatCount="indefinite"/>
+    </circle>
+    <text x="130" y="55" text-anchor="middle" font-size="28">📊</text>
+    <text x="130" y="105" text-anchor="middle" fill="#e2e8f0" font-family="Segoe UI" font-weight="700" font-size="14">V2 Zone Quality</text>
+    <text x="130" y="125" text-anchor="middle" fill="#94a3b8" font-family="Segoe UI" font-size="10">EzyMap_V2_0_ZONE_QUALITY.mq5<br/>EzyMap_V2_1a_SESSION_VOL.mq5</text>
+    <text x="130" y="155" text-anchor="middle" fill="#ff6b6b" font-family="Segoe UI" font-weight="600" font-size="9">5-stage pipeline • Session logic</text>
+  </g>
+
+  <!-- V2.1b: Fixed Exit & Trigger Refined -->
+  <g transform="translate(610, 20)" filter="url(#vGlow)">
+    <rect x="0" y="0" width="260" height="180" rx="16" fill="url(#vGrad3)" opacity="0.15" stroke="url(#vGrad3)" stroke-width="1.5"/>
+    <circle cx="130" cy="50" r="35" fill="url(#vGrad3)" opacity="0.2">
+      <animate attributeName="r" values="32;38;32" dur="2.5s" repeatCount="indefinite"/>
+    </circle>
+    <text x="130" y="55" text-anchor="middle" font-size="28">🎯</text>
+    <text x="130" y="105" text-anchor="middle" fill="#e2e8f0" font-family="Segoe UI" font-weight="700" font-size="14">V2.1b Precision</text>
+    <text x="130" y="125" text-anchor="middle" fill="#94a3b8" font-family="Segoe UI" font-size="10">FIXEDEXIT_TEST • TRIGGER_REFINED<br/>Full stage sets included</text>
+    <text x="130" y="155" text-anchor="middle" fill="#48dbfb" font-family="Segoe UI" font-weight="600" font-size="9">Fixed exit logic • Refined triggers</text>
+  </g>
+
+  <!-- V2.2: BTCUSD Adaptation -->
+  <g transform="translate(30, 230)" filter="url(#vGlow)">
+    <rect x="0" y="0" width="260" height="150" rx="16" fill="url(#vGrad4)" opacity="0.15" stroke="url(#vGrad4)" stroke-width="1.5"/>
+    <circle cx="130" cy="45" r="35" fill="url(#vGrad4)" opacity="0.2">
+      <animate attributeName="r" values="32;38;32" dur="4s" repeatCount="indefinite"/>
+    </circle>
+    <text x="130" y="50" text-anchor="middle" font-size="28">₿</text>
+    <text x="130" y="100" text-anchor="middle" fill="#e2e8f0" font-family="Segoe UI" font-weight="700" font-size="14">V2.2 BTCUSD</text>
+    <text x="130" y="120" text-anchor="middle" fill="#94a3b8" font-family="Segoe UI" font-size="10">BTCUSD Adaptation<br/>Diagnostic + FixedExit + Recommended</text>
+    <text x="130" y="140" text-anchor="middle" fill="#a29bfe" font-family="Segoe UI" font-weight="600" font-size="9">Multi-symbol • Crypto ready</text>
+  </g>
+
+  <!-- V3: Fresh Series -->
+  <g transform="translate(320, 230)" filter="url(#vGlow)">
+    <rect x="0" y="0" width="260" height="150" rx="16" fill="#00cec9" opacity="0.15" stroke="#00cec9" stroke-width="1.5"/>
+    <circle cx="130" cy="45" r="35" fill="#00cec9" opacity="0.2">
+      <animate attributeName="r" values="32;38;32" dur="3.2s" repeatCount="indefinite"/>
+    </circle>
+    <text x="130" y="50" text-anchor="middle" font-size="28">🔥</text>
+    <text x="130" y="100" text-anchor="middle" fill="#e2e8f0" font-family="Segoe UI" font-weight="700" font-size="14">V3 Fresh Series</text>
+    <text x="130" y="120" text-anchor="middle" fill="#94a3b8" font-family="Segoe UI" font-size="10">V3.116 • V3.126 • V3.140<br/>V3.176 • V3.184 • V3.190</text>
+    <text x="130" y="140" text-anchor="middle" fill="#00cec9" font-family="Segoe UI" font-weight="600" font-size="9">Synchronized • Governors • Trail SL</text>
+  </g>
+
+  <!-- V4 & EzyScalp -->
+  <g transform="translate(610, 230)" filter="url(#vGlow)">
+    <rect x="0" y="0" width="260" height="150" rx="16" fill="#ff9f43" opacity="0.15" stroke="#ff9f43" stroke-width="1.5"/>
+    <circle cx="130" cy="45" r="35" fill="#ff9f43" opacity="0.2">
+      <animate attributeName="r" values="32;38;32" dur="3.8s" repeatCount="indefinite"/>
+    </circle>
+    <text x="130" y="50" text-anchor="middle" font-size="28">⚡</text>
+    <text x="130" y="100" text-anchor="middle" fill="#e2e8f0" font-family="Segoe UI" font-weight="700" font-size="14">V4 & EzyScalp</text>
+    <text x="130" y="120" text-anchor="middle" fill="#94a3b8" font-family="Segoe UI" font-size="10">EzyEA_V4_XAUUSD.mq5<br/>EzyScalp V1/V2 FRESH</text>
+    <text x="130" y="140" text-anchor="middle" fill="#ff9f43" font-family="Segoe UI" font-weight="600" font-size="9">Scalping • SND • High freq</text>
+  </g>
+</svg>
